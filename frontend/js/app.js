@@ -433,8 +433,9 @@ async function loadAllCharts() {
 // ============ Custom Station ============
 function handleCustomStation() {
     const input = elements.customStation.value.trim().toUpperCase();
-    if (!input || input.length !== 4) return;
-    if (!/^[A-Z]{4}$/.test(input)) return;
+    // Allow 3 or 4 letter station codes
+    if (!input || input.length < 3 || input.length > 4) return;
+    if (!/^[A-Z]{3,4}$/.test(input)) return;
     if (input === state.station) return;
 
     // Deselect other buttons

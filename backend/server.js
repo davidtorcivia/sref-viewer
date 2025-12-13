@@ -199,13 +199,13 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
     const date = req.query.date || new Date().toISOString().split('T')[0];
 
     // Validate inputs
-    const validStations = ['JFK', 'LGA', 'EWR', 'ISP', 'HPN', 'TEB'];
+    // Station: allow any 3-4 letter code (NOAA will 404 for invalid stations)
+    if (!/^[A-Za-z]{3,4}$/.test(station)) {
+        return res.status(400).json({ error: 'Invalid station format' });
+    }
     const validRuns = ['03', '09', '15', '21'];
     const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
 
-    if (!validStations.includes(station.toUpperCase())) {
-        return res.status(400).json({ error: 'Invalid station' });
-    }
     if (!validRuns.includes(run)) {
         return res.status(400).json({ error: 'Invalid run time' });
     }
