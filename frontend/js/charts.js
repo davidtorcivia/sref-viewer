@@ -37,7 +37,6 @@ function isLightMode() {
  */
 function getThemeColors() {
     const light = isLightMode();
-    console.log('[Theme]', light ? 'LIGHT mode' : 'DARK mode');
     return {
         gridColor: light ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.08)',
         tickColor: light ? '#444' : '#999',

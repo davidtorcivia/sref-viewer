@@ -84,39 +84,7 @@ export function getEnsembleStats(data, useMax = false) {
     };
 }
 
-/**
- * Check if a specific run has full ensemble data available
- * @param {string} station - Airport code
- * @param {string} run - Model run time
- * @param {string} date - Date in YYYY-MM-DD format
- * @returns {Promise<boolean>} True if full ensemble data is available
- */
-export async function checkRunAvailability(station, run, date) {
-    try {
-        const data = await fetchSREFData(station, run, '3hrly-TMP', date);
 
-        // Count ensemble members with actual data (not just keys, need real data points)
-        // SREF has ~26 members, we require at least 10 with data to consider it "available"
-        let validMemberCount = 0;
-
-        for (const [label, points] of Object.entries(data)) {
-            if (label === 'Mean') continue; // Skip computed mean
-
-            // Check this member has real data points (at least 5 time steps)
-            if (Array.isArray(points) && points.length >= 5) {
-                validMemberCount++;
-            }
-        }
-
-        console.log(`[RUN CHECK] ${station}/${run}: ${validMemberCount} valid members`);
-
-        // Require at least 10 ensemble members with data
-        return validMemberCount >= 10;
-    } catch (err) {
-        console.log(`[RUN CHECK] ${station}/${run}: failed - ${err.message}`);
-        return false;
-    }
-}
 
 /**
  * Check backend health
