@@ -15,7 +15,18 @@ const state = {
     data: {},
     hasSnow: false,
     currentView: { snow: 'total', precip: 'total' },
-    isLoading: false
+    isLoading: false,
+    // Run comparison feature
+    previousRuns: {}, // { '03': { param: data }, '09': { param: data }, ... }
+    visibleRuns: {}, // { '03': true, '09': false, ... } - which runs to overlay
+};
+
+// Run colors for comparison overlay
+const RUN_COLORS = {
+    '03': '#ff9f43',  // orange
+    '09': '#10ac84',  // green
+    '15': '#ee5a24',  // red
+    '21': '#8854d0',  // purple
 };
 
 // ============ DOM Elements ============
@@ -428,6 +439,73 @@ async function loadAllCharts() {
 
     state.isLoading = false;
     elements.reloadBtn.disabled = false;
+
+    // Fetch previous runs in background for trend comparison
+    fetchPreviousRuns();
+}
+
+// ============ Previous Runs for Trend Comparison ============
+async function fetchPreviousRuns() {
+    const allRuns = ['03', '09', '15', '21'];
+    const otherRuns = allRuns.filter(r => r !== state.run);
+
+    // Clear previous data
+    state.previousRuns = {};
+
+    // Fetch each run's data in parallel
+    for (const run of otherRuns) {
+        try {
+            // Just fetch the main parameter for trend comparison (use snow or precip)
+            const param = state.hasSnow ? 'Total-SNO' : 'Total-QPF';
+            const data = await fetchSREFData(state.station, run, param, state.date);
+
+            if (data && Object.keys(data).length > 0) {
+                state.previousRuns[run] = { [param]: data };
+                console.log(`[TREND] Loaded ${run}Z ${param}`);
+            }
+        } catch (err) {
+            console.log(`[TREND] ${run}Z not available:`, err.message);
+        }
+    }
+
+    // Update trend text
+    updateTrendText();
+}
+
+function updateTrendText() {
+    const param = state.hasSnow ? 'Total-SNO' : 'Total-QPF';
+    const currentData = state.data[param];
+    if (!currentData) return;
+
+    const currentStats = getEnsembleStats(currentData, false);
+    if (!currentStats) return;
+
+    // Find the most recent previous run
+    const allRuns = ['03', '09', '15', '21'];
+    const currentIdx = allRuns.indexOf(state.run);
+    const prevRun = allRuns[(currentIdx - 1 + 4) % 4]; // Previous in cycle
+
+    const prevData = state.previousRuns[prevRun]?.[param];
+    if (!prevData) return;
+
+    const prevStats = getEnsembleStats(prevData, false);
+    if (!prevStats) return;
+
+    const delta = currentStats.mean - prevStats.mean;
+    const absChange = Math.abs(delta);
+
+    // Only show trend if meaningful change
+    if (absChange < 0.1) return;
+
+    const arrow = delta > 0 ? '↑' : '↓';
+    const direction = delta > 0 ? 'higher' : 'lower';
+    const unit = state.hasSnow ? 'in' : 'in';
+
+    // Append trend to weather summary
+    const summaryEl = elements.weatherSummary;
+    if (summaryEl && !summaryEl.innerHTML.includes('vs')) {
+        summaryEl.innerHTML += ` <span class="trend-text">${arrow} trending ${direction} vs ${prevRun}Z (${delta > 0 ? '+' : ''}${delta.toFixed(1)} ${unit})</span>`;
+    }
 }
 
 // ============ Custom Station ============

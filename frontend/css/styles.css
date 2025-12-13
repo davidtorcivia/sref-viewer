@@ -244,6 +244,29 @@ select:disabled {
     color: var(--temp);
 }
 
+.summary-bar .trend-text {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin-left: 0.5rem;
+}
+
+/* Run comparison toggle colors */
+.run-toggle-03 {
+    color: #ff9f43;
+}
+
+.run-toggle-09 {
+    color: #10ac84;
+}
+
+.run-toggle-15 {
+    color: #ee5a24;
+}
+
+.run-toggle-21 {
+    color: #8854d0;
+}
+
 /* ============ Tooltips ============ */
 .tooltip-trigger {
     position: relative;
