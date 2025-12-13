@@ -211,3 +211,20 @@ export function destroyAllCharts() {
         delete chartInstances[param];
     }
 }
+
+/**
+ * Download chart as PNG image
+ * @param {string} param - Parameter name
+ * @param {string} station - Station code
+ * @param {string} run - Model run
+ */
+export function downloadChart(param, station, run) {
+    const chart = chartInstances[param];
+    if (!chart) return;
+
+    const link = document.createElement('a');
+    link.download = `SREF_${station}_${run}Z_${param}.png`;
+    link.href = chart.toBase64Image();
+    link.click();
+}
+

@@ -177,6 +177,126 @@ select:disabled {
     align-items: center;
 }
 
+/* Custom Station Input */
+#customStation {
+    width: 60px;
+    text-align: center;
+    text-transform: uppercase;
+    font-weight: 500;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.5rem 0.4rem;
+    font-size: 0.85rem;
+}
+
+#customStation::placeholder {
+    color: var(--text-dim);
+    opacity: 0.5;
+}
+
+#customStation:focus {
+    outline: none;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+/* Help Button */
+.help-btn {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 50%;
+    min-height: auto;
+}
+
+/* ============ Weather Summary Bar ============ */
+.summary-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 1rem;
+    text-align: center;
+    font-size: 0.95rem;
+}
+
+.summary-bar .snow-icon {
+    margin-right: 0.3rem;
+}
+
+.summary-bar .high-confidence {
+    color: var(--precip);
+}
+
+.summary-bar .moderate-confidence {
+    color: var(--wind);
+}
+
+.summary-bar .low-confidence {
+    color: var(--temp);
+}
+
+/* ============ Tooltips ============ */
+.tooltip-trigger {
+    position: relative;
+    cursor: help;
+}
+
+.tooltip-trigger::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 120%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    color: var(--text);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 400;
+    white-space: nowrap;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s, visibility 0.15s;
+    z-index: 1000;
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    max-width: 250px;
+    white-space: normal;
+    text-align: left;
+}
+
+.tooltip-trigger:hover::after {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Download Button - positioned in chart body lower-left */
+.download-btn {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    opacity: 0.6;
+    z-index: 10;
+    line-height: 1;
+}
+
+.download-btn:hover {
+    background: var(--surface2);
+    color: var(--text);
+    border-color: var(--text-dim);
+    opacity: 1;
+}
+
 /* ============ Main Content ============ */
 .main {
     padding: 1rem;
@@ -661,6 +781,32 @@ select:disabled {
     .mean-line {
         background: #333;
     }
+
+    /* Light mode: custom station input */
+    #customStation {
+        color: var(--text-dim);
+        background: rgba(0, 0, 0, 0.05);
+    }
+
+    #customStation:focus {
+        background: rgba(0, 0, 0, 0.08);
+        color: var(--text);
+    }
+
+    /* Light mode: modal */
+    .modal-overlay {
+        background: rgba(0, 0, 0, 0.5);
+    }
+
+    /* Light mode: download button */
+    .download-btn {
+        border-color: var(--border);
+        color: var(--text-dim);
+    }
+
+    .download-btn:hover {
+        background: var(--surface2);
+    }
 }
 
 /* Reduce motion for accessibility */
@@ -689,4 +835,65 @@ select:disabled {
     body {
         padding-bottom: max(60px, calc(60px + env(safe-area-inset-bottom)));
     }
+}
+
+/* ============ Modal ============ */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    padding: 1rem;
+}
+
+.modal-content {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    max-width: 500px;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.modal-content h2 {
+    margin-bottom: 1rem;
+    color: var(--text);
+    font-size: 1.25rem;
+}
+
+.modal-content h3 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    color: var(--accent);
+    font-size: 1rem;
+}
+
+.modal-content p {
+    color: var(--text-dim);
+    line-height: 1.6;
+    margin-bottom: 0.75rem;
+}
+
+.modal-content ul {
+    color: var(--text-dim);
+    margin-left: 1.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.modal-content li {
+    margin-bottom: 0.25rem;
+    line-height: 1.5;
+}
+
+.modal-content .btn {
+    margin-top: 1rem;
+    width: 100%;
 }

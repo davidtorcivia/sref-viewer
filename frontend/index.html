@@ -26,6 +26,9 @@
                 <button class="active" data-val="JFK">JFK</button>
                 <button data-val="LGA">LGA</button>
                 <button data-val="EWR">EWR</button>
+                <input type="text" id="customStation" placeholder="ICAO" maxlength="4"
+                    title="Enter any 4-letter ICAO airport code">
+                <button id="customStationBtn" title="Load custom station">Go</button>
             </div>
 
             <input type="date" id="dateInput">
@@ -40,8 +43,14 @@
             <div class="time-display" id="timeDisplay">--:-- ET</div>
 
             <button class="btn" id="reloadBtn">Reload</button>
+            <button class="btn help-btn" id="helpBtn" title="What is this?">?</button>
         </div>
     </header>
+
+    <!-- Weather Summary Bar -->
+    <div class="summary-bar" id="summaryBar">
+        <span id="weatherSummary">Loading forecast...</span>
+    </div>
 
     <main class="main" id="mainContent">
         <!-- Chart sections will be dynamically generated -->

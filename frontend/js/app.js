@@ -5,7 +5,7 @@
 
 import { CONFIG, getLatestRun, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
 import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
-import { createChart, toggleCore } from './charts.js';
+import { createChart, toggleCore, downloadChart } from './charts.js';
 
 // ============ Application State ============
 const state = {
@@ -23,10 +23,13 @@ const elements = {
     pageTitle: null,
     mainContent: null,
     stationBtns: null,
+    customStation: null,
     dateInput: null,
     runSelect: null,
     timeDisplay: null,
     reloadBtn: null,
+    helpBtn: null,
+    weatherSummary: null,
     status: null,
     lastUpdate: null
 };
@@ -37,15 +40,24 @@ async function init() {
     elements.pageTitle = document.getElementById('pageTitle');
     elements.mainContent = document.getElementById('mainContent');
     elements.stationBtns = document.getElementById('stationBtns');
+    elements.customStation = document.getElementById('customStation');
     elements.dateInput = document.getElementById('dateInput');
     elements.runSelect = document.getElementById('runSelect');
     elements.timeDisplay = document.getElementById('timeDisplay');
     elements.reloadBtn = document.getElementById('reloadBtn');
+    elements.helpBtn = document.getElementById('helpBtn');
+    elements.weatherSummary = document.getElementById('weatherSummary');
     elements.status = document.getElementById('status');
     elements.lastUpdate = document.getElementById('lastUpdate');
 
     // Set initial date
     elements.dateInput.value = state.date;
+
+    // Load custom station from localStorage
+    const savedStation = localStorage.getItem('sref-custom-station');
+    if (savedStation) {
+        elements.customStation.value = savedStation;
+    }
 
     // Update time display
     updateTimeDisplay();
@@ -56,6 +68,20 @@ async function init() {
     elements.dateInput.addEventListener('change', handleDateChange);
     elements.runSelect.addEventListener('change', handleRunChange);
     elements.reloadBtn.addEventListener('click', () => loadAllCharts());
+    elements.helpBtn.addEventListener('click', showHelpModal);
+
+    // Custom station input
+    elements.customStation.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            handleCustomStation();
+        }
+    });
+
+    // Custom station Go button
+    const customStationBtn = document.getElementById('customStationBtn');
+    if (customStationBtn) {
+        customStationBtn.addEventListener('click', handleCustomStation);
+    }
 
     // Handle resize for responsive charts
     let resizeTimeout;
@@ -193,14 +219,15 @@ function buildLayout() {
                                     ` : ''}
                                 </div>
                                 <div class="chart-actions">
-                                    <button class="active" data-core="ARW" data-param="${param}">ARW</button>
-                                    <button class="active" data-core="NMB" data-param="${param}">NMB</button>
-                                    <button class="active" data-core="Mean" data-param="${param}">Mean</button>
+                                    <button class="active tooltip-trigger" data-core="ARW" data-param="${param}" data-tooltip="Advanced Research WRF core (red lines)">ARW</button>
+                                    <button class="active tooltip-trigger" data-core="NMB" data-param="${param}" data-tooltip="NEMS-NMMB core (blue lines)">NMB</button>
+                                    <button class="active tooltip-trigger" data-core="Mean" data-param="${param}" data-tooltip="Average of all 26 ensemble members">Mean</button>
                                 </div>
                             </div>
                             <div class="chart-body">
                                 <div class="loading" id="loading-${param}">Loading...</div>
                                 <canvas id="chart-${param}"></canvas>
+                                <button class="download-btn" data-param="${param}" title="Download as PNG">⬇</button>
                             </div>
                             <div class="axis-label">Forecast Time (Eastern)</div>
                             <div class="summary-row" id="summary-${param}" style="display:none">
@@ -253,12 +280,20 @@ function attachEventHandlers() {
     });
 
     // Core toggle handlers
-    document.querySelectorAll('.chart-actions button').forEach(btn => {
+    document.querySelectorAll('.chart-actions button[data-core]').forEach(btn => {
         btn.addEventListener('click', () => {
             const param = btn.dataset.param;
             const core = btn.dataset.core;
             btn.classList.toggle('active');
             toggleCore(param, core);
+        });
+    });
+
+    // Download button handlers
+    document.querySelectorAll('.download-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const param = btn.dataset.param;
+            downloadChart(param, state.station, state.run);
         });
     });
 
@@ -388,9 +423,120 @@ async function loadAllCharts() {
         timeZone: 'America/New_York'
     })} ET`;
 
+    // Update weather summary
+    updateWeatherSummary();
+
     state.isLoading = false;
     elements.reloadBtn.disabled = false;
 }
 
+// ============ Custom Station ============
+function handleCustomStation() {
+    const input = elements.customStation.value.trim().toUpperCase();
+    if (!input || input.length !== 4) return;
+    if (!/^[A-Z]{4}$/.test(input)) return;
+    if (input === state.station) return;
+
+    // Deselect other buttons
+    document.querySelectorAll('#stationBtns button').forEach(b => b.classList.remove('active'));
+
+    // Save and load
+    localStorage.setItem('sref-custom-station', input);
+    state.station = input;
+    loadAllCharts();
+}
+
+// ============ Weather Summary ============
+function updateWeatherSummary() {
+    if (!elements.weatherSummary) return;
+
+    const snowData = state.data['Total-SNO'];
+    const precipData = state.data['Total-QPF'];
+
+    if (snowData) {
+        const stats = getEnsembleStats(snowData, false);
+        if (stats && stats.max > 0.5) {
+            const confidence = getConfidenceLevel(stats.spread);
+            const range = `${stats.min.toFixed(1)}-${stats.max.toFixed(1)}`;
+            elements.weatherSummary.innerHTML = `
+                <span class="snow-icon">❄</span>
+                <strong>Snow likely:</strong> ${range} in expected 
+                <span class="${confidence.class}">(${confidence.text})</span>
+            `;
+            return;
+        }
+    }
+
+    if (precipData) {
+        const stats = getEnsembleStats(precipData, false);
+        if (stats && stats.max > 0.1) {
+            const confidence = getConfidenceLevel(stats.spread);
+            const range = `${stats.min.toFixed(2)}-${stats.max.toFixed(2)}`;
+            elements.weatherSummary.innerHTML = `
+                <strong>Rain likely:</strong> ${range} in expected 
+                <span class="${confidence.class}">(${confidence.text})</span>
+            `;
+            return;
+        }
+    }
+
+    elements.weatherSummary.textContent = 'Dry conditions expected';
+}
+
+function getConfidenceLevel(spread) {
+    if (spread < 1) return { text: 'high confidence', class: 'high-confidence' };
+    if (spread < 3) return { text: 'moderate spread', class: 'moderate-confidence' };
+    return { text: 'low agreement', class: 'low-confidence' };
+}
+
+// ============ Help Modal ============
+function showHelpModal() {
+    // Create modal if it doesn't exist
+    let modal = document.getElementById('helpModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'helpModal';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal-content">
+                <h2>Understanding SREF Ensemble Plumes</h2>
+                <p>This tool visualizes forecast data from NOAA's <strong>Short Range Ensemble Forecast (SREF)</strong> model.</p>
+                
+                <h3>What are the colored lines?</h3>
+                <p>Each line represents a different "ensemble member" - a slightly different model run. Having multiple runs helps show forecast uncertainty.</p>
+                
+                <h3>ARW vs NMB</h3>
+                <ul>
+                    <li><strong>ARW</strong> (red tones) - Advanced Research WRF dynamical core</li>
+                    <li><strong>NMB</strong> (blue tones) - NEMS-NMMB dynamical core</li>
+                </ul>
+                <p>These are two different physics configurations. When they agree, confidence is higher.</p>
+                
+                <h3>The Mean Line</h3>
+                <p>The thick white/black line is the <strong>ensemble mean</strong> - the average of all 26 members. It's often the best single forecast.</p>
+                
+                <h3>Model Runs</h3>
+                <p>SREF runs 4 times daily: 03Z, 09Z, 15Z, 21Z (UTC). Data is typically available ~2 hours after each run.</p>
+                
+                <h3>Tips</h3>
+                <ul>
+                    <li>Tight clustering = high confidence</li>
+                    <li>Wide spread = uncertain forecast</li>
+                    <li>ARW/NMB disagreement = model uncertainty</li>
+                </ul>
+                
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">Got it!</button>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        // Close on backdrop click
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) modal.remove();
+        });
+    }
+}
+
 // ============ Start Application ============
 document.addEventListener('DOMContentLoaded', init);
+
