@@ -413,16 +413,19 @@ async function loadAllCharts() {
     // Build layout based on snow status
     buildLayout();
 
+    // Render comparison controls
+    renderComparisonControls();
+
     // Load all charts
     const paramsToLoad = state.hasSnow ? CONFIG.snowOrder : CONFIG.defaultOrder;
 
     for (const param of paramsToLoad) {
         if (param === 'Total-SNO' && state.data['Total-SNO']) {
-            createChart(param, state.data['Total-SNO']);
+            createChart(param, state.data['Total-SNO'], getOverlayData('Total-SNO'));
             document.getElementById(`loading-${param}`)?.classList.add('hidden');
             updateSummary(param, state.data['Total-SNO']);
         } else {
-            await loadChart(param);
+            loadChart(param);
         }
     }
 
@@ -442,6 +445,63 @@ async function loadAllCharts() {
 
     // Fetch previous runs in background for trend comparison
     fetchPreviousRuns();
+}
+
+function getOverlayData(param) {
+    const overlays = [];
+    for (const [run, isVisible] of Object.entries(state.visibleRuns)) {
+        if (!isVisible) continue;
+
+        // Find data for this run
+        const runData = state.previousRuns[run]?.[param];
+        if (!runData) continue;
+
+        // Find Mean line
+        const meanPoints = runData['Mean'];
+        if (meanPoints) {
+            overlays.push({
+                label: `${run}Z Mean`,
+                data: meanPoints,
+                color: RUN_COLORS[run] || '#888'
+            });
+        }
+    }
+    return overlays;
+}
+
+function renderComparisonControls() {
+    // Inject controls into summary bar or new container
+    // We'll append to summary-bar for now
+    const bar = elements.weatherSummary.parentElement;
+    let controls = document.getElementById('runComparison');
+    if (!controls) {
+        controls = document.createElement('div');
+        controls.id = 'runComparison';
+        controls.className = 'run-comparison';
+        bar.appendChild(controls);
+    }
+
+    // Only show other runs
+    const allRuns = ['03', '09', '15', '21'];
+    const otherRuns = allRuns.filter(r => r !== state.run);
+
+    controls.innerHTML = `
+        <span class="comp-label">Compare:</span>
+        ${otherRuns.map(run => `
+            <label class="run-toggle run-toggle-${run}">
+                <input type="checkbox" value="${run}" ${state.visibleRuns[run] ? 'checked' : ''}>
+                ${run}Z
+            </label>
+        `).join('')}
+    `;
+
+    // Add listeners
+    controls.querySelectorAll('input').forEach(input => {
+        input.addEventListener('change', (e) => {
+            state.visibleRuns[e.target.value] = e.target.checked;
+            rebuildCharts();
+        });
+    });
 }
 
 // ============ Previous Runs for Trend Comparison ============
@@ -510,17 +570,30 @@ function updateTrendText() {
 
 // ============ Custom Station ============
 function handleCustomStation() {
+    console.log('Custom station triggered');
     const input = elements.customStation.value.trim().toUpperCase();
+
     // Allow 3 or 4 letter station codes
-    if (!input || input.length < 3 || input.length > 4) return;
-    if (!/^[A-Z]{3,4}$/.test(input)) return;
-    if (input === state.station) return;
+    if (!input || input.length < 3 || input.length > 4) {
+        console.log('Invalid length:', input.length);
+        return;
+    }
 
-    // Deselect other buttons
-    document.querySelectorAll('#stationBtns button').forEach(b => b.classList.remove('active'));
+    if (!/^[A-Z]{3,4}$/.test(input)) {
+        console.log('Invalid charset');
+        return;
+    }
 
-    // Save and load
+    // Update local storage and state
+    console.log('Switching to custom station:', input);
     localStorage.setItem('sref-custom-station', input);
+
+    // Update UI
+    document.querySelectorAll('#stationBtns button').forEach(b => b.classList.remove('active'));
+    // If the input matches a button, active it, otherwise just load
+    const existingBtn = document.querySelector(`#stationBtns button[data-val="${input}"]`);
+    if (existingBtn) existingBtn.classList.add('active');
+
     state.station = input;
     loadAllCharts();
 }

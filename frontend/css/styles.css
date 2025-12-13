@@ -179,27 +179,30 @@ select:disabled {
 
 /* Custom Station Input */
 #customStation {
-    width: 55px;
+    width: 60px;
     text-align: center;
     text-transform: uppercase;
     font-weight: 500;
-    background: var(--surface2);
+    font-family: inherit;
+    background: transparent !important;
     border: none;
+    border-left: 1px solid var(--border);
+    border-radius: 0;
     color: var(--text);
-    padding: 0.5rem 0.3rem;
-    font-size: 0.85rem;
-    box-sizing: border-box;
+    padding: 0 0.5rem;
+    font-size: 0.9rem;
+    height: 100%;
 }
 
 #customStation::placeholder {
     color: var(--text-dim);
-    opacity: 0.7;
+    opacity: 0.5;
 }
 
 #customStation:focus {
     outline: none;
+    background: rgba(255, 255, 255, 0.05) !important;
     color: var(--text);
-    background: var(--surface);
 }
 
 /* Custom Station Go Button */
@@ -265,6 +268,42 @@ select:disabled {
 
 .run-toggle-21 {
     color: #8854d0;
+}
+
+.run-comparison {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.8rem;
+    margin-left: 1.5rem;
+    font-size: 0.85rem;
+    border-left: 1px solid var(--border);
+    padding-left: 1rem;
+}
+
+.comp-label {
+    color: var(--text-dim);
+    font-weight: 500;
+}
+
+.run-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
+    user-select: none;
+    font-weight: 500;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.run-toggle:hover,
+.run-toggle:has(input:checked) {
+    opacity: 1;
+}
+
+.run-toggle input {
+    accent-color: currentColor;
+    cursor: pointer;
 }
 
 /* ============ Tooltips ============ */

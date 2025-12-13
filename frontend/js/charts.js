@@ -53,7 +53,14 @@ function getThemeColors() {
  * @param {Object} data - Ensemble data
  * @returns {Chart} Chart instance
  */
-export function createChart(param, data) {
+/**
+ * Create or update a chart
+ * @param {string} param - Parameter name
+ * @param {Object} data - Ensemble data
+ * @param {Array} overlayData - Array of { label, data, color } for overlays
+ * @returns {Chart} Chart instance
+ */
+export function createChart(param, data, overlayData = []) {
     const info = CONFIG.params[param];
     const responsive = getResponsiveOptions();
     const theme = getThemeColors();
@@ -61,8 +68,34 @@ export function createChart(param, data) {
 
     // Check if this is wind data - we may need to convert
     const isWind = info.type === 'wind';
-    const displayUnit = isWind ? getWindUnit() : info.unit;
+    const windUnit = isWind ? getWindUnit() : null;
 
+    // 1. Add Overlay Datasets (Previous Runs) first so they are behind (or handled by order)
+    if (overlayData && overlayData.length > 0) {
+        for (const overlay of overlayData) {
+            const points = overlay.data;
+            if (!points || points.length === 0) continue;
+
+            const chartPoints = isWind
+                ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
+                : points;
+
+            datasets.push({
+                label: overlay.label, // e.g., "09Z Mean"
+                data: chartPoints,
+                borderColor: overlay.color,
+                borderWidth: 2,
+                borderDash: [6, 4], // Dashed line
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                tension: 0.3,
+                fill: false,
+                order: 2, // Behind main mean
+            });
+        }
+    }
+
+    // 2. Add Current Run Datasets
     for (const [label, points] of Object.entries(data)) {
         if (points.length === 0) continue;
 
@@ -83,7 +116,7 @@ export function createChart(param, data) {
             pointHoverRadius: isMean ? responsive.pointHoverRadius + 2 : responsive.pointHoverRadius,
             tension: 0.3,
             fill: false,
-            order: isMean ? 0 : 1,
+            order: isMean ? 0 : 1, // Mean on top, members below
             _core: isMean ? 'Mean' : (isARW ? 'ARW' : 'NMB')
         });
     }
