@@ -4,15 +4,14 @@
  */
 
 import { CONFIG, getLatestRun, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
-import { fetchSREFData, hasSnowForecast, getEnsembleStats, checkRunAvailability } from './api.js';
+import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
 import { createChart, toggleCore } from './charts.js';
 
 // ============ Application State ============
 const state = {
     station: 'JFK',
     date: new Date().toISOString().split('T')[0],
-    run: null, // Will be set after checking availability
-    availableRuns: [],
+    run: null, // Will be set by initializeRunSelection
     data: {},
     hasSnow: false,
     currentView: { snow: 'total', precip: 'total' },
@@ -69,49 +68,30 @@ async function init() {
         }, 250);
     });
 
-    // Check available runs and load data
-    await checkAndLoadRuns();
+    // Initialize run selection and load data
+    initializeRunSelection();
 }
 
-// ============ Run Availability ============
-async function checkAndLoadRuns() {
-    elements.status.textContent = 'Checking available runs...';
-    elements.runSelect.disabled = true;
-
-    const runs = ['21', '15', '09', '03']; // Check newest first
-    const available = [];
-
-    for (const run of runs) {
-        const hasData = await checkRunAvailability(state.station, run, state.date);
-        if (hasData) {
-            available.push(run);
-        }
-    }
-
-    state.availableRuns = available;
-    updateRunSelector();
-
-    // Select the latest available run, or fall back to calculated
-    if (available.length > 0) {
-        state.run = available[0]; // Most recent available
-    } else {
-        state.run = getLatestRun(); // Fallback
-    }
-
-    elements.runSelect.value = state.run;
-    elements.runSelect.disabled = false;
-
-    await loadAllCharts();
-}
-
-function updateRunSelector() {
+// ============ Run Selection ============
+/**
+ * Initialize run selection based on time logic.
+ * - All runs are always selectable (older data should always exist)
+ * - Auto-select the run that's most likely to have data based on current time
+ * - If data isn't ready, user sees a loading error but can try again later
+ */
+function initializeRunSelection() {
+    // All runs are always enabled - user can select any
     const options = elements.runSelect.querySelectorAll('option');
     options.forEach(opt => {
-        const run = opt.value;
-        const isAvailable = state.availableRuns.includes(run);
-        opt.textContent = `${run}Z${isAvailable ? '' : ' (no data)'}`;
-        opt.disabled = !isAvailable;
+        opt.disabled = false;
+        opt.textContent = `${opt.value}Z`;
     });
+
+    // Auto-select the most likely available run based on current UTC time
+    state.run = getLatestRun();
+    elements.runSelect.value = state.run;
+
+    loadAllCharts();
 }
 
 // ============ Event Handlers ============
@@ -121,12 +101,12 @@ function handleStationClick(e) {
     document.querySelectorAll('#stationBtns button').forEach(b => b.classList.remove('active'));
     e.target.classList.add('active');
     state.station = e.target.dataset.val;
-    checkAndLoadRuns();
+    loadAllCharts();
 }
 
-async function handleDateChange(e) {
+function handleDateChange(e) {
     state.date = e.target.value;
-    await checkAndLoadRuns();
+    loadAllCharts();
 }
 
 function handleRunChange(e) {

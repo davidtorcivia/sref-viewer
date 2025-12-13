@@ -25,24 +25,26 @@ function getResponsiveOptions() {
 }
 
 /**
- * Check if dark mode is active
+ * Check if light mode is active (explicitly check for light preference)
  */
-function isDarkMode() {
-    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+function isLightMode() {
+    if (!window.matchMedia) return false;
+    return window.matchMedia('(prefers-color-scheme: light)').matches;
 }
 
 /**
  * Get theme-aware colors for charts
  */
 function getThemeColors() {
-    const dark = isDarkMode();
+    const light = isLightMode();
+    console.log('[Theme]', light ? 'LIGHT mode' : 'DARK mode');
     return {
-        gridColor: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.15)',
-        tickColor: dark ? '#999' : '#555',
-        meanLineColor: dark ? '#ffffff' : '#000000',
-        tooltipBg: dark ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.95)',
-        tooltipText: dark ? '#fff' : '#1c1c1e',
-        tooltipBorder: dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.15)'
+        gridColor: light ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.08)',
+        tickColor: light ? '#444' : '#999',
+        meanLineColor: light ? '#000000' : '#ffffff',
+        tooltipBg: light ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.9)',
+        tooltipText: light ? '#1c1c1e' : '#fff',
+        tooltipBorder: light ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.1)'
     };
 }
 

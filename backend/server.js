@@ -19,11 +19,11 @@ const MODEL_RUNS = [3, 9, 15, 21];
 function getCacheTTL(runHour) {
     const now = new Date();
     const currentUTC = now.getUTCHours();
-    
+
     // Find the next run after the requested one
     const runIndex = MODEL_RUNS.indexOf(runHour);
     const nextRunHour = MODEL_RUNS[(runIndex + 1) % MODEL_RUNS.length];
-    
+
     // Calculate hours until next run + 2 hours for processing
     let hoursUntilNext;
     if (nextRunHour > currentUTC) {
@@ -31,7 +31,7 @@ function getCacheTTL(runHour) {
     } else {
         hoursUntilNext = (24 - currentUTC) + nextRunHour + 2;
     }
-    
+
     // Minimum 1 hour, maximum 8 hours
     const ttlHours = Math.max(1, Math.min(8, hoursUntilNext));
     return ttlHours * 60 * 60 * 1000;
@@ -43,12 +43,12 @@ function getCacheTTL(runHour) {
 function getFromCache(key) {
     const entry = cache.get(key);
     if (!entry) return null;
-    
+
     if (Date.now() > entry.expires) {
         cache.delete(key);
         return null;
     }
-    
+
     return entry.data;
 }
 
@@ -61,7 +61,7 @@ function setInCache(key, data, ttlMs) {
         expires: Date.now() + ttlMs,
         cachedAt: new Date().toISOString()
     });
-    
+
     // Prune old entries periodically (keep cache under control)
     if (cache.size > 1000) {
         const now = Date.now();
@@ -81,7 +81,7 @@ function fetchFromNOAA(station, run, param, date) {
             `search=${station}-${run}-${param}` +
             `&file=json_sid/${ymd}_${run}/${station}` +
             `&mem=:&means=`;
-        
+
         const options = {
             hostname: 'www.spc.noaa.gov',
             port: 443,
@@ -92,18 +92,18 @@ function fetchFromNOAA(station, run, param, date) {
                 'Accept': 'application/json'
             }
         };
-        
+
         const req = https.request(options, (res) => {
             let data = '';
-            
+
             res.on('data', chunk => { data += chunk; });
-            
+
             res.on('end', () => {
                 if (res.statusCode !== 200) {
                     reject(new Error(`NOAA returned ${res.statusCode}`));
                     return;
                 }
-                
+
                 try {
                     // NOAA sometimes double-encodes JSON
                     let parsed;
@@ -118,13 +118,13 @@ function fetchFromNOAA(station, run, param, date) {
                 }
             });
         });
-        
+
         req.on('error', reject);
         req.setTimeout(15000, () => {
             req.destroy();
             reject(new Error('Request timeout'));
         });
-        
+
         req.end();
     });
 }
@@ -135,20 +135,20 @@ function fetchFromNOAA(station, run, param, date) {
 function processData(raw) {
     const processed = {};
     const timePoints = new Set();
-    
+
     for (const [label, series] of Object.entries(raw)) {
         if (!series.data || series.data.length === 0) continue;
-        
+
         processed[label] = series.data.map(([time, value]) => {
             timePoints.add(time);
             return { x: time, y: parseFloat(value) || 0 };
         });
     }
-    
+
     // Compute ensemble mean
     const sortedTimes = Array.from(timePoints).sort((a, b) => a - b);
     const memberKeys = Object.keys(processed);
-    
+
     if (memberKeys.length > 0) {
         processed['Mean'] = sortedTimes.map(time => {
             let sum = 0, count = 0;
@@ -159,7 +159,7 @@ function processData(raw) {
             return { x: time, y: count > 0 ? sum / count : 0 };
         });
     }
-    
+
     return processed;
 }
 
@@ -180,7 +180,7 @@ app.get('/api/cache-stats', (req, res) => {
         entries: cache.size,
         keys: []
     };
-    
+
     const now = Date.now();
     for (const [key, value] of cache.entries()) {
         stats.keys.push({
@@ -189,7 +189,7 @@ app.get('/api/cache-stats', (req, res) => {
             expiresIn: Math.round((value.expires - now) / 1000 / 60) + ' minutes'
         });
     }
-    
+
     res.json(stats);
 });
 
@@ -197,12 +197,12 @@ app.get('/api/cache-stats', (req, res) => {
 app.get('/api/sref/:station/:run/:param', async (req, res) => {
     const { station, run, param } = req.params;
     const date = req.query.date || new Date().toISOString().split('T')[0];
-    
+
     // Validate inputs
     const validStations = ['JFK', 'LGA', 'EWR', 'ISP', 'HPN', 'TEB'];
     const validRuns = ['03', '09', '15', '21'];
     const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
-    
+
     if (!validStations.includes(station.toUpperCase())) {
         return res.status(400).json({ error: 'Invalid station' });
     }
@@ -212,9 +212,9 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
     if (!validParams.includes(param)) {
         return res.status(400).json({ error: 'Invalid parameter' });
     }
-    
+
     const cacheKey = `${date}_${run}_${station}_${param}`;
-    
+
     // Check cache
     const cached = getFromCache(cacheKey);
     if (cached) {
@@ -222,19 +222,28 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
         res.set('X-Cache', 'HIT');
         return res.json(cached);
     }
-    
+
     console.log(`[CACHE MISS] ${cacheKey} - fetching from NOAA...`);
-    
+
     try {
         const raw = await fetchFromNOAA(station.toUpperCase(), run, param, date);
         const processed = processData(raw);
-        
-        // Cache with smart TTL
-        const ttl = getCacheTTL(parseInt(run));
-        setInCache(cacheKey, processed, ttl);
-        console.log(`[CACHED] ${cacheKey} for ${Math.round(ttl / 1000 / 60)} minutes`);
-        
-        res.set('X-Cache', 'MISS');
+
+        // Count valid ensemble members (not Mean)
+        const memberCount = Object.keys(processed).filter(k => k !== 'Mean').length;
+
+        // Only cache if we have complete data (10+ members)
+        // This prevents caching partial/empty responses that would block future fetches
+        if (memberCount >= 10) {
+            const ttl = getCacheTTL(parseInt(run));
+            setInCache(cacheKey, processed, ttl);
+            console.log(`[CACHED] ${cacheKey} for ${Math.round(ttl / 1000 / 60)} minutes (${memberCount} members)`);
+            res.set('X-Cache', 'MISS');
+        } else {
+            console.log(`[NOT CACHED] ${cacheKey} - incomplete data (${memberCount} members)`);
+            res.set('X-Cache', 'INCOMPLETE');
+        }
+
         res.json(processed);
     } catch (err) {
         console.error(`[ERROR] ${cacheKey}:`, err.message);
