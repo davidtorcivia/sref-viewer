@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NYC SREF Ensemble Plumes</title>
+    <meta name="description" content="Interactive ensemble forecast plumes for NYC area airports from NOAA SREF model">
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+
+<body>
+    <header class="header">
+        <div class="title" id="pageTitle">
+            NYC SREF Ensemble Plumes
+        </div>
+
+        <div class="controls">
+            <div class="btn-group" id="stationBtns">
+                <button class="active" data-val="JFK">JFK</button>
+                <button data-val="LGA">LGA</button>
+                <button data-val="EWR">EWR</button>
+            </div>
+
+            <input type="date" id="dateInput">
+
+            <select id="runSelect">
+                <option value="03">03Z</option>
+                <option value="09">09Z</option>
+                <option value="15">15Z</option>
+                <option value="21">21Z</option>
+            </select>
+
+            <div class="time-display" id="timeDisplay">--:-- ET</div>
+
+            <button class="btn" id="reloadBtn">Reload</button>
+        </div>
+    </header>
+
+    <main class="main" id="mainContent">
+        <!-- Chart sections will be dynamically generated -->
+    </main>
+
+    <footer class="status-bar">
+        <span id="status">Ready</span>
+        <span id="lastUpdate"></span>
+    </footer>
+
+    <!-- Application Scripts (ES Modules) -->
+    <script type="module" src="js/app.js"></script>
+</body>
+
+</html>
