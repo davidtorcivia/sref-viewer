@@ -11,9 +11,12 @@ RUN npm install --omit=dev
 # Copy application code
 COPY server.js ./
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
+# Create data directory and set permissions
+RUN mkdir -p /app/data && \
+    addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    chown -R nodejs:nodejs /app/data
+
 USER nodejs
 
 EXPOSE 3001

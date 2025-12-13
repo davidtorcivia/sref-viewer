@@ -180,35 +180,43 @@ select:disabled {
 /* Custom Station Input */
 #customStation {
     width: 60px;
+    min-width: 60px;
+    max-width: 60px;
     text-align: center;
     text-transform: uppercase;
     font-weight: 500;
     font-family: inherit;
-    background: transparent !important;
+    font-size: 0.9rem;
+    /* Reset browser defaults aggressively */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-color: transparent;
     border: none;
     border-left: 1px solid var(--border);
     border-radius: 0;
     color: var(--text);
-    padding: 0 0.5rem;
-    font-size: 0.9rem;
-    height: 100%;
+    padding: 0.5rem;
+    height: 40px;
+    box-sizing: border-box;
+    margin: 0;
 }
 
 #customStation::placeholder {
     color: var(--text-dim);
-    opacity: 0.5;
+    opacity: 0.6;
 }
 
 #customStation:focus {
     outline: none;
-    background: rgba(255, 255, 255, 0.05) !important;
-    color: var(--text);
+    background-color: rgba(128, 128, 128, 0.15);
 }
 
 /* Custom Station Go Button */
 #customStationBtn {
-    font-size: 0.8rem;
-    padding: 0.5rem 0.6rem;
+    font-size: 0.85rem;
+    padding: 0.5rem 0.75rem;
+    min-height: 40px;
 }
 
 /* Help Button */

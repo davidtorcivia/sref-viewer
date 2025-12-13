@@ -19,6 +19,8 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+    volumes:
+      - ./backend/data:/app/data
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "wget", "-q", "--spider", "http://localhost:3001/health" ]

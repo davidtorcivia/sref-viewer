@@ -23,3 +23,6 @@ npm-debug.log*
 
 # Original standalone file
 sref-viewer-standalone.html
+
+# Local data persistence
+backend/data/
