@@ -79,6 +79,7 @@ export function getWindUnit() {
  *   09Z ready by ~14:20 UTC
  *   15Z ready by ~20:20 UTC
  *   21Z ready by ~02:20 UTC (next day)
+ * v2: Fixed to properly default to 15Z before 02:20 UTC
  */
 export function getLatestRun() {
     const now = new Date();
@@ -86,12 +87,22 @@ export function getLatestRun() {
     const utcMinute = now.getUTCMinutes();
     const utcTime = utcHour + utcMinute / 60; // Decimal hours
 
+    let result;
     // Check in reverse order (most recent first)
-    if (utcTime >= 20.33) return '15';         // After 20:20 UTC
-    if (utcTime >= 14.33) return '09';         // After 14:20 UTC
-    if (utcTime >= 8.33) return '03';          // After 08:20 UTC
-    if (utcTime >= 2.33) return '21';          // After 02:20 UTC (21Z from yesterday)
-    return '15';                                // Before 02:20 UTC, use 15Z from yesterday
+    if (utcTime >= 20.33) {
+        result = '15';         // After 20:20 UTC
+    } else if (utcTime >= 14.33) {
+        result = '09';         // After 14:20 UTC
+    } else if (utcTime >= 8.33) {
+        result = '03';         // After 08:20 UTC
+    } else if (utcTime >= 2.33) {
+        result = '21';         // After 02:20 UTC (21Z from yesterday)
+    } else {
+        result = '15';         // Before 02:20 UTC, use 15Z from yesterday
+    }
+
+    console.log(`[RUN] UTC ${utcHour}:${utcMinute} (${utcTime.toFixed(2)}) → ${result}Z`);
+    return result;
 }
 
 /**
