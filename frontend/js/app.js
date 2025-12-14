@@ -8,9 +8,18 @@ import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
 import { createChart, toggleCore, exportChartPng } from './charts.js';
 
 // ============ Application State ============
+// Get local date in YYYY-MM-DD format (not UTC, which may be tomorrow already)
+function getLocalDateString() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
 const state = {
     station: 'JFK',
-    date: new Date().toISOString().split('T')[0],
+    date: getLocalDateString(),
     run: null, // Will be set by initializeRunSelection
     data: {},
     hasSnow: false,
