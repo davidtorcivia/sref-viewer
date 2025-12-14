@@ -203,20 +203,36 @@ function processData(raw) {
     return processed;
 }
 
-// ============ API Rate Limiting ============
-const apiLimits = new Map();
-const API_RATE_LIMIT = 30; // requests per window
-const API_RATE_WINDOW = 60 * 1000; // 1 minute
+// ============ API Rate Limiting (Token Bucket) ============
+// Token bucket allows bursts for initial cache population, then refills over time
+const rateBuckets = new Map();
+const BUCKET_MAX = 50;        // Max tokens (allows burst of 50 requests)
+const REFILL_RATE = 1;        // Tokens added per second
+const REFILL_INTERVAL = 1000; // 1 second
 
 function checkApiRateLimit(ip) {
     const now = Date.now();
-    const requests = (apiLimits.get(ip) || []).filter(t => now - t < API_RATE_WINDOW);
-    if (requests.length >= API_RATE_LIMIT) {
-        return false;
+    let bucket = rateBuckets.get(ip);
+
+    if (!bucket) {
+        // New user gets a full bucket
+        bucket = { tokens: BUCKET_MAX, lastRefill: now };
+        rateBuckets.set(ip, bucket);
     }
-    requests.push(now);
-    apiLimits.set(ip, requests);
-    return true;
+
+    // Refill tokens based on time elapsed
+    const elapsed = now - bucket.lastRefill;
+    const tokensToAdd = Math.floor(elapsed / REFILL_INTERVAL) * REFILL_RATE;
+    bucket.tokens = Math.min(BUCKET_MAX, bucket.tokens + tokensToAdd);
+    bucket.lastRefill = now;
+
+    // Try to consume a token
+    if (bucket.tokens > 0) {
+        bucket.tokens--;
+        return true;
+    }
+
+    return false;
 }
 
 // ============ Routes ============
@@ -239,14 +255,6 @@ app.get('/api/cache-stats', (req, res) => {
 });
 
 app.get('/api/sref/:station/:run/:param', async (req, res) => {
-    const ip = req.ip || req.connection.remoteAddress;
-
-    // Rate limiting
-    if (!checkApiRateLimit(ip)) {
-        console.log(`[RATE LIMIT] ${ip}`);
-        return res.status(429).json({ error: 'Too many requests. Please slow down.' });
-    }
-
     const { station, run, param } = req.params;
     const date = req.query.date || new Date().toISOString().split('T')[0];
 
@@ -266,11 +274,19 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
 
     const cacheKey = `${date}_${run}_${station}_${param}`;
 
+    // Check cache first - cache hits don't count against rate limit
     const cached = getFromCache(cacheKey);
     if (cached) {
         console.log(`[CACHE HIT] ${cacheKey}`);
         res.set('X-Cache', 'HIT');
         return res.json(cached);
+    }
+
+    // Rate limiting only for cache misses (actual NOAA requests)
+    const ip = req.ip || req.connection.remoteAddress;
+    if (!checkApiRateLimit(ip)) {
+        console.log(`[RATE LIMIT] ${ip} - ${cacheKey}`);
+        return res.status(429).json({ error: 'Too many requests. Please slow down.' });
     }
 
     console.log(`[CACHE MISS] ${cacheKey} - fetching from NOAA...`);
