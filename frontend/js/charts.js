@@ -185,6 +185,10 @@ export function createChart(param, data, overlayData = []) {
                 },
                 tooltip: {
                     enabled: true,
+                    position: 'nearest',
+                    xAlign: 'left',  // Anchor tooltip to left, so it appears to the right
+                    yAlign: 'center',
+                    caretPadding: 15, // Offset from cursor
                     backgroundColor: theme.tooltipBg,
                     titleColor: theme.tooltipText,
                     bodyColor: theme.tooltipText,
