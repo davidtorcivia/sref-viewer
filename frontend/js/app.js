@@ -675,6 +675,7 @@ function renderComparisonControls() {
             <span class="comp-label">Chart:</span>
             <button class="mode-btn ${state.chartViewMode === 'spaghetti' ? 'active' : ''}" data-mode="spaghetti" title="Show individual ensemble member lines">Lines</button>
             <button class="mode-btn ${state.chartViewMode === 'bands' ? 'active' : ''}" data-mode="bands" title="Show confidence bands (P10-P90)">Bands</button>
+            <button class="mode-btn ${state.chartViewMode === 'both' ? 'active' : ''}" data-mode="both" title="Show both lines and bands">Both</button>
         </div>
     `;
 

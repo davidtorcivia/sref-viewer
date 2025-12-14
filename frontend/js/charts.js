@@ -2,7 +2,7 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
-console.log('Charts.js loaded (v3.1.0 - separate ARW/NMB bands)');
+console.log('Charts.js loaded (v3.2.0 - both mode)');
 
 import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
 import { getPercentileBands } from './api.js';
@@ -115,8 +115,9 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
     }
 
     // 3. Add main datasets based on view mode
-    if (viewMode === 'bands') {
-        // Confidence bands mode - separate ARW and NMB bands
+    // Add confidence bands (for 'bands' or 'both' mode)
+    if (viewMode === 'bands' || viewMode === 'both') {
+        // Separate ARW and NMB bands
         const arwBands = getPercentileBands(data, 'ARW');
         const nmbBands = getPercentileBands(data, 'NMB');
 
@@ -271,29 +272,33 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             });
         }
 
-        // Add Mean line on top
-        const meanPoints = data['Mean'];
-        if (meanPoints && meanPoints.length > 0) {
-            const chartPoints = isWind
-                ? meanPoints.map(p => ({ x: p.x, y: convertWind(p.y) }))
-                : meanPoints;
+        // Add Mean line on top (only if in pure bands mode - otherwise it comes with spaghetti)
+        if (viewMode === 'bands') {
+            const meanPoints = data['Mean'];
+            if (meanPoints && meanPoints.length > 0) {
+                const chartPoints = isWind
+                    ? meanPoints.map(p => ({ x: p.x, y: convertWind(p.y) }))
+                    : meanPoints;
 
-            datasets.push({
-                label: 'Mean',
-                data: chartPoints,
-                borderColor: theme.meanLineColor,
-                borderWidth: responsive.meanLineWidth,
-                pointRadius: 0,
-                pointHitRadius: 20,
-                pointHoverRadius: responsive.pointHoverRadius + 2,
-                tension: 0.3,
-                fill: false,
-                order: 0,
-                _core: 'Mean'
-            });
+                datasets.push({
+                    label: 'Mean',
+                    data: chartPoints,
+                    borderColor: theme.meanLineColor,
+                    borderWidth: responsive.meanLineWidth,
+                    pointRadius: 0,
+                    pointHitRadius: 20,
+                    pointHoverRadius: responsive.pointHoverRadius + 2,
+                    tension: 0.3,
+                    fill: false,
+                    order: 0,
+                    _core: 'Mean'
+                });
+            }
         }
-    } else {
-        // Spaghetti mode - individual ensemble member lines
+    }
+
+    // Add spaghetti lines (for 'spaghetti' or 'both' mode)
+    if (viewMode === 'spaghetti' || viewMode === 'both') {
         for (const [label, points] of Object.entries(data)) {
             if (points.length === 0) continue;
 
