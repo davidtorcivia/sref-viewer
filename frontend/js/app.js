@@ -816,30 +816,41 @@ function showHelpModal() {
         modal.innerHTML = `
             <div class="modal-content">
                 <h2>Understanding SREF Ensemble Plumes</h2>
-                <p>This tool visualizes forecast data from NOAA's <strong>Short Range Ensemble Forecast (SREF)</strong> model.</p>
+                <p>This tool visualizes forecast data from NOAA's <strong>Short Range Ensemble Forecast (SREF)</strong> model, providing probabilistic weather forecasts up to 87 hours ahead.</p>
                 
                 <h3>What are the colored lines?</h3>
-                <p>Each line represents a different "ensemble member" - a slightly different model run. Having multiple runs helps show forecast uncertainty.</p>
+                <p>Each line represents a different "ensemble member" - a model run with slightly different initial conditions or physics settings. The <strong>26 members</strong> span a range of possible outcomes, helping show forecast uncertainty.</p>
                 
-                <h3>ARW vs NMB</h3>
+                <h3>ARW vs NMB Cores</h3>
                 <ul>
-                    <li><strong>ARW</strong> (red tones) - Advanced Research WRF dynamical core</li>
-                    <li><strong>NMB</strong> (blue tones) - NEMS-NMMB dynamical core</li>
+                    <li><strong>ARW</strong> (red/warm tones) - Advanced Research WRF dynamical core (13 members)</li>
+                    <li><strong>NMB</strong> (blue/cool tones) - NEMS-NMMB dynamical core (13 members)</li>
                 </ul>
-                <p>These are two different physics configurations. When they agree, confidence is higher.</p>
+                <p>These use different physics packages. When both cores agree, forecast confidence is higher. Disagreement indicates model uncertainty.</p>
                 
                 <h3>The Mean Line</h3>
-                <p>The thick white/black line is the <strong>ensemble mean</strong> - the average of all 26 members. It's often the best single forecast.</p>
+                <p>The thick white line is the <strong>ensemble mean</strong> - the average of all 26 members. It's typically the most reliable single forecast value and smooths out individual member noise.</p>
                 
-                <h3>Model Runs</h3>
-                <p>SREF runs 4 times daily: 03Z, 09Z, 15Z, 21Z (UTC). Data is typically available ~2 hours after each run.</p>
-                
-                <h3>Tips</h3>
+                <h3>Model Run Schedule</h3>
+                <p>SREF runs 4 times daily at 03Z, 09Z, 15Z, and 21Z (UTC). Data becomes available <strong>5 to 5.5 hours</strong> after each run initiates:</p>
                 <ul>
-                    <li>Tight clustering = high confidence</li>
-                    <li>Wide spread = uncertain forecast</li>
-                    <li>ARW/NMB disagreement = model uncertainty</li>
+                    <li><strong>03Z run</strong> → available ~8:20 AM UTC (3:20 AM EST)</li>
+                    <li><strong>09Z run</strong> → available ~2:20 PM UTC (9:20 AM EST)</li>
+                    <li><strong>15Z run</strong> → available ~8:20 PM UTC (3:20 PM EST)</li>
+                    <li><strong>21Z run</strong> → available ~2:20 AM UTC (9:20 PM EST)</li>
                 </ul>
+                <p>The app automatically selects the most recent available run.</p>
+                
+                <h3>Reading the Charts</h3>
+                <ul>
+                    <li><strong>Tight clustering</strong> = High confidence in forecast</li>
+                    <li><strong>Wide spread</strong> = Uncertain forecast, multiple outcomes possible</li>
+                    <li><strong>ARW/NMB split</strong> = Models disagree, watch for updates</li>
+                    <li><strong>Mean near edge</strong> = Possible for bigger/smaller totals</li>
+                </ul>
+                
+                <h3>Summary Statistics</h3>
+                <p>Each chart shows Mean, Max, Min, and Spread values. For snow/precip, lower spread indicates higher confidence in the expected amount.</p>
                 
                 <button class="btn" onclick="this.closest('.modal-overlay').remove()">Got it!</button>
             </div>
