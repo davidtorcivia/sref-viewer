@@ -116,8 +116,77 @@ async function init() {
         }, 250);
     });
 
+    // Load site settings from admin panel
+    await loadSiteSettings();
+
     // Initialize run selection and load data
     initializeRunSelection();
+}
+
+// ============ Site Settings ============
+async function loadSiteSettings() {
+    try {
+        const res = await fetch('/api/settings');
+        if (!res.ok) return;
+
+        const settings = await res.json();
+
+        // Update page title (tab and header)
+        if (settings.siteName) {
+            document.title = settings.siteName;
+            // Store original site name for later (snow mode modifies it)
+            state.siteNameBase = settings.siteName;
+        }
+
+        // Update meta description
+        if (settings.siteDescription) {
+            let meta = document.querySelector('meta[name="description"]');
+            if (meta) {
+                meta.content = settings.siteDescription;
+            }
+        }
+
+        // Apply favicon
+        if (settings.favicon) {
+            let link = document.querySelector('link[rel="icon"]');
+            if (!link) {
+                link = document.createElement('link');
+                link.rel = 'icon';
+                document.head.appendChild(link);
+            }
+            link.href = settings.favicon;
+        }
+
+        // Inject analytics script
+        if (settings.analyticsScript) {
+            const div = document.createElement('div');
+            div.innerHTML = settings.analyticsScript;
+            // Move scripts to head
+            div.querySelectorAll('script').forEach(script => {
+                const newScript = document.createElement('script');
+                // Copy attributes
+                for (const attr of script.attributes) {
+                    newScript.setAttribute(attr.name, attr.value);
+                }
+                // Copy inline content
+                if (script.textContent) {
+                    newScript.textContent = script.textContent;
+                }
+                document.head.appendChild(newScript);
+            });
+        }
+
+        // Apply custom CSS
+        if (settings.customCss) {
+            const style = document.createElement('style');
+            style.textContent = settings.customCss;
+            document.head.appendChild(style);
+        }
+
+        console.log('[SETTINGS] Loaded site settings');
+    } catch (err) {
+        console.log('[SETTINGS] Could not load settings:', err.message);
+    }
 }
 
 // ============ Run Selection ============
@@ -411,10 +480,11 @@ async function loadAllCharts() {
         state.data['Total-SNO'] = snowData;
         state.hasSnow = hasSnowForecast(snowData);
 
-        // Update title
+        // Update title (use site name from settings if available)
+        const baseName = state.siteNameBase || 'SREF Ensemble Plumes';
         elements.pageTitle.innerHTML = state.hasSnow
-            ? `NYC SREF Plumes <span class="snow-alert">❄ SNOW</span>`
-            : `NYC SREF Ensemble Plumes`;
+            ? `${baseName} <span class="snow-alert">SNOW</span>`
+            : baseName;
 
     } catch (err) {
         console.log('Snow check failed:', err);
