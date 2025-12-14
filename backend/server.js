@@ -249,8 +249,233 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
     }
 });
 
+// ============ Admin Panel ============
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const crypto = require('crypto');
+
+// Ensure uploads directory exists
+try {
+    if (!fs.existsSync(UPLOADS_DIR)) {
+        fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+    }
+} catch (err) {
+    console.error('[ADMIN] Failed to create uploads dir:', err);
+}
+
+// Admin credentials from environment
+const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'changeme';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret';
+
+// Active sessions (in-memory, cleared on restart)
+const sessions = new Map();
+
+// Default settings
+const DEFAULT_SETTINGS = {
+    siteName: 'NYC SREF Ensemble Plumes',
+    siteDescription: 'SREF ensemble plume diagrams for weather forecasting',
+    favicon: '',
+    ogImage: '',
+    defaultStations: ['JFK', 'LGA', 'EWR'],
+    analyticsScript: '',
+    analyticsEnabled: false,
+    customCss: ''
+};
+
+// Load settings
+function loadSettings() {
+    try {
+        if (fs.existsSync(SETTINGS_FILE)) {
+            const raw = fs.readFileSync(SETTINGS_FILE, 'utf8');
+            return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+        }
+    } catch (err) {
+        console.error('[ADMIN] Failed to load settings:', err);
+    }
+    return { ...DEFAULT_SETTINGS };
+}
+
+// Save settings
+function saveSettings(settings) {
+    try {
+        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+        return true;
+    } catch (err) {
+        console.error('[ADMIN] Failed to save settings:', err);
+        return false;
+    }
+}
+
+// Generate session token
+function createSession() {
+    const token = crypto.randomBytes(32).toString('hex');
+    sessions.set(token, { created: Date.now() });
+    return token;
+}
+
+// Validate session
+function validateSession(token) {
+    if (!token) return false;
+    const session = sessions.get(token);
+    if (!session) return false;
+    // Sessions expire after 24 hours
+    if (Date.now() - session.created > 24 * 60 * 60 * 1000) {
+        sessions.delete(token);
+        return false;
+    }
+    return true;
+}
+
+// Auth middleware
+function requireAuth(req, res, next) {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!validateSession(token)) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    next();
+}
+
+// Parse JSON bodies
+app.use(express.json());
+
+// Rate limiting for login (simple in-memory)
+const loginAttempts = new Map();
+const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const MAX_ATTEMPTS = 5;
+
+function checkRateLimit(ip) {
+    const now = Date.now();
+    const attempts = loginAttempts.get(ip) || [];
+    // Filter to recent attempts only
+    const recentAttempts = attempts.filter(t => now - t < RATE_LIMIT_WINDOW);
+    loginAttempts.set(ip, recentAttempts);
+    return recentAttempts.length < MAX_ATTEMPTS;
+}
+
+function recordLoginAttempt(ip) {
+    const attempts = loginAttempts.get(ip) || [];
+    attempts.push(Date.now());
+    loginAttempts.set(ip, attempts);
+}
+
+// Admin login
+app.post('/api/admin/login', (req, res) => {
+    const ip = req.ip || req.connection.remoteAddress;
+
+    if (!checkRateLimit(ip)) {
+        console.log(`[ADMIN] Rate limited: ${ip}`);
+        return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+    }
+
+    const { username, password } = req.body;
+
+    if (username === ADMIN_USER && password === ADMIN_PASS) {
+        const token = createSession();
+        console.log('[ADMIN] Login successful');
+        res.json({ token });
+    } else {
+        recordLoginAttempt(ip);
+        console.log('[ADMIN] Login failed');
+        res.status(401).json({ error: 'Invalid credentials' });
+    }
+});
+
+// Check auth status
+app.get('/api/admin/check', requireAuth, (req, res) => {
+    res.json({ authenticated: true });
+});
+
+// Get settings
+app.get('/api/admin/settings', requireAuth, (req, res) => {
+    res.json(loadSettings());
+});
+
+// Update settings
+app.post('/api/admin/settings', requireAuth, (req, res) => {
+    const current = loadSettings();
+    const updated = { ...current, ...req.body };
+
+    // Validate
+    if (updated.defaultStations && !Array.isArray(updated.defaultStations)) {
+        return res.status(400).json({ error: 'defaultStations must be an array' });
+    }
+
+    if (saveSettings(updated)) {
+        console.log('[ADMIN] Settings updated');
+        res.json(updated);
+    } else {
+        res.status(500).json({ error: 'Failed to save settings' });
+    }
+});
+
+// File upload (favicon, OG image)
+app.post('/api/admin/upload/:type', requireAuth, (req, res) => {
+    const { type } = req.params;
+
+    if (!['favicon', 'ogImage'].includes(type)) {
+        return res.status(400).json({ error: 'Invalid upload type' });
+    }
+
+    // Simple base64 upload handling
+    const { data, filename } = req.body;
+    if (!data || !filename) {
+        return res.status(400).json({ error: 'Missing data or filename' });
+    }
+
+    // Validate file extension
+    const ext = path.extname(filename).toLowerCase();
+    const allowedExts = type === 'favicon'
+        ? ['.ico', '.png', '.svg']
+        : ['.jpg', '.jpeg', '.png', '.webp'];
+
+    if (!allowedExts.includes(ext)) {
+        return res.status(400).json({ error: `Invalid file type. Allowed: ${allowedExts.join(', ')}` });
+    }
+
+    // Sanitize filename
+    const safeName = `${type}${ext}`;
+    const filePath = path.join(UPLOADS_DIR, safeName);
+
+    try {
+        // Decode base64 and save
+        const buffer = Buffer.from(data, 'base64');
+        fs.writeFileSync(filePath, buffer);
+
+        // Update settings with the file path
+        const settings = loadSettings();
+        settings[type] = `/uploads/${safeName}`;
+        saveSettings(settings);
+
+        console.log(`[ADMIN] Uploaded ${type}: ${safeName}`);
+        res.json({ path: `/uploads/${safeName}` });
+    } catch (err) {
+        console.error('[ADMIN] Upload error:', err);
+        res.status(500).json({ error: 'Upload failed' });
+    }
+});
+
+// Serve uploaded files
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// Public settings endpoint (for frontend to load site config)
+app.get('/api/settings', (req, res) => {
+    const settings = loadSettings();
+    // Don't expose admin-only fields
+    res.json({
+        siteName: settings.siteName,
+        siteDescription: settings.siteDescription,
+        favicon: settings.favicon,
+        ogImage: settings.ogImage,
+        defaultStations: settings.defaultStations,
+        analyticsScript: settings.analyticsEnabled ? settings.analyticsScript : '',
+        customCss: settings.customCss
+    });
+});
+
 // ============ Start Server ============
 app.listen(PORT, () => {
     console.log(`SREF Proxy running on port ${PORT}`);
     console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`Admin panel: http://localhost:${PORT}/admin`);
 });
