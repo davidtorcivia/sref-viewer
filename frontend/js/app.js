@@ -127,15 +127,20 @@ async function init() {
 async function loadSiteSettings() {
     try {
         const res = await fetch('/api/settings');
-        if (!res.ok) return;
+        if (!res.ok) {
+            console.log('[SETTINGS] Failed to fetch settings:', res.status);
+            return;
+        }
 
         const settings = await res.json();
+        console.log('[SETTINGS] Received:', settings);
 
         // Update page title (tab and header)
         if (settings.siteName) {
             document.title = settings.siteName;
             // Store original site name for later (snow mode modifies it)
             state.siteNameBase = settings.siteName;
+            console.log('[SETTINGS] Applied site name:', settings.siteName);
         }
 
         // Update meta description
@@ -146,46 +151,58 @@ async function loadSiteSettings() {
             }
         }
 
-        // Apply favicon
+        // Apply favicon - remove any existing and add new
         if (settings.favicon) {
-            let link = document.querySelector('link[rel="icon"]');
-            if (!link) {
-                link = document.createElement('link');
-                link.rel = 'icon';
-                document.head.appendChild(link);
-            }
-            link.href = settings.favicon;
+            // Remove all existing favicon links
+            document.querySelectorAll('link[rel*="icon"]').forEach(el => el.remove());
+
+            // Add new favicon
+            const link = document.createElement('link');
+            link.rel = 'icon';
+            link.type = 'image/x-icon';
+            link.href = settings.favicon + '?v=' + Date.now(); // Cache bust
+            document.head.appendChild(link);
+            console.log('[SETTINGS] Applied favicon:', settings.favicon);
         }
 
         // Inject analytics script
-        if (settings.analyticsScript) {
+        if (settings.analyticsScript && settings.analyticsScript.trim()) {
+            console.log('[SETTINGS] Injecting analytics script...');
             const div = document.createElement('div');
             div.innerHTML = settings.analyticsScript;
+
             // Move scripts to head
-            div.querySelectorAll('script').forEach(script => {
-                const newScript = document.createElement('script');
-                // Copy attributes
-                for (const attr of script.attributes) {
-                    newScript.setAttribute(attr.name, attr.value);
-                }
-                // Copy inline content
-                if (script.textContent) {
-                    newScript.textContent = script.textContent;
-                }
-                document.head.appendChild(newScript);
-            });
+            const scripts = div.querySelectorAll('script');
+            if (scripts.length > 0) {
+                scripts.forEach(script => {
+                    const newScript = document.createElement('script');
+                    // Copy attributes
+                    for (const attr of script.attributes) {
+                        newScript.setAttribute(attr.name, attr.value);
+                    }
+                    // Copy inline content
+                    if (script.textContent) {
+                        newScript.textContent = script.textContent;
+                    }
+                    document.head.appendChild(newScript);
+                    console.log('[SETTINGS] Injected script:', newScript.src || '[inline]');
+                });
+            } else {
+                console.log('[SETTINGS] No script tags found in analytics content');
+            }
         }
 
         // Apply custom CSS
-        if (settings.customCss) {
+        if (settings.customCss && settings.customCss.trim()) {
             const style = document.createElement('style');
             style.textContent = settings.customCss;
             document.head.appendChild(style);
+            console.log('[SETTINGS] Applied custom CSS');
         }
 
-        console.log('[SETTINGS] Loaded site settings');
+        console.log('[SETTINGS] Site settings loaded successfully');
     } catch (err) {
-        console.log('[SETTINGS] Could not load settings:', err.message);
+        console.error('[SETTINGS] Could not load settings:', err);
     }
 }
 
