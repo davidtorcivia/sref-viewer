@@ -299,10 +299,17 @@ function loadSettings() {
 // Save settings
 function saveSettings(settings) {
     try {
+        // Ensure data directory exists
+        if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
         fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+        console.log('[ADMIN] Settings saved to:', SETTINGS_FILE);
         return true;
     } catch (err) {
-        console.error('[ADMIN] Failed to save settings:', err);
+        console.error('[ADMIN] Failed to save settings:', err.message);
+        console.error('[ADMIN] Settings file path:', SETTINGS_FILE);
+        console.error('[ADMIN] Full error:', err);
         return false;
     }
 }

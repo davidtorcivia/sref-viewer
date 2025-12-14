@@ -71,15 +71,29 @@ export function createChart(param, data, overlayData = []) {
     const isWind = info.type === 'wind';
     const windUnit = isWind ? getWindUnit() : null;
 
-    // 1. Add Overlay Datasets (Previous Runs) first so they are behind (or handled by order)
+    // 1. Find the time range from main data to truncate overlays
+    let minTime = Infinity, maxTime = -Infinity;
+    for (const points of Object.values(data)) {
+        if (!points || points.length === 0) continue;
+        for (const p of points) {
+            if (p.x < minTime) minTime = p.x;
+            if (p.x > maxTime) maxTime = p.x;
+        }
+    }
+
+    // 2. Add Overlay Datasets (Previous Runs) - TRUNCATED to main data range
     if (overlayData && overlayData.length > 0) {
         for (const overlay of overlayData) {
             const points = overlay.data;
             if (!points || points.length === 0) continue;
 
+            // Filter points to only those within main data time range
+            const filteredPoints = points.filter(p => p.x >= minTime && p.x <= maxTime);
+            if (filteredPoints.length === 0) continue;
+
             const chartPoints = isWind
-                ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
-                : points;
+                ? filteredPoints.map(p => ({ x: p.x, y: convertWind(p.y) }))
+                : filteredPoints;
 
             datasets.push({
                 label: overlay.label, // e.g., "09Z Mean"
@@ -142,6 +156,26 @@ export function createChart(param, data, overlayData = []) {
             },
             plugins: {
                 legend: { display: false },
+                annotation: {
+                    annotations: {
+                        nowLine: {
+                            type: 'line',
+                            xMin: Date.now(),
+                            xMax: Date.now(),
+                            borderColor: 'rgba(255, 255, 255, 0.5)',
+                            borderWidth: 2,
+                            borderDash: [4, 4],
+                            label: {
+                                display: true,
+                                content: 'Now',
+                                position: 'start',
+                                backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                                color: '#fff',
+                                font: { size: 10 }
+                            }
+                        }
+                    }
+                },
                 tooltip: {
                     enabled: true,
                     backgroundColor: theme.tooltipBg,
