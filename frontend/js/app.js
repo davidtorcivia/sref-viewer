@@ -337,7 +337,7 @@ function attachEventHandlers() {
 function rebuildCharts() {
     buildLayout();
     for (const [param, data] of Object.entries(state.data)) {
-        createChart(param, data);
+        createChart(param, data, getOverlayData(param));
         document.getElementById(`loading-${param}`)?.classList.add('hidden');
         updateSummary(param, data);
     }
@@ -360,7 +360,7 @@ async function loadChart(param) {
         }
 
         state.data[param] = data;
-        createChart(param, data);
+        createChart(param, data, getOverlayData(param));
         loading.classList.add('hidden');
         updateSummary(param, data);
         return data;
