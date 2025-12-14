@@ -128,6 +128,29 @@ async function init() {
         customStationBtn.addEventListener('click', handleCustomStation);
     }
 
+    // Share button - copy URL to clipboard
+    const shareBtn = document.getElementById('shareBtn');
+    if (shareBtn) {
+        shareBtn.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(window.location.href);
+                const originalText = shareBtn.textContent;
+                shareBtn.textContent = 'Copied!';
+                shareBtn.style.background = 'var(--accent)';
+                shareBtn.style.color = '#000';
+                setTimeout(() => {
+                    shareBtn.textContent = originalText;
+                    shareBtn.style.background = '';
+                    shareBtn.style.color = '';
+                }, 1500);
+            } catch (err) {
+                console.error('Failed to copy:', err);
+                // Fallback: select the URL in a prompt
+                prompt('Copy this link:', window.location.href);
+            }
+        });
+    }
+
     // Handle resize for responsive charts
     let resizeTimeout;
     window.addEventListener('resize', () => {
