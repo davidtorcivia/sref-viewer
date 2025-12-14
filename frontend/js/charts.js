@@ -2,6 +2,7 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
+console.log('Charts.js loaded (v2.0.1 - exportChartPng update)');
 
 import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
 
@@ -251,7 +252,7 @@ export function destroyAllCharts() {
  * @param {string} station - Station code
  * @param {string} run - Model run
  */
-export function downloadChart(param, station, run) {
+export function exportChartPng(param, station, run) {
     const chart = chartInstances[param];
     if (!chart) return;
 

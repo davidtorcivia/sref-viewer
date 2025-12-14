@@ -5,7 +5,7 @@
 
 import { CONFIG, getLatestRun, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
 import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
-import { createChart, toggleCore, downloadChart } from './charts.js';
+import { createChart, toggleCore, exportChartPng } from './charts.js';
 
 // ============ Application State ============
 const state = {
@@ -304,7 +304,7 @@ function attachEventHandlers() {
     document.querySelectorAll('.download-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const param = btn.dataset.param;
-            downloadChart(param, state.station, state.run);
+            exportChartPng(param, state.station, state.run);
         });
     });
 
