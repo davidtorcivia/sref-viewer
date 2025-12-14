@@ -2,7 +2,7 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
-console.log('Charts.js loaded (v3.0.0 - confidence bands)');
+console.log('Charts.js loaded (v3.1.0 - separate ARW/NMB bands)');
 
 import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
 import { getPercentileBands } from './api.js';
@@ -116,26 +116,23 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
 
     // 3. Add main datasets based on view mode
     if (viewMode === 'bands') {
-        // Confidence bands mode - shaded regions instead of spaghetti lines
-        const bands = getPercentileBands(data);
+        // Confidence bands mode - separate ARW and NMB bands
+        const arwBands = getPercentileBands(data, 'ARW');
+        const nmbBands = getPercentileBands(data, 'NMB');
 
-        if (bands) {
-            // Get param-specific color
-            const paramColor = info.type === 'snow' ? '165, 216, 255' :   // --snow
-                info.type === 'precip' ? '81, 207, 102' :  // --precip
-                    info.type === 'temp' ? '255, 135, 135' :   // --temp
-                        info.type === 'wind' ? '255, 212, 59' :    // --wind
-                            '110, 158, 255';                           // default accent
+        // Convert wind data if needed
+        const convertPoints = (points) => isWind
+            ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
+            : points;
 
-            // Convert wind data if needed
-            const convertPoints = (points) => isWind
-                ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
-                : points;
+        // ARW bands (warm red tones)
+        if (arwBands) {
+            const arwColor = '255, 100, 100';  // Warm red
 
-            // P10 line (hidden, used as fill boundary)
+            // ARW P10 line (hidden, fill boundary)
             datasets.push({
-                label: 'P10',
-                data: convertPoints(bands.p10),
+                label: 'ARW P10',
+                data: convertPoints(arwBands.p10),
                 borderColor: 'transparent',
                 borderWidth: 0,
                 pointRadius: 0,
@@ -143,31 +140,33 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 tension: 0.3,
                 fill: false,
                 order: 4,
-                _band: true
+                _band: true,
+                _core: 'ARW'
             });
 
-            // P90 filling down to P10 (outer band)
+            // ARW P90 filling to P10 (outer band)
             datasets.push({
-                label: 'P90',
-                data: convertPoints(bands.p90),
-                borderColor: `rgba(${paramColor}, 0.3)`,
+                label: 'ARW P90',
+                data: convertPoints(arwBands.p90),
+                borderColor: `rgba(${arwColor}, 0.4)`,
                 borderWidth: 1,
                 pointRadius: 0,
                 pointHitRadius: 0,
                 tension: 0.3,
                 fill: {
-                    target: datasets.length - 1, // Fill to P10
-                    above: `rgba(${paramColor}, 0.15)`,
-                    below: `rgba(${paramColor}, 0.15)`
+                    target: datasets.length - 1,
+                    above: `rgba(${arwColor}, 0.12)`,
+                    below: `rgba(${arwColor}, 0.12)`
                 },
                 order: 4,
-                _band: true
+                _band: true,
+                _core: 'ARW'
             });
 
-            // P25 line (hidden, used as fill boundary)
+            // ARW P25 line (hidden, fill boundary)
             datasets.push({
-                label: 'P25',
-                data: convertPoints(bands.p25),
+                label: 'ARW P25',
+                data: convertPoints(arwBands.p25),
                 borderColor: 'transparent',
                 borderWidth: 0,
                 pointRadius: 0,
@@ -175,25 +174,100 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 tension: 0.3,
                 fill: false,
                 order: 3,
-                _band: true
+                _band: true,
+                _core: 'ARW'
             });
 
-            // P75 filling down to P25 (inner band - darker)
+            // ARW P75 filling to P25 (inner band - darker)
             datasets.push({
-                label: 'P75',
-                data: convertPoints(bands.p75),
-                borderColor: `rgba(${paramColor}, 0.5)`,
+                label: 'ARW P75',
+                data: convertPoints(arwBands.p75),
+                borderColor: `rgba(${arwColor}, 0.6)`,
                 borderWidth: 1,
                 pointRadius: 0,
                 pointHitRadius: 0,
                 tension: 0.3,
                 fill: {
-                    target: datasets.length - 1, // Fill to P25
-                    above: `rgba(${paramColor}, 0.25)`,
-                    below: `rgba(${paramColor}, 0.25)`
+                    target: datasets.length - 1,
+                    above: `rgba(${arwColor}, 0.22)`,
+                    below: `rgba(${arwColor}, 0.22)`
                 },
                 order: 3,
-                _band: true
+                _band: true,
+                _core: 'ARW'
+            });
+        }
+
+        // NMB bands (cool blue tones)
+        if (nmbBands) {
+            const nmbColor = '100, 150, 255';  // Cool blue
+
+            // NMB P10 line (hidden, fill boundary)
+            datasets.push({
+                label: 'NMB P10',
+                data: convertPoints(nmbBands.p10),
+                borderColor: 'transparent',
+                borderWidth: 0,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: false,
+                order: 4,
+                _band: true,
+                _core: 'NMB'
+            });
+
+            // NMB P90 filling to P10 (outer band)
+            datasets.push({
+                label: 'NMB P90',
+                data: convertPoints(nmbBands.p90),
+                borderColor: `rgba(${nmbColor}, 0.4)`,
+                borderWidth: 1,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: {
+                    target: datasets.length - 1,
+                    above: `rgba(${nmbColor}, 0.12)`,
+                    below: `rgba(${nmbColor}, 0.12)`
+                },
+                order: 4,
+                _band: true,
+                _core: 'NMB'
+            });
+
+            // NMB P25 line (hidden, fill boundary)
+            datasets.push({
+                label: 'NMB P25',
+                data: convertPoints(nmbBands.p25),
+                borderColor: 'transparent',
+                borderWidth: 0,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: false,
+                order: 3,
+                _band: true,
+                _core: 'NMB'
+            });
+
+            // NMB P75 filling to P25 (inner band - darker)
+            datasets.push({
+                label: 'NMB P75',
+                data: convertPoints(nmbBands.p75),
+                borderColor: `rgba(${nmbColor}, 0.6)`,
+                borderWidth: 1,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: {
+                    target: datasets.length - 1,
+                    above: `rgba(${nmbColor}, 0.22)`,
+                    below: `rgba(${nmbColor}, 0.22)`
+                },
+                order: 3,
+                _band: true,
+                _core: 'NMB'
             });
         }
 

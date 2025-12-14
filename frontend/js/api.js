@@ -104,15 +104,21 @@ function percentile(sortedArr, p) {
  * Calculate percentile bands from ensemble data
  * Returns P10, P25, P75, P90 series aligned to common timestamps
  * @param {Object} data - Ensemble data object (member name -> [{x, y}])
+ * @param {string} coreFilter - Optional: 'ARW', 'NMB', or null for all members
  * @returns {Object} Band data with p10, p25, p75, p90 arrays
  */
-export function getPercentileBands(data) {
+export function getPercentileBands(data, coreFilter = null) {
     if (!data) return null;
 
-    // Get all member data (exclude Mean)
+    // Get all member data (exclude Mean, optionally filter by core)
     const members = [];
     for (const [label, points] of Object.entries(data)) {
         if (label === 'Mean' || !points || points.length === 0) continue;
+
+        // Filter by core type if specified
+        if (coreFilter === 'ARW' && !label.startsWith('AR')) continue;
+        if (coreFilter === 'NMB' && !label.startsWith('NM')) continue;
+
         members.push(points);
     }
 
