@@ -325,7 +325,13 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
         chartInstances[param].destroy();
     }
 
-    const ctx = document.getElementById(`chart-${param}`).getContext('2d');
+    const canvas = document.getElementById(`chart-${param}`);
+    if (!canvas) {
+        console.warn(`[CHART] Canvas not found for ${param}, skipping`);
+        return null;
+    }
+
+    const ctx = canvas.getContext('2d');
     const displayUnit = isWind ? windUnit : info.unit;
 
     chartInstances[param] = new Chart(ctx, {
