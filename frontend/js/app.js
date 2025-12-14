@@ -30,6 +30,8 @@ const state = {
     // Run comparison feature
     previousRuns: {}, // { '03': { param: data }, '09': { param: data }, ... }
     visibleRuns: { '03': true, '09': true, '15': true, '21': true }, // All checked by default
+    // Chart display mode: 'spaghetti' (individual lines) or 'bands' (confidence bands)
+    chartViewMode: localStorage.getItem('sref-chart-view-mode') || 'spaghetti',
 };
 
 // Run colors for comparison overlay
@@ -495,7 +497,7 @@ function attachEventHandlers() {
 function rebuildCharts() {
     buildLayout();
     for (const [param, data] of Object.entries(state.data)) {
-        createChart(param, data, getOverlayData(param));
+        createChart(param, data, getOverlayData(param), state.chartViewMode);
         document.getElementById(`loading-${param}`)?.classList.add('hidden');
         updateSummary(param, data);
     }
@@ -518,7 +520,7 @@ async function loadChart(param) {
         }
 
         state.data[param] = data;
-        createChart(param, data, getOverlayData(param));
+        createChart(param, data, getOverlayData(param), state.chartViewMode);
         loading.classList.add('hidden');
         updateSummary(param, data);
         return data;
@@ -589,7 +591,7 @@ async function loadAllCharts() {
 
     for (const param of paramsToLoad) {
         if (param === 'Total-SNO' && state.data['Total-SNO']) {
-            createChart(param, state.data['Total-SNO'], getOverlayData('Total-SNO'));
+            createChart(param, state.data['Total-SNO'], getOverlayData('Total-SNO'), state.chartViewMode);
             document.getElementById(`loading-${param}`)?.classList.add('hidden');
             updateSummary(param, state.data['Total-SNO']);
         } else {
@@ -639,7 +641,6 @@ function getOverlayData(param) {
 
 function renderComparisonControls() {
     // Inject controls into summary bar or new container
-    // We'll append to summary-bar for now
     const bar = elements.weatherSummary.parentElement;
     let controls = document.getElementById('runComparison');
     if (!controls) {
@@ -661,12 +662,35 @@ function renderComparisonControls() {
                 ${run}Z
             </label>
         `).join('')}
+        <div class="chart-mode-toggle">
+            <span class="comp-label">Chart:</span>
+            <button class="mode-btn ${state.chartViewMode === 'spaghetti' ? 'active' : ''}" data-mode="spaghetti" title="Show individual ensemble member lines">Lines</button>
+            <button class="mode-btn ${state.chartViewMode === 'bands' ? 'active' : ''}" data-mode="bands" title="Show confidence bands (P10-P90)">Bands</button>
+        </div>
     `;
 
-    // Add listeners
+    // Run comparison listeners
     controls.querySelectorAll('input').forEach(input => {
         input.addEventListener('change', (e) => {
             state.visibleRuns[e.target.value] = e.target.checked;
+            rebuildCharts();
+        });
+    });
+
+    // Chart mode toggle listeners
+    controls.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const newMode = e.target.dataset.mode;
+            if (newMode === state.chartViewMode) return;
+
+            state.chartViewMode = newMode;
+            localStorage.setItem('sref-chart-view-mode', newMode);
+
+            // Update button states
+            controls.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+
+            // Rebuild charts with new mode
             rebuildCharts();
         });
     });

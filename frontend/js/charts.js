@@ -2,9 +2,10 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
-console.log('Charts.js loaded (v2.0.1 - exportChartPng update)');
+console.log('Charts.js loaded (v3.0.0 - confidence bands)');
 
 import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
+import { getPercentileBands } from './api.js';
 
 // Store chart instances for cleanup
 const chartInstances = {};
@@ -60,16 +61,11 @@ function getThemeColors() {
  * Create or update a chart
  * @param {string} param - Parameter name
  * @param {Object} data - Ensemble data
- * @returns {Chart} Chart instance
- */
-/**
- * Create or update a chart
- * @param {string} param - Parameter name
- * @param {Object} data - Ensemble data
  * @param {Array} overlayData - Array of { label, data, color } for overlays
+ * @param {string} viewMode - 'spaghetti' (default) or 'bands' for confidence bands
  * @returns {Chart} Chart instance
  */
-export function createChart(param, data, overlayData = []) {
+export function createChart(param, data, overlayData = [], viewMode = 'spaghetti') {
     const info = CONFIG.params[param];
     const responsive = getResponsiveOptions();
     const theme = getThemeColors();
@@ -90,13 +86,11 @@ export function createChart(param, data, overlayData = []) {
     }
 
     // 2. Add Overlay Datasets (Previous Runs) - TRUNCATED to main data range
-    // We truncate to avoid extending the X-axis with data that has already passed
     if (overlayData && overlayData.length > 0) {
         for (const overlay of overlayData) {
             const points = overlay.data;
             if (!points || points.length === 0) continue;
 
-            // Filter points to only those within main data time range
             const filteredPoints = points.filter(p => p.x >= minTime && p.x <= maxTime);
             if (filteredPoints.length === 0) continue;
 
@@ -105,47 +99,151 @@ export function createChart(param, data, overlayData = []) {
                 : filteredPoints;
 
             datasets.push({
-                label: overlay.label, // e.g., "09Z Mean"
+                label: overlay.label,
                 data: chartPoints,
                 borderColor: overlay.color,
                 borderWidth: 2,
-                borderDash: [6, 4], // Dashed line
+                borderDash: [6, 4],
                 pointRadius: 0,
                 pointHitRadius: 20,
                 pointHoverRadius: 4,
                 tension: 0.3,
                 fill: false,
-                order: 2, // Behind main mean
+                order: 5,
             });
         }
     }
 
-    // 2. Add Current Run Datasets
-    for (const [label, points] of Object.entries(data)) {
-        if (points.length === 0) continue;
+    // 3. Add main datasets based on view mode
+    if (viewMode === 'bands') {
+        // Confidence bands mode - shaded regions instead of spaghetti lines
+        const bands = getPercentileBands(data);
 
-        const isMean = label === 'Mean';
-        const isARW = label.startsWith('AR');
+        if (bands) {
+            // Get param-specific color
+            const paramColor = info.type === 'snow' ? '165, 216, 255' :   // --snow
+                info.type === 'precip' ? '81, 207, 102' :  // --precip
+                    info.type === 'temp' ? '255, 135, 135' :   // --temp
+                        info.type === 'wind' ? '255, 212, 59' :    // --wind
+                            '110, 158, 255';                           // default accent
 
-        // Convert wind data if needed
-        const chartPoints = isWind
-            ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
-            : points;
+            // Convert wind data if needed
+            const convertPoints = (points) => isWind
+                ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
+                : points;
 
-        datasets.push({
-            label,
-            data: chartPoints,
-            borderColor: isMean ? theme.meanLineColor : (CONFIG.memberColors[label] || '#666'),
-            borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
-            borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
-            pointRadius: 0,
-            pointHitRadius: 20, // Make hover detection area much larger
-            pointHoverRadius: isMean ? responsive.pointHoverRadius + 2 : responsive.pointHoverRadius,
-            tension: 0.3,
-            fill: false,
-            order: isMean ? 0 : 1, // Mean on top, members below
-            _core: isMean ? 'Mean' : (isARW ? 'ARW' : 'NMB')
-        });
+            // P10 line (hidden, used as fill boundary)
+            datasets.push({
+                label: 'P10',
+                data: convertPoints(bands.p10),
+                borderColor: 'transparent',
+                borderWidth: 0,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: false,
+                order: 4,
+                _band: true
+            });
+
+            // P90 filling down to P10 (outer band)
+            datasets.push({
+                label: 'P90',
+                data: convertPoints(bands.p90),
+                borderColor: `rgba(${paramColor}, 0.3)`,
+                borderWidth: 1,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: {
+                    target: datasets.length - 1, // Fill to P10
+                    above: `rgba(${paramColor}, 0.15)`,
+                    below: `rgba(${paramColor}, 0.15)`
+                },
+                order: 4,
+                _band: true
+            });
+
+            // P25 line (hidden, used as fill boundary)
+            datasets.push({
+                label: 'P25',
+                data: convertPoints(bands.p25),
+                borderColor: 'transparent',
+                borderWidth: 0,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: false,
+                order: 3,
+                _band: true
+            });
+
+            // P75 filling down to P25 (inner band - darker)
+            datasets.push({
+                label: 'P75',
+                data: convertPoints(bands.p75),
+                borderColor: `rgba(${paramColor}, 0.5)`,
+                borderWidth: 1,
+                pointRadius: 0,
+                pointHitRadius: 0,
+                tension: 0.3,
+                fill: {
+                    target: datasets.length - 1, // Fill to P25
+                    above: `rgba(${paramColor}, 0.25)`,
+                    below: `rgba(${paramColor}, 0.25)`
+                },
+                order: 3,
+                _band: true
+            });
+        }
+
+        // Add Mean line on top
+        const meanPoints = data['Mean'];
+        if (meanPoints && meanPoints.length > 0) {
+            const chartPoints = isWind
+                ? meanPoints.map(p => ({ x: p.x, y: convertWind(p.y) }))
+                : meanPoints;
+
+            datasets.push({
+                label: 'Mean',
+                data: chartPoints,
+                borderColor: theme.meanLineColor,
+                borderWidth: responsive.meanLineWidth,
+                pointRadius: 0,
+                pointHitRadius: 20,
+                pointHoverRadius: responsive.pointHoverRadius + 2,
+                tension: 0.3,
+                fill: false,
+                order: 0,
+                _core: 'Mean'
+            });
+        }
+    } else {
+        // Spaghetti mode - individual ensemble member lines
+        for (const [label, points] of Object.entries(data)) {
+            if (points.length === 0) continue;
+
+            const isMean = label === 'Mean';
+            const isARW = label.startsWith('AR');
+
+            const chartPoints = isWind
+                ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
+                : points;
+
+            datasets.push({
+                label,
+                data: chartPoints,
+                borderColor: isMean ? theme.meanLineColor : (CONFIG.memberColors[label] || '#666'),
+                borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
+                pointRadius: 0,
+                pointHitRadius: 20,
+                pointHoverRadius: isMean ? responsive.pointHoverRadius + 2 : responsive.pointHoverRadius,
+                tension: 0.3,
+                fill: false,
+                order: isMean ? 0 : 1,
+                _core: isMean ? 'Mean' : (isARW ? 'ARW' : 'NMB')
+            });
+        }
     }
 
     // Destroy existing chart if present
@@ -154,8 +252,6 @@ export function createChart(param, data, overlayData = []) {
     }
 
     const ctx = document.getElementById(`chart-${param}`).getContext('2d');
-
-    // Define display unit for tooltips
     const displayUnit = isWind ? windUnit : info.unit;
 
     chartInstances[param] = new Chart(ctx, {
@@ -193,7 +289,7 @@ export function createChart(param, data, overlayData = []) {
                 },
                 tooltip: {
                     enabled: true,
-                    position: 'rightOfCursor',  // Custom positioner - 20px right of cursor
+                    position: 'rightOfCursor',
                     backgroundColor: theme.tooltipBg,
                     titleColor: theme.tooltipText,
                     bodyColor: theme.tooltipText,
@@ -205,8 +301,14 @@ export function createChart(param, data, overlayData = []) {
                     displayColors: true,
                     boxWidth: 10,
                     boxHeight: 10,
+                    filter: (item) => {
+                        // In bands mode, hide P10/P25/P75/P90 from tooltip
+                        if (viewMode === 'bands' && item.dataset._band) {
+                            return false;
+                        }
+                        return true;
+                    },
                     itemSort: (a, b) => {
-                        // Mean values first, then alphabetically
                         const aIsMean = a.dataset.label.includes('Mean');
                         const bIsMean = b.dataset.label.includes('Mean');
                         if (aIsMean && !bIsMean) return -1;

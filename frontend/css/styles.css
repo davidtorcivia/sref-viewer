@@ -315,6 +315,39 @@ select:disabled {
     cursor: pointer;
 }
 
+/* Chart Mode Toggle */
+.chart-mode-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-left: 0.5rem;
+    padding-left: 0.8rem;
+    border-left: 1px solid var(--border);
+}
+
+.mode-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-weight: 500;
+}
+
+.mode-btn:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+}
+
+.mode-btn.active {
+    background: var(--accent);
+    color: #000;
+    border-color: var(--accent);
+}
+
 /* ============ Tooltips ============ */
 .tooltip-trigger {
     position: relative;

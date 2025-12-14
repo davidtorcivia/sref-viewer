@@ -87,6 +87,73 @@ export function getEnsembleStats(data, useMax = false) {
 
 
 /**
+ * Calculate percentile value from sorted array
+ * @param {number[]} sortedArr - Sorted array of values
+ * @param {number} percentile - Percentile (0-100)
+ * @returns {number} Value at percentile
+ */
+function percentile(sortedArr, p) {
+    const index = (p / 100) * (sortedArr.length - 1);
+    const lower = Math.floor(index);
+    const upper = Math.ceil(index);
+    if (lower === upper) return sortedArr[lower];
+    return sortedArr[lower] + (sortedArr[upper] - sortedArr[lower]) * (index - lower);
+}
+
+/**
+ * Calculate percentile bands from ensemble data
+ * Returns P10, P25, P75, P90 series aligned to common timestamps
+ * @param {Object} data - Ensemble data object (member name -> [{x, y}])
+ * @returns {Object} Band data with p10, p25, p75, p90 arrays
+ */
+export function getPercentileBands(data) {
+    if (!data) return null;
+
+    // Get all member data (exclude Mean)
+    const members = [];
+    for (const [label, points] of Object.entries(data)) {
+        if (label === 'Mean' || !points || points.length === 0) continue;
+        members.push(points);
+    }
+
+    if (members.length === 0) return null;
+
+    // Use first member's timestamps as reference
+    const refTimestamps = members[0].map(p => p.x);
+
+    // For each timestamp, collect values from all members and calculate percentiles
+    const p10 = [];
+    const p25 = [];
+    const p75 = [];
+    const p90 = [];
+
+    for (let i = 0; i < refTimestamps.length; i++) {
+        const x = refTimestamps[i];
+        const values = [];
+
+        for (const memberPoints of members) {
+            // Find value at this timestamp (or closest)
+            const point = memberPoints[i];
+            if (point) {
+                values.push(point.y);
+            }
+        }
+
+        if (values.length === 0) continue;
+
+        // Sort for percentile calculation
+        values.sort((a, b) => a - b);
+
+        p10.push({ x, y: percentile(values, 10) });
+        p25.push({ x, y: percentile(values, 25) });
+        p75.push({ x, y: percentile(values, 75) });
+        p90.push({ x, y: percentile(values, 90) });
+    }
+
+    return { p10, p25, p75, p90 };
+}
+
+/**
  * Check backend health
  * @returns {Promise<Object>} Health status
  */
