@@ -538,6 +538,10 @@ function updateSummary(param, data) {
 
     if (!stats) return;
 
+    // Check if summary elements exist (they won't for params not in current layout, e.g., snow for dry locations)
+    const summaryEl = document.getElementById(`summary-${param}`);
+    if (!summaryEl) return;
+
     const isWind = info.type === 'wind';
 
     const fmt = (v) => {
@@ -548,11 +552,16 @@ function updateSummary(param, data) {
         return value.toFixed(2);
     };
 
-    document.getElementById(`mean-${param}`).textContent = stats.mean !== null ? fmt(stats.mean) : '--';
-    document.getElementById(`max-${param}`).textContent = fmt(stats.max);
-    document.getElementById(`min-${param}`).textContent = fmt(stats.min);
-    document.getElementById(`spread-${param}`).textContent = fmt(stats.spread);
-    document.getElementById(`summary-${param}`).style.display = 'flex';
+    const meanEl = document.getElementById(`mean-${param}`);
+    const maxEl = document.getElementById(`max-${param}`);
+    const minEl = document.getElementById(`min-${param}`);
+    const spreadEl = document.getElementById(`spread-${param}`);
+
+    if (meanEl) meanEl.textContent = stats.mean !== null ? fmt(stats.mean) : '--';
+    if (maxEl) maxEl.textContent = fmt(stats.max);
+    if (minEl) minEl.textContent = fmt(stats.min);
+    if (spreadEl) spreadEl.textContent = fmt(stats.spread);
+    summaryEl.style.display = 'flex';
 }
 
 async function loadAllCharts() {
