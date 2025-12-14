@@ -70,10 +70,27 @@ function getFromCache(key) {
     return item.data;
 }
 
-function setInCache(key, data, ttlMs) {
+const CACHE_MAX_ENTRIES = 1000;
+const CACHE_TTL_DAYS = 14;  // Keep entries for 14 days
+
+function setInCache(key, data) {
+    // Evict oldest entries if at capacity
+    if (cache.size >= CACHE_MAX_ENTRIES) {
+        // Find oldest entries by cachedAt timestamp
+        const entries = [...cache.entries()].sort((a, b) =>
+            new Date(a[1].cachedAt) - new Date(b[1].cachedAt)
+        );
+        // Remove oldest 10% to avoid constant eviction
+        const toRemove = Math.ceil(CACHE_MAX_ENTRIES * 0.1);
+        for (let i = 0; i < toRemove && i < entries.length; i++) {
+            cache.delete(entries[i][0]);
+            console.log(`[CACHE] Evicted: ${entries[i][0]}`);
+        }
+    }
+
     cache.set(key, {
         data,
-        expiry: Date.now() + ttlMs,
+        expiry: Date.now() + (CACHE_TTL_DAYS * 24 * 60 * 60 * 1000),
         cachedAt: new Date().toISOString()
     });
     saveCacheToDisk();
@@ -297,9 +314,8 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
         const memberCount = Object.keys(processed).filter(k => k !== 'Mean').length;
 
         if (memberCount >= 10) {
-            const ttl = getCacheTTL(parseInt(run));
-            setInCache(cacheKey, processed, ttl);
-            console.log(`[CACHED] ${cacheKey} for ${Math.round(ttl / 1000 / 60)} min (${memberCount} members)`);
+            setInCache(cacheKey, processed);
+            console.log(`[CACHED] ${cacheKey} for ${CACHE_TTL_DAYS} days (${memberCount} members)`);
             res.set('X-Cache', 'MISS');
         } else {
             console.log(`[NOT CACHED] ${cacheKey} - incomplete (${memberCount} members)`);
