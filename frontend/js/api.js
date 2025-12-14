@@ -117,7 +117,7 @@ export function getPercentileBands(data, coreFilter = null) {
 
         // Filter by core type if specified
         if (coreFilter === 'ARW' && !label.startsWith('AR')) continue;
-        if (coreFilter === 'NMB' && !label.startsWith('NM')) continue;
+        if (coreFilter === 'NMB' && !label.startsWith('MB')) continue;
 
         members.push(points);
     }
