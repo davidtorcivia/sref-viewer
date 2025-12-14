@@ -75,11 +75,34 @@ async function init() {
     // Set initial date
     elements.dateInput.value = state.date;
 
-    // Load custom station from localStorage
-    const savedStation = localStorage.getItem('sref-custom-station');
-    if (savedStation) {
-        elements.customStation.value = savedStation;
+    // Parse URL parameters for share links
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlStation = urlParams.get('station');
+    const urlRun = urlParams.get('run');
+    const urlDate = urlParams.get('date');
+
+    // Apply URL params if present (highest priority)
+    if (urlStation) state.station = urlStation.toUpperCase();
+    if (urlRun && ['03', '09', '15', '21'].includes(urlRun)) state.run = urlRun;
+    if (urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate)) state.date = urlDate;
+
+    // If no URL station, try localStorage (second priority)  
+    if (!urlStation) {
+        const savedStation = localStorage.getItem('sref-last-station');
+        if (savedStation) state.station = savedStation;
     }
+
+    // Load custom station from localStorage (for the input field)
+    const savedCustomStation = localStorage.getItem('sref-custom-station');
+    if (savedCustomStation) {
+        elements.customStation.value = savedCustomStation;
+    }
+
+    // Update UI to reflect state
+    elements.dateInput.value = state.date;
+    document.querySelectorAll('#stationBtns button').forEach(b => {
+        b.classList.toggle('active', b.dataset.val === state.station);
+    });
 
     // Update time display
     updateTimeDisplay();
@@ -238,17 +261,21 @@ function handleStationClick(e) {
     document.querySelectorAll('#stationBtns button').forEach(b => b.classList.remove('active'));
     e.target.classList.add('active');
     state.station = e.target.dataset.val;
+    localStorage.setItem('sref-last-station', state.station);
+    updateShareUrl();
     loadAllCharts();
 }
 
 function handleDateChange(e) {
     state.date = e.target.value;
+    updateShareUrl();
     loadAllCharts();
 }
 
 function handleRunChange(e) {
     if (state.isLoading) return;
     state.run = e.target.value;
+    updateShareUrl();
     loadAllCharts();
 }
 
@@ -271,6 +298,21 @@ function updateTimeDisplay() {
         });
         elements.timeDisplay.textContent = `${et} ET / ${utc}Z`;
     }
+}
+
+// ============ Share URL ============
+/**
+ * Update the browser URL with current state for sharing
+ * Creates URLs like: ?station=JFK&run=21&date=2025-12-13
+ */
+function updateShareUrl() {
+    const params = new URLSearchParams();
+    params.set('station', state.station);
+    params.set('run', state.run);
+    params.set('date', state.date);
+
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
 }
 
 // ============ Layout Building ============
@@ -406,7 +448,7 @@ function attachEventHandlers() {
     document.querySelectorAll('.download-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const param = btn.dataset.param;
-            exportChartPng(param, state.station, state.run);
+            exportChartPng(param, state.station, state.run, state.date);
         });
     });
 
@@ -751,6 +793,7 @@ function handleCustomStation() {
     // Update local storage and state
     console.log('Switching to custom station:', input);
     localStorage.setItem('sref-custom-station', input);
+    localStorage.setItem('sref-last-station', input);
 
     // Update UI
     document.querySelectorAll('#stationBtns button').forEach(b => b.classList.remove('active'));
@@ -759,6 +802,7 @@ function handleCustomStation() {
     if (existingBtn) existingBtn.classList.add('active');
 
     state.station = input;
+    updateShareUrl();
     loadAllCharts();
 }
 

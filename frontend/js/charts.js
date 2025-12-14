@@ -305,18 +305,62 @@ export function destroyAllCharts() {
 }
 
 /**
- * Download chart as PNG image
+ * Download chart as PNG image with title and labels
  * @param {string} param - Parameter name
  * @param {string} station - Station code
  * @param {string} run - Model run
+ * @param {string} date - Forecast date
  */
-export function exportChartPng(param, station, run) {
+export function exportChartPng(param, station, run, date = '') {
     const chart = chartInstances[param];
     if (!chart) return;
 
+    const info = CONFIG.params[param];
+    const paramName = info?.name || param;
+    const unit = info?.unit || '';
+
+    // Get the original chart canvas
+    const chartCanvas = chart.canvas;
+    const chartWidth = chartCanvas.width;
+    const chartHeight = chartCanvas.height;
+
+    // Create new canvas with space for title/labels
+    const padding = { top: 60, bottom: 30, left: 0, right: 0 };
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = chartWidth + padding.left + padding.right;
+    exportCanvas.height = chartHeight + padding.top + padding.bottom;
+
+    const ctx = exportCanvas.getContext('2d');
+
+    // Fill background
+    ctx.fillStyle = '#0a0a0f';
+    ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+
+    // Draw title
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(paramName, exportCanvas.width / 2, 28);
+
+    // Draw subtitle (station, run, date)
+    ctx.font = '14px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = '#888888';
+    const subtitle = `${station} • ${run}Z${date ? ' • ' + date : ''} • Units: ${unit}`;
+    ctx.fillText(subtitle, exportCanvas.width / 2, 48);
+
+    // Draw the chart
+    ctx.drawImage(chartCanvas, padding.left, padding.top);
+
+    // Draw footer
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = '#666666';
+    ctx.textAlign = 'right';
+    ctx.fillText('NOAA SREF Ensemble Plumes', exportCanvas.width - 10, exportCanvas.height - 10);
+
+    // Download
     const link = document.createElement('a');
-    link.download = `SREF_${station}_${run}Z_${param}.png`;
-    link.href = chart.toBase64Image();
+    link.download = `SREF_${station}_${run}Z_${param}${date ? '_' + date : ''}.png`;
+    link.href = exportCanvas.toDataURL('image/png');
     link.click();
 }
 
