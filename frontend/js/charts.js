@@ -9,6 +9,14 @@ import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
 // Store chart instances for cleanup
 const chartInstances = {};
 
+// Register custom tooltip positioner - offset 20px to the right of cursor
+Chart.Tooltip.positioners.rightOfCursor = function (elements, eventPosition) {
+    return {
+        x: eventPosition.x + 20,  // 20px to the right
+        y: eventPosition.y
+    };
+};
+
 /**
  * Get responsive chart options based on screen size
  */
@@ -185,10 +193,7 @@ export function createChart(param, data, overlayData = []) {
                 },
                 tooltip: {
                     enabled: true,
-                    position: 'nearest',
-                    xAlign: 'left',  // Anchor tooltip to left, so it appears to the right
-                    yAlign: 'center',
-                    caretPadding: 15, // Offset from cursor
+                    position: 'rightOfCursor',  // Custom positioner - 20px right of cursor
                     backgroundColor: theme.tooltipBg,
                     titleColor: theme.tooltipText,
                     bodyColor: theme.tooltipText,
@@ -200,6 +205,14 @@ export function createChart(param, data, overlayData = []) {
                     displayColors: true,
                     boxWidth: 10,
                     boxHeight: 10,
+                    itemSort: (a, b) => {
+                        // Mean values first, then alphabetically
+                        const aIsMean = a.dataset.label.includes('Mean');
+                        const bIsMean = b.dataset.label.includes('Mean');
+                        if (aIsMean && !bIsMean) return -1;
+                        if (!aIsMean && bIsMean) return 1;
+                        return a.dataset.label.localeCompare(b.dataset.label);
+                    },
                     callbacks: {
                         title: (items) => {
                             if (items.length === 0) return '';
