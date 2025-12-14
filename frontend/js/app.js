@@ -3,7 +3,7 @@
  * Orchestrates UI, state management, and data loading
  */
 
-import { CONFIG, getLatestRun, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
+import { CONFIG, getLatestRun, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
 import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
 import { createChart, toggleCore, exportChartPng } from './charts.js';
 
@@ -211,7 +211,7 @@ async function loadSiteSettings() {
  * Initialize run selection based on time logic.
  * - All runs are always selectable (older data should always exist)
  * - Auto-select the run that's most likely to have data based on current time
- * - If data isn't ready, user sees a loading error but can try again later
+ * - Sets both the run AND the correct date (handles midnight rollover)
  */
 function initializeRunSelection() {
     // All runs are always enabled - user can select any
@@ -221,9 +221,12 @@ function initializeRunSelection() {
         opt.textContent = `${opt.value}Z`;
     });
 
-    // Auto-select the most likely available run based on current UTC time
-    state.run = getLatestRun();
-    elements.runSelect.value = state.run;
+    // Auto-select the most likely available run AND correct date
+    const { run, date } = getLatestRunWithDate();
+    state.run = run;
+    state.date = date;
+    elements.runSelect.value = run;
+    elements.dateInput.value = date;
 
     loadAllCharts();
 }
@@ -333,9 +336,10 @@ function buildLayout() {
                                 </div>
                             </div>
                             <div class="chart-body">
-                                <div class="loading" id="loading-${param}">Loading...</div>
+                                <div class="loading" id="loading-${param}">
+                                    <div class="skeleton skeleton-chart"></div>
+                                </div>
                                 <canvas id="chart-${param}"></canvas>
-                                <button class="download-btn" data-param="${param}" title="Download as PNG">⬇</button>
                             </div>
                             <div class="axis-label">Forecast Time (Eastern)</div>
                             <div class="summary-row" id="summary-${param}" style="display:none">
@@ -355,6 +359,7 @@ function buildLayout() {
                                     <span class="summary-label">Spread</span>
                                     <span class="summary-value ${info.type}" id="spread-${param}">--</span>
                                 </div>
+                                <button class="download-btn" data-param="${param}" title="Download as PNG">⬇ Save</button>
                             </div>
                         </div>
                     `;

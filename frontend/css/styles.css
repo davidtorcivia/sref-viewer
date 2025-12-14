@@ -350,29 +350,24 @@ select:disabled {
     visibility: visible;
 }
 
-/* Download Button - positioned in chart body lower-left */
+/* Download Button - in summary row, right-aligned */
 .download-btn {
-    position: absolute;
-    bottom: 8px;
-    left: 8px;
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text-dim);
-    padding: 0.4rem;
+    padding: 0.4rem 0.75rem;
     border-radius: 4px;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     cursor: pointer;
     transition: all 0.15s;
-    opacity: 0.6;
-    z-index: 10;
-    line-height: 1;
+    margin-left: auto;
+    white-space: nowrap;
 }
 
 .download-btn:hover {
-    background: var(--surface2);
-    color: var(--text);
-    border-color: var(--text-dim);
-    opacity: 1;
+    background: var(--accent);
+    color: #000;
+    border-color: var(--accent);
 }
 
 /* ============ Main Content ============ */
@@ -570,6 +565,43 @@ select:disabled {
 
 .error {
     color: #ff6b6b;
+}
+
+/* ============ Skeleton Loaders ============ */
+.skeleton {
+    background: linear-gradient(90deg, var(--surface2) 25%, var(--surface) 50%, var(--surface2) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: 200% 0;
+    }
+
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+.skeleton-chart {
+    height: 100%;
+    width: 100%;
+    border-radius: 8px;
+}
+
+.skeleton-summary {
+    display: flex;
+    gap: 1.5rem;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface2);
+}
+
+.skeleton-stat {
+    width: 60px;
+    height: 32px;
 }
 
 /* ============ Summary Row ============ */

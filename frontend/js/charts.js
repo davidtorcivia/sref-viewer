@@ -82,6 +82,7 @@ export function createChart(param, data, overlayData = []) {
     }
 
     // 2. Add Overlay Datasets (Previous Runs) - TRUNCATED to main data range
+    // We truncate to avoid extending the X-axis with data that has already passed
     if (overlayData && overlayData.length > 0) {
         for (const overlay of overlayData) {
             const points = overlay.data;
@@ -102,7 +103,7 @@ export function createChart(param, data, overlayData = []) {
                 borderWidth: 2,
                 borderDash: [6, 4], // Dashed line
                 pointRadius: 0,
-                pointHitRadius: 20, // Make hover detection area much larger
+                pointHitRadius: 20,
                 pointHoverRadius: 4,
                 tension: 0.3,
                 fill: false,
@@ -145,6 +146,9 @@ export function createChart(param, data, overlayData = []) {
     }
 
     const ctx = document.getElementById(`chart-${param}`).getContext('2d');
+
+    // Define display unit for tooltips
+    const displayUnit = isWind ? windUnit : info.unit;
 
     chartInstances[param] = new Chart(ctx, {
         type: 'line',

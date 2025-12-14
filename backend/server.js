@@ -148,6 +148,30 @@ function fetchFromNOAA(station, run, param, date) {
 }
 
 /**
+ * Fetch with exponential backoff retry
+ * Retries on network errors and 5xx status codes
+ */
+async function fetchWithRetry(station, run, param, date, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            return await fetchFromNOAA(station, run, param, date);
+        } catch (err) {
+            const isRetryable = err.message.includes('timeout') ||
+                err.message.includes('ECONNRESET') ||
+                err.message.includes('NOAA returned 5');
+
+            if (attempt === retries || !isRetryable) {
+                throw err;
+            }
+
+            const delay = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+            console.log(`[RETRY] Attempt ${attempt} failed (${err.message}), retrying in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+}
+
+/**
  * Process raw NOAA data into a cleaner format with computed mean
  */
 function processData(raw) {
@@ -179,6 +203,22 @@ function processData(raw) {
     return processed;
 }
 
+// ============ API Rate Limiting ============
+const apiLimits = new Map();
+const API_RATE_LIMIT = 30; // requests per window
+const API_RATE_WINDOW = 60 * 1000; // 1 minute
+
+function checkApiRateLimit(ip) {
+    const now = Date.now();
+    const requests = (apiLimits.get(ip) || []).filter(t => now - t < API_RATE_WINDOW);
+    if (requests.length >= API_RATE_LIMIT) {
+        return false;
+    }
+    requests.push(now);
+    apiLimits.set(ip, requests);
+    return true;
+}
+
 // ============ Routes ============
 
 app.get('/health', (req, res) => {
@@ -199,6 +239,14 @@ app.get('/api/cache-stats', (req, res) => {
 });
 
 app.get('/api/sref/:station/:run/:param', async (req, res) => {
+    const ip = req.ip || req.connection.remoteAddress;
+
+    // Rate limiting
+    if (!checkApiRateLimit(ip)) {
+        console.log(`[RATE LIMIT] ${ip}`);
+        return res.status(429).json({ error: 'Too many requests. Please slow down.' });
+    }
+
     const { station, run, param } = req.params;
     const date = req.query.date || new Date().toISOString().split('T')[0];
 
@@ -228,7 +276,7 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
     console.log(`[CACHE MISS] ${cacheKey} - fetching from NOAA...`);
 
     try {
-        const raw = await fetchFromNOAA(station.toUpperCase(), run, param, date);
+        const raw = await fetchWithRetry(station.toUpperCase(), run, param, date);
         const processed = processData(raw);
         const memberCount = Object.keys(processed).filter(k => k !== 'Mean').length;
 

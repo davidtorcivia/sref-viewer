@@ -72,37 +72,61 @@ export function getWindUnit() {
 }
 
 /**
- * Determine the most recent available model run based on current UTC time
+ * Determine the most recent available model run based on current time
  * SREF runs at 03Z, 09Z, 15Z, 21Z
- * Data typically completes ~5h20m after run time:
- *   03Z ready by ~08:20 UTC
- *   09Z ready by ~14:20 UTC
- *   15Z ready by ~20:20 UTC
- *   21Z ready by ~02:20 UTC (next day)
- * v2: Fixed to properly default to 15Z before 02:20 UTC
+ * Data availability times (ET/EST):
+ *   03Z ready by ~03:20 AM EST (08:20 UTC)
+ *   09Z ready by ~09:20 AM EST (14:20 UTC)
+ *   15Z ready by ~03:20 PM EST (20:20 UTC)
+ *   21Z ready by ~09:20 PM EST (02:20 UTC next day)
+ * 
+ * Returns the run time string. Use getLatestRunWithDate() if you also need the date.
  */
 export function getLatestRun() {
+    return getLatestRunWithDate().run;
+}
+
+/**
+ * Get the most recent available run AND the correct date for that run
+ * This handles the date rollover correctly - e.g., at 00:50 ET on 12/14,
+ * we should load 21Z from 12/13, not 21Z from 12/14 (which doesn't exist yet).
+ */
+export function getLatestRunWithDate() {
     const now = new Date();
     const utcHour = now.getUTCHours();
     const utcMinute = now.getUTCMinutes();
     const utcTime = utcHour + utcMinute / 60; // Decimal hours
 
-    let result;
+    let run;
+    let needsYesterday = false;
+
     // Check in reverse order (most recent first)
     if (utcTime >= 20.33) {
-        result = '15';         // After 20:20 UTC
+        run = '15';         // After 20:20 UTC - 15Z is ready
     } else if (utcTime >= 14.33) {
-        result = '09';         // After 14:20 UTC
+        run = '09';         // After 14:20 UTC - 09Z is ready
     } else if (utcTime >= 8.33) {
-        result = '03';         // After 08:20 UTC
+        run = '03';         // After 08:20 UTC - 03Z is ready
     } else if (utcTime >= 2.33) {
-        result = '21';         // After 02:20 UTC (21Z from yesterday)
+        run = '21';         // After 02:20 UTC - 21Z from YESTERDAY is ready
+        needsYesterday = true;
     } else {
-        result = '15';         // Before 02:20 UTC, use 15Z from yesterday
+        run = '15';         // Before 02:20 UTC - 15Z from YESTERDAY is the latest
+        needsYesterday = true;
     }
 
-    console.log(`[RUN] UTC ${utcHour}:${utcMinute} (${utcTime.toFixed(2)}) → ${result}Z`);
-    return result;
+    // Calculate the correct date
+    let date;
+    if (needsYesterday) {
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        date = yesterday.toISOString().split('T')[0];
+    } else {
+        date = now.toISOString().split('T')[0];
+    }
+
+    console.log(`[RUN] UTC ${utcHour}:${String(utcMinute).padStart(2, '0')} (${utcTime.toFixed(2)}) → ${run}Z on ${date}`);
+    return { run, date };
 }
 
 /**
