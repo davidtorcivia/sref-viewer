@@ -102,6 +102,7 @@ export function createChart(param, data, overlayData = []) {
                 borderWidth: 2,
                 borderDash: [6, 4], // Dashed line
                 pointRadius: 0,
+                pointHitRadius: 20, // Make hover detection area much larger
                 pointHoverRadius: 4,
                 tension: 0.3,
                 fill: false,
@@ -127,7 +128,9 @@ export function createChart(param, data, overlayData = []) {
             data: chartPoints,
             borderColor: isMean ? theme.meanLineColor : (CONFIG.memberColors[label] || '#666'),
             borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
+            borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
             pointRadius: 0,
+            pointHitRadius: 20, // Make hover detection area much larger
             pointHoverRadius: isMean ? responsive.pointHoverRadius + 2 : responsive.pointHoverRadius,
             tension: 0.3,
             fill: false,
@@ -152,7 +155,7 @@ export function createChart(param, data, overlayData = []) {
             animation: { duration: 300 },
             interaction: {
                 intersect: false,
-                mode: 'index'
+                mode: 'index',
             },
             plugins: {
                 legend: { display: false },
