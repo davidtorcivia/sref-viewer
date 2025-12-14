@@ -9,10 +9,10 @@ import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
 // Store chart instances for cleanup
 const chartInstances = {};
 
-// Register custom tooltip positioner - offset 20px to the right of cursor
+// Register custom tooltip positioner - offset 50px to the right of cursor
 Chart.Tooltip.positioners.rightOfCursor = function (elements, eventPosition) {
     return {
-        x: eventPosition.x + 20,  // 20px to the right
+        x: eventPosition.x + 50,  // 50px to the right
         y: eventPosition.y
     };
 };
