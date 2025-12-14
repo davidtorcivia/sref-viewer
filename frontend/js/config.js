@@ -73,14 +73,25 @@ export function getWindUnit() {
 
 /**
  * Determine the most recent available model run based on current UTC time
+ * SREF runs at 03Z, 09Z, 15Z, 21Z
+ * Data typically completes ~5h20m after run time:
+ *   03Z ready by ~08:20 UTC
+ *   09Z ready by ~14:20 UTC
+ *   15Z ready by ~20:20 UTC
+ *   21Z ready by ~02:20 UTC (next day)
  */
 export function getLatestRun() {
-    const utcHour = new Date().getUTCHours();
-    // Data available ~2 hours after run time
-    if (utcHour >= 23 || utcHour < 5) return '21';
-    if (utcHour >= 5 && utcHour < 11) return '03';
-    if (utcHour >= 11 && utcHour < 17) return '09';
-    return '15';
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMinute = now.getUTCMinutes();
+    const utcTime = utcHour + utcMinute / 60; // Decimal hours
+
+    // Check in reverse order (most recent first)
+    if (utcTime >= 20.33) return '15';         // After 20:20 UTC
+    if (utcTime >= 14.33) return '09';         // After 14:20 UTC
+    if (utcTime >= 8.33) return '03';          // After 08:20 UTC
+    if (utcTime >= 2.33) return '21';          // After 02:20 UTC (21Z from yesterday)
+    return '15';                                // Before 02:20 UTC, use 15Z from yesterday
 }
 
 /**

@@ -27,7 +27,7 @@ const state = {
     isLoading: false,
     // Run comparison feature
     previousRuns: {}, // { '03': { param: data }, '09': { param: data }, ... }
-    visibleRuns: {}, // { '03': true, '09': false, ... } - which runs to overlay
+    visibleRuns: { '03': true, '09': true, '15': true, '21': true }, // All checked by default
 };
 
 // Run colors for comparison overlay
@@ -514,31 +514,92 @@ function renderComparisonControls() {
 }
 
 // ============ Previous Runs for Trend Comparison ============
+/**
+ * Get the date to use for a given run.
+ * If the run hasn't completed yet today, use yesterday's date.
+ * Completion times (~5h20m after run):
+ *   03Z ready by ~08:20 UTC
+ *   09Z ready by ~14:20 UTC
+ *   15Z ready by ~20:20 UTC
+ *   21Z ready by ~02:20 UTC (next day)
+ */
+function getDateForRun(run) {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMinute = now.getUTCMinutes();
+    const utcTime = utcHour + utcMinute / 60;
+
+    // Completion times in decimal UTC hours
+    const completionTimes = {
+        '03': 8.33,   // 08:20 UTC
+        '09': 14.33,  // 14:20 UTC
+        '15': 20.33,  // 20:20 UTC
+        '21': 2.33    // 02:20 UTC (next day, special handling)
+    };
+
+    const runCompleteTime = completionTimes[run];
+
+    // 21Z is special - it completes after midnight UTC
+    // If we're before 02:20 UTC, 21Z from TODAY hasn't completed, use yesterday
+    // If we're after 02:20 UTC but 21Z is still "future", it means today's 21Z hasn't run
+    let needsYesterday;
+    if (run === '21') {
+        // 21Z completes at 02:20 UTC next day
+        // Use today's date only if utcTime >= 2.33 (meaning yesterday's 21Z completed)
+        // But we want yesterday's 21Z data, not today's (which hasn't run)
+        needsYesterday = utcTime < 2.33 || utcTime >= 21; // Before 02:20 or after 21:00
+    } else {
+        // For other runs, use yesterday if current time < completion time
+        needsYesterday = utcTime < runCompleteTime;
+    }
+
+    if (needsYesterday) {
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const year = yesterday.getFullYear();
+        const month = String(yesterday.getMonth() + 1).padStart(2, '0');
+        const day = String(yesterday.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    return state.date;
+}
+
 async function fetchPreviousRuns() {
     const allRuns = ['03', '09', '15', '21'];
     const otherRuns = allRuns.filter(r => r !== state.run);
 
+    // Get params to fetch based on current view
+    const paramsToFetch = state.hasSnow ? CONFIG.snowOrder : CONFIG.defaultOrder;
+
     // Clear previous data
     state.previousRuns = {};
 
-    // Fetch each run's data in parallel
+    // Fetch each run's data
     for (const run of otherRuns) {
-        try {
-            // Just fetch the main parameter for trend comparison (use snow or precip)
-            const param = state.hasSnow ? 'Total-SNO' : 'Total-QPF';
-            const data = await fetchSREFData(state.station, run, param, state.date);
+        state.previousRuns[run] = {};
+        const dateForRun = getDateForRun(run);
 
-            if (data && Object.keys(data).length > 0) {
-                state.previousRuns[run] = { [param]: data };
-                console.log(`[TREND] Loaded ${run}Z ${param}`);
+        for (const param of paramsToFetch) {
+            try {
+                const data = await fetchSREFData(state.station, run, param, dateForRun);
+                if (data && Object.keys(data).length > 0) {
+                    state.previousRuns[run][param] = data;
+                }
+            } catch (err) {
+                // Silent fail - run/param combo not available
             }
-        } catch (err) {
-            console.log(`[TREND] ${run}Z not available:`, err.message);
+        }
+
+        const loadedCount = Object.keys(state.previousRuns[run]).length;
+        if (loadedCount > 0) {
+            console.log(`[TREND] Loaded ${run}Z (${dateForRun}): ${loadedCount} params`);
         }
     }
 
-    // Update trend text
+    // Update UI
     updateTrendText();
+    rebuildCharts(); // Rebuild to show overlays
 }
 
 function updateTrendText() {
