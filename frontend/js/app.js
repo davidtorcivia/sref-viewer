@@ -425,7 +425,7 @@ async function loadAllCharts() {
             document.getElementById(`loading-${param}`)?.classList.add('hidden');
             updateSummary(param, state.data['Total-SNO']);
         } else {
-            loadChart(param);
+            await loadChart(param);
         }
     }
 
