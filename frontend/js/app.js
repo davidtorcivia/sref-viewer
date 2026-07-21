@@ -3,7 +3,7 @@
  * Orchestrates UI, state management, and data loading
  */
 
-import { CONFIG, getLatestRun, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
+import { CONFIG, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
 import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
 import { createChart, toggleCore, exportChartPng } from './charts.js';
 
@@ -29,9 +29,11 @@ const state = {
     isLoading: false,
     // Run comparison feature
     previousRuns: {}, // { '03': { param: data }, '09': { param: data }, ... }
-    visibleRuns: { '03': true, '09': true, '15': true, '21': true }, // All checked by default
-    // Chart display mode: 'spaghetti' (individual lines) or 'bands' (confidence bands)
-    chartViewMode: localStorage.getItem('sref-chart-view-mode') || 'spaghetti',
+    // Overlays default off on phones: 26 lines + 3 dashed means is unreadable there
+    visibleRuns: Object.fromEntries(['03', '09', '15', '21'].map(r => [r, !isMobile()])),
+    // Chart display mode: 'spaghetti' (individual lines), 'bands', or 'both'.
+    // Bands are the only legible default at phone widths.
+    chartViewMode: localStorage.getItem('sref-chart-view-mode') || (isMobile() ? 'bands' : 'spaghetti'),
 };
 
 // Run colors for comparison overlay
@@ -153,11 +155,16 @@ async function init() {
         });
     }
 
-    // Handle resize for responsive charts
+    // Handle resize for responsive charts. Only react to width changes -
+    // mobile browsers fire resize when the address bar shows/hides, and
+    // rebuilding every chart mid-scroll causes visible jank.
     let resizeTimeout;
+    let lastWidth = window.innerWidth;
     window.addEventListener('resize', () => {
         clearTimeout(resizeTimeout);
         resizeTimeout = setTimeout(() => {
+            if (window.innerWidth === lastWidth) return;
+            lastWidth = window.innerWidth;
             if (Object.keys(state.data).length > 0) {
                 rebuildCharts();
             }
@@ -167,8 +174,9 @@ async function init() {
     // Load site settings from admin panel
     await loadSiteSettings();
 
-    // Initialize run selection and load data
-    initializeRunSelection();
+    // Initialize run selection and load data.
+    // A shared URL's run/date must survive - don't auto-select over them.
+    initializeRunSelection(Boolean(urlRun || urlDate));
 }
 
 // ============ Site Settings ============
@@ -261,7 +269,7 @@ async function loadSiteSettings() {
  * - Auto-select the run that's most likely to have data based on current time
  * - Sets both the run AND the correct date (handles midnight rollover)
  */
-function initializeRunSelection() {
+function initializeRunSelection(preserveState = false) {
     // All runs are always enabled - user can select any
     const options = elements.runSelect.querySelectorAll('option');
     options.forEach(opt => {
@@ -269,12 +277,17 @@ function initializeRunSelection() {
         opt.textContent = `${opt.value}Z`;
     });
 
-    // Auto-select the most likely available run AND correct date
-    const { run, date } = getLatestRunWithDate();
-    state.run = run;
-    state.date = date;
-    elements.runSelect.value = run;
-    elements.dateInput.value = date;
+    if (!preserveState) {
+        // Auto-select the most likely available run AND correct date
+        const { run, date } = getLatestRunWithDate();
+        state.run = run;
+        state.date = date;
+    } else if (!state.run) {
+        // Shared URL had a date but no run
+        state.run = getLatestRunWithDate().run;
+    }
+    elements.runSelect.value = state.run;
+    elements.dateInput.value = state.date;
 
     loadAllCharts();
 }
@@ -494,12 +507,56 @@ function attachEventHandlers() {
     }
 }
 
+// ============ Lazy Chart Rendering ============
+// Fetching is cheap (cached JSON) but Chart.js instantiation of 26-line
+// charts is not - defer rendering of below-fold charts until they scroll
+// near the viewport.
+const pendingRenders = new Map(); // param -> data
+let chartObserver = null;
+
+function ensureChartObserver() {
+    if (chartObserver) return chartObserver;
+    chartObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const param = entry.target.dataset.param;
+            const data = pendingRenders.get(param);
+            if (data) {
+                pendingRenders.delete(param);
+                createChart(param, data, getOverlayData(param), state.chartViewMode);
+            }
+            chartObserver.unobserve(entry.target);
+        }
+    }, { rootMargin: '250px' });
+    return chartObserver;
+}
+
+function renderChart(param, data) {
+    document.getElementById(`loading-${param}`)?.classList.add('hidden');
+    updateSummary(param, data);
+
+    const card = document.getElementById(`card-${param}`);
+    if (!card || !('IntersectionObserver' in window)) {
+        createChart(param, data, getOverlayData(param), state.chartViewMode);
+        return;
+    }
+
+    const rect = card.getBoundingClientRect();
+    const nearViewport = rect.top < window.innerHeight + 250 && rect.bottom > -250;
+    if (nearViewport) {
+        createChart(param, data, getOverlayData(param), state.chartViewMode);
+    } else {
+        pendingRenders.set(param, data);
+        ensureChartObserver().observe(card);
+    }
+}
+
 function rebuildCharts() {
+    // Layout is regenerated - previous observers point at detached nodes
+    pendingRenders.clear();
     buildLayout();
     for (const [param, data] of Object.entries(state.data)) {
-        createChart(param, data, getOverlayData(param), state.chartViewMode);
-        document.getElementById(`loading-${param}`)?.classList.add('hidden');
-        updateSummary(param, data);
+        renderChart(param, data);
     }
 }
 
@@ -508,7 +565,6 @@ async function loadChart(param) {
     const loading = document.getElementById(`loading-${param}`);
     if (!loading) return null;
 
-    loading.textContent = 'Loading...';
     loading.classList.remove('hidden', 'error');
 
     try {
@@ -520,13 +576,18 @@ async function loadChart(param) {
         }
 
         state.data[param] = data;
-        createChart(param, data, getOverlayData(param), state.chartViewMode);
-        loading.classList.add('hidden');
-        updateSummary(param, data);
+        renderChart(param, data);
         return data;
     } catch (err) {
         console.error(`Failed to load ${param}:`, err);
-        loading.innerHTML = `<span class="error">No data</span><br><small style="color:#666">${err.message}</small>`;
+        loading.textContent = '';
+        const label = document.createElement('span');
+        label.className = 'error';
+        label.textContent = 'No data';
+        const detail = document.createElement('small');
+        detail.style.color = '#666';
+        detail.textContent = err.message;
+        loading.append(label, document.createElement('br'), detail);
         return null;
     }
 }
@@ -595,18 +656,17 @@ async function loadAllCharts() {
     // Render comparison controls
     renderComparisonControls();
 
-    // Load all charts
+    // Load all charts in parallel - the backend cache makes these cheap,
+    // and serial loading multiplied worst-case latency by six
     const paramsToLoad = state.hasSnow ? CONFIG.snowOrder : CONFIG.defaultOrder;
 
-    for (const param of paramsToLoad) {
+    await Promise.all(paramsToLoad.map(param => {
         if (param === 'Total-SNO' && state.data['Total-SNO']) {
-            createChart(param, state.data['Total-SNO'], getOverlayData('Total-SNO'), state.chartViewMode);
-            document.getElementById(`loading-${param}`)?.classList.add('hidden');
-            updateSummary(param, state.data['Total-SNO']);
-        } else {
-            await loadChart(param);
+            renderChart(param, state.data['Total-SNO']);
+            return Promise.resolve();
         }
-    }
+        return loadChart(param);
+    }));
 
     const now = new Date();
     elements.status.textContent = `${state.station} • ${state.run}Z`;
@@ -681,8 +741,12 @@ function renderComparisonControls() {
 
     // Run comparison listeners
     controls.querySelectorAll('input').forEach(input => {
-        input.addEventListener('change', (e) => {
+        input.addEventListener('change', async (e) => {
             state.visibleRuns[e.target.value] = e.target.checked;
+            if (e.target.checked) {
+                // May not be prefetched (mobile only prefetches the trend param)
+                await ensureRunData(e.target.value);
+            }
             rebuildCharts();
         });
     });
@@ -718,6 +782,15 @@ function renderComparisonControls() {
  */
 function getDateForRun(run) {
     const now = new Date();
+    const todayUTC = now.toISOString().split('T')[0];
+    const latestDate = getLatestRunWithDate().date;
+
+    // Viewing a historical date: every run from that date already exists,
+    // so compare runs from the SAME date instead of mixing in today's
+    if (state.date !== todayUTC && state.date !== latestDate) {
+        return state.date;
+    }
+
     const utcHour = now.getUTCHours();
     const utcMinute = now.getUTCMinutes();
     const utcTime = utcHour + utcMinute / 60;
@@ -758,41 +831,62 @@ function getDateForRun(run) {
     return state.date;
 }
 
+/**
+ * Fetch a previous run's data for all current params (used when a
+ * comparison overlay is toggled on and its data isn't loaded yet)
+ */
+async function ensureRunData(run) {
+    const paramsToFetch = state.hasSnow ? CONFIG.snowOrder : CONFIG.defaultOrder;
+    if (!state.previousRuns[run]) state.previousRuns[run] = {};
+    const dateForRun = getDateForRun(run);
+
+    await Promise.all(paramsToFetch.map(async (param) => {
+        if (state.previousRuns[run][param]) return;
+        try {
+            const data = await fetchSREFData(state.station, run, param, dateForRun);
+            if (data && Object.keys(data).length > 0) {
+                state.previousRuns[run][param] = data;
+            }
+        } catch {
+            // Run/param combo not available
+        }
+    }));
+}
+
 async function fetchPreviousRuns() {
     const allRuns = ['03', '09', '15', '21'];
     const otherRuns = allRuns.filter(r => r !== state.run);
 
-    // Get params to fetch based on current view
-    const paramsToFetch = state.hasSnow ? CONFIG.snowOrder : CONFIG.defaultOrder;
+    // When no overlays are shown (the mobile default), only the summary
+    // trend needs previous-run data - one param instead of six per run
+    const anyOverlayVisible = otherRuns.some(r => state.visibleRuns[r]);
+    const trendParam = state.hasSnow ? 'Total-SNO' : 'Total-QPF';
 
     // Clear previous data
     state.previousRuns = {};
 
-    // Fetch each run's data
-    for (const run of otherRuns) {
-        state.previousRuns[run] = {};
-        const dateForRun = getDateForRun(run);
-
-        for (const param of paramsToFetch) {
+    await Promise.all(otherRuns.map(async (run) => {
+        if (anyOverlayVisible) {
+            await ensureRunData(run);
+        } else {
+            state.previousRuns[run] = {};
+            const dateForRun = getDateForRun(run);
             try {
-                const data = await fetchSREFData(state.station, run, param, dateForRun);
+                const data = await fetchSREFData(state.station, run, trendParam, dateForRun);
                 if (data && Object.keys(data).length > 0) {
-                    state.previousRuns[run][param] = data;
+                    state.previousRuns[run][trendParam] = data;
                 }
-            } catch (err) {
-                // Silent fail - run/param combo not available
+            } catch {
+                // Run not available
             }
         }
-
-        const loadedCount = Object.keys(state.previousRuns[run]).length;
-        if (loadedCount > 0) {
-            console.log(`[TREND] Loaded ${run}Z (${dateForRun}): ${loadedCount} params`);
-        }
-    }
+    }));
 
     // Update UI
     updateTrendText();
-    rebuildCharts(); // Rebuild to show overlays
+    if (anyOverlayVisible) {
+        rebuildCharts(); // Rebuild to show overlays
+    }
 }
 
 function updateTrendText() {

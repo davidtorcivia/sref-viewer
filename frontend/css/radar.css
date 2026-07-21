@@ -1,0 +1,206 @@
+/* Radar map page - full-viewport map with floating chrome */
+
+:root {
+    --bg: #0a0a0f;
+    --surface: rgba(18, 18, 26, 0.92);
+    --border: #2a2a3a;
+    --text: #e4e4ef;
+    --text-dim: #8a8a9f;
+    --accent: #6e9eff;
+    --nowcast: #ffd43b;
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #f5f5f7;
+        --surface: rgba(255, 255, 255, 0.92);
+        --border: #d1d1d6;
+        --text: #1c1c1e;
+        --text-dim: #6e6e73;
+        --accent: #0066cc;
+        --nowcast: #b8860b;
+    }
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body {
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+}
+
+#map {
+    position: fixed;
+    inset: 0;
+}
+
+/* ============ Floating Header ============ */
+.radar-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: max(0.6rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-left));
+    pointer-events: none;
+    /* Let map gestures pass between elements */
+}
+
+.radar-header>* {
+    pointer-events: auto;
+}
+
+.nav-link {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.9rem;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    backdrop-filter: blur(8px);
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+}
+
+.radar-title {
+    font-weight: 700;
+    font-size: 1rem;
+    background: var(--surface);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.45rem 0.8rem;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.radar-updated {
+    margin-left: auto;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    background: var(--surface);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.45rem 0.8rem;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+}
+
+/* ============ Bottom Controls ============ */
+.radar-controls {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: min(560px, calc(100% - 1.5rem));
+    background: var(--surface);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.6rem 0.9rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.play-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    border-radius: 50%;
+    font-size: 1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.15s;
+}
+
+.play-btn:hover {
+    opacity: 0.9;
+}
+
+.scrubber-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+#scrubber {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+    height: 28px;
+    /* Bigger touch target */
+}
+
+.scrubber-labels {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+    min-height: 1.1rem;
+}
+
+.frame-time {
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    font-weight: 600;
+}
+
+.frame-badge {
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+.frame-badge.nowcast {
+    color: var(--nowcast);
+}
+
+/* MapLibre control tweaks for dark mode */
+@media (prefers-color-scheme: dark) {
+
+    .maplibregl-ctrl-group,
+    .maplibregl-ctrl-attrib {
+        background: var(--surface) !important;
+    }
+
+    .maplibregl-ctrl-group button span {
+        filter: invert(0.85);
+    }
+
+    .maplibregl-ctrl-attrib,
+    .maplibregl-ctrl-attrib a {
+        color: var(--text-dim) !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .radar-updated {
+        display: none;
+    }
+}

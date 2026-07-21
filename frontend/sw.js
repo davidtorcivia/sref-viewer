@@ -3,141 +3,134 @@
  * Provides offline support and caching
  */
 
-const CACHE_NAME = 'sref-v1';
-const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+const STATIC_CACHE = 'sref-static-v3';
+const API_CACHE = 'sref-api-v1';
+const API_MAX_ENTRIES = 80;               // Bound Cache Storage growth
+const API_MAX_AGE_MS = 24 * 60 * 60 * 1000; // Don't serve API data older than 24h offline
 
 // Assets to precache on install
 const PRECACHE_URLS = [
     '/',
     '/index.html',
+    '/radar',
+    '/radar.html',
     '/css/styles.css',
+    '/css/radar.css',
+    '/icons/favicon.svg',
     '/js/app.js',
     '/js/api.js',
     '/js/charts.js',
-    '/js/config.js'
-];
-
-// CDN assets to cache on first use
-const CDN_ASSETS = [
-    'https://cdn.jsdelivr.net/npm/chart.js@4.4.1',
-    'https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0',
-    'https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1'
+    '/js/config.js',
+    '/js/radar.js',
+    '/vendor/chart.umd.min.js',
+    '/vendor/chartjs-adapter-date-fns.bundle.min.js',
+    '/vendor/chartjs-plugin-annotation.min.js',
+    '/vendor/maplibre-gl.js',
+    '/vendor/maplibre-gl.css'
 ];
 
 // Install event - precache static assets
 self.addEventListener('install', (event) => {
-    console.log('[SW] Installing...');
     event.waitUntil(
-        caches.open(CACHE_NAME)
-            .then((cache) => {
-                console.log('[SW] Precaching static assets');
-                return cache.addAll(PRECACHE_URLS);
-            })
+        caches.open(STATIC_CACHE)
+            .then((cache) => cache.addAll(PRECACHE_URLS))
             .then(() => self.skipWaiting())
     );
 });
 
 // Activate event - clean old caches
 self.addEventListener('activate', (event) => {
-    console.log('[SW] Activating...');
     event.waitUntil(
         caches.keys().then((cacheNames) => {
             return Promise.all(
                 cacheNames
-                    .filter((name) => name !== CACHE_NAME)
-                    .map((name) => {
-                        console.log('[SW] Deleting old cache:', name);
-                        return caches.delete(name);
-                    })
+                    .filter((name) => name !== STATIC_CACHE && name !== API_CACHE)
+                    .map((name) => caches.delete(name))
             );
         }).then(() => self.clients.claim())
     );
 });
 
-// Fetch event - network-first for API, cache-first for static
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // Skip non-GET requests
-    if (event.request.method !== 'GET') {
-        return;
-    }
+    if (event.request.method !== 'GET') return;
 
-    // API requests: network-first with cache fallback
+    // Radar tiles / external hosts: let the browser handle them
+    if (url.origin !== location.origin) return;
+
+    // API requests: network-first with bounded cache fallback
     if (url.pathname.startsWith('/api/')) {
-        event.respondWith(networkFirstWithCache(event.request));
+        event.respondWith(networkFirstApi(event.request));
         return;
     }
 
-    // CDN assets: cache-first
-    if (CDN_ASSETS.some(cdn => url.href.startsWith(cdn))) {
-        event.respondWith(cacheFirstWithNetwork(event.request));
+    // Vendored libraries are pinned versions - cache-first is safe and fast
+    if (url.pathname.startsWith('/vendor/')) {
+        event.respondWith(staleWhileRevalidate(event.request));
         return;
     }
 
-    // Static assets: cache-first with network fallback
-    if (url.origin === location.origin) {
-        event.respondWith(cacheFirstWithNetwork(event.request));
-        return;
-    }
+    // Everything else (pages, app css/js, icons): network-first. App HTML,
+    // CSS, and JS must always be the same version - serving stale CSS with
+    // fresh HTML breaks styling after a deploy. nginx serves these with
+    // etags, so revalidation is a cheap 304 and offline still works.
+    event.respondWith(networkFirstPage(event.request));
 });
 
 /**
- * Network-first strategy with cache fallback
- * Used for API requests - always try network first for fresh data
+ * Network-first for API data. Successful responses are cached with a
+ * timestamp header; the cache is trimmed to API_MAX_ENTRIES and entries
+ * older than API_MAX_AGE_MS are not served.
  */
-async function networkFirstWithCache(request) {
-    const cache = await caches.open(CACHE_NAME);
+async function networkFirstApi(request) {
+    const cache = await caches.open(API_CACHE);
 
     try {
         const networkResponse = await fetch(request);
-
-        // Only cache successful responses
         if (networkResponse.ok) {
-            // Clone response because it can only be consumed once
-            const responseToCache = networkResponse.clone();
-
-            // Add timestamp to cached response
-            cache.put(request, responseToCache);
+            const headers = new Headers(networkResponse.headers);
+            headers.set('sw-cached-at', String(Date.now()));
+            const body = await networkResponse.clone().blob();
+            cache.put(request, new Response(body, {
+                status: networkResponse.status,
+                statusText: networkResponse.statusText,
+                headers
+            }));
+            trimApiCache(cache);
         }
-
         return networkResponse;
     } catch (error) {
-        // Network failed, try cache
-        console.log('[SW] Network failed, trying cache:', request.url);
         const cachedResponse = await cache.match(request);
-
         if (cachedResponse) {
-            console.log('[SW] Serving from cache:', request.url);
-            return cachedResponse;
+            const cachedAt = Number(cachedResponse.headers.get('sw-cached-at') || 0);
+            if (Date.now() - cachedAt < API_MAX_AGE_MS) {
+                return cachedResponse;
+            }
         }
-
-        // Return offline fallback for API
         return new Response(
             JSON.stringify({ error: 'Offline', offline: true }),
-            {
-                status: 503,
-                headers: { 'Content-Type': 'application/json' }
-            }
+            { status: 503, headers: { 'Content-Type': 'application/json' } }
         );
     }
 }
 
-/**
- * Cache-first strategy with network fallback
- * Used for static assets - prefer cached version for speed
- */
-async function cacheFirstWithNetwork(request) {
-    const cache = await caches.open(CACHE_NAME);
-    const cachedResponse = await cache.match(request);
-
-    if (cachedResponse) {
-        // Return cached immediately, update in background
-        updateCacheInBackground(request, cache);
-        return cachedResponse;
+async function trimApiCache(cache) {
+    const keys = await cache.keys();
+    if (keys.length <= API_MAX_ENTRIES) return;
+    // Keys are in insertion order - drop the oldest
+    const excess = keys.length - API_MAX_ENTRIES;
+    for (let i = 0; i < excess; i++) {
+        await cache.delete(keys[i]);
     }
+}
 
-    // Not in cache, fetch from network
+/**
+ * Network-first for pages and app assets, falling back to cache offline.
+ * Only navigations fall back to the app shell.
+ */
+async function networkFirstPage(request) {
+    const cache = await caches.open(STATIC_CACHE);
     try {
         const networkResponse = await fetch(request);
         if (networkResponse.ok) {
@@ -145,21 +138,34 @@ async function cacheFirstWithNetwork(request) {
         }
         return networkResponse;
     } catch (error) {
-        console.log('[SW] Both cache and network failed:', request.url);
+        let cachedResponse = await cache.match(request);
+        if (!cachedResponse && request.mode === 'navigate') {
+            cachedResponse = await cache.match('/index.html');
+        }
+        if (cachedResponse) return cachedResponse;
         return new Response('Offline', { status: 503 });
     }
 }
 
 /**
- * Update cache in background (stale-while-revalidate pattern)
+ * Stale-while-revalidate for static assets: serve cached immediately,
+ * refresh in the background (nginx serves these with no-cache/etag so
+ * the refresh picks up deploys).
  */
-async function updateCacheInBackground(request, cache) {
-    try {
-        const networkResponse = await fetch(request);
+async function staleWhileRevalidate(request) {
+    const cache = await caches.open(STATIC_CACHE);
+    const cachedResponse = await cache.match(request);
+
+    const networkFetch = fetch(request).then((networkResponse) => {
         if (networkResponse.ok) {
-            cache.put(request, networkResponse);
+            cache.put(request, networkResponse.clone());
         }
-    } catch (error) {
-        // Silent fail - we already served from cache
-    }
+        return networkResponse;
+    }).catch(() => null);
+
+    if (cachedResponse) return cachedResponse;
+
+    const networkResponse = await networkFetch;
+    if (networkResponse) return networkResponse;
+    return new Response('Offline', { status: 503 });
 }

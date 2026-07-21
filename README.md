@@ -1,16 +1,21 @@
 # SREF Viewer
 
-A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View snowfall, precipitation, temperature, and wind forecasts from NOAA's Short Range Ensemble Forecast model for JFK, LGA, and EWR airports.
+A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View snowfall, precipitation, temperature, and wind forecasts from NOAA's Short Range Ensemble Forecast model for JFK, LGA, and EWR airports. Includes a live radar map with a 60-minute nowcast.
+
+> **Heads up:** NOAA retires the SREF model on **August 31, 2026**. See
+> [REFS-MIGRATION.md](REFS-MIGRATION.md) for the plan to move to its successor (REFS).
 
 ## Features
 
 - Server-side caching proxy that reduces load on NOAA servers
-- Intelligent cache TTL aligned to model run schedules (03Z, 09Z, 15Z, 21Z)
-- Run availability detection that only shows model runs with full data
-- Responsive design optimized for mobile devices
+- Complete runs cached 14 days (immutable); partial/unavailable runs negative-cached briefly
+- Radar map page (`/radar`) - MapLibre GL + OpenFreeMap basemap + LibreWXR radar tiles with ~2h history and 60-minute nowcast, no API keys
+- Responsive design optimized for mobile devices (bands view + compact header on phones)
+- PWA installable with offline support (self-hosted Chart.js/MapLibre, no CDNs)
 - Auto light/dark mode based on system preference
 - Wind speed toggle between knots and mph (saved to localStorage)
 - Snow alert indicator when any ensemble member forecasts accumulation
+- Run-to-run comparison overlays and confidence band (P10-P90) views
 
 ## Quick Start
 
@@ -18,7 +23,7 @@ A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View
 docker compose up -d
 ```
 
-The app will be available at http://localhost:8080
+The app will be available at http://localhost:8091
 
 ## Architecture
 
@@ -56,8 +61,8 @@ stations: ['JFK', 'LGA', 'EWR', 'BOS']  // Add more airports
 # Start the app
 docker compose up -d
 
-# Create tunnel pointing to port 8080
-cloudflared tunnel --url http://localhost:8080
+# Create tunnel pointing to port 8091
+cloudflared tunnel --url http://localhost:8091
 ```
 
 ## Development
@@ -104,9 +109,11 @@ sref-viewer/
 
 ## API Endpoints
 
-### Frontend (port 8080)
+### Frontend (port 8091)
 
 - `GET /` - Main application
+- `GET /radar` - Live radar map
+- `GET /admin` - Admin panel
 - `GET /api/*` - Proxied to backend
 
 ### Backend (port 3001)
@@ -114,28 +121,29 @@ sref-viewer/
 - `GET /health` - Health check with cache stats
 - `GET /api/cache-stats` - Detailed cache information
 - `GET /api/sref/:station/:run/:param?date=YYYY-MM-DD` - Fetch SREF data
+- `GET /api/radar/frames` - LibreWXR frame index (60s shared cache)
+
+## Data Sources
+
+- SREF plumes: [NOAA Storm Prediction Center](https://www.spc.noaa.gov/exper/sref/)
+- Radar tiles: [LibreWXR](https://librewxr.net/) (CC-BY-4.0, self-hostable)
+- Basemap: [OpenFreeMap](https://openfreemap.org/) (OpenMapTiles / OpenStreetMap)
 
 ## Cache Behavior
 
-The backend caches responses based on model run availability:
+Completed model runs never change, so the backend caches by completeness:
 
-- Cache expires when the next model run should be available
-- Processing delay of 2 hours is accounted for
-- Minimum TTL: 1 hour
-- Maximum TTL: 8 hours
+- **Complete runs** (>= 10 members): cached 14 days, persisted to `data/cache.json`
+- **Partial runs** (< 10 members, still publishing): cached 10 minutes
+- **Failed fetches** (run/date doesn't exist upstream): negative-cached 5 minutes
 
-Example: Data for 09Z run cached until approximately 17Z (when 15Z data should be ready)
+Cache hits do not count against the per-IP rate limit.
 
 ## Browser Support
 
 - Chrome, Firefox, Safari, Edge (latest versions)
 - iOS Safari, Chrome for Android
 - Requires JavaScript enabled
-
-## Data Source
-
-Weather data is sourced from NOAA's Storm Prediction Center:
-https://www.spc.noaa.gov/exper/sref/
 
 ## License
 

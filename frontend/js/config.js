@@ -130,9 +130,16 @@ export function getLatestRunWithDate() {
 }
 
 /**
- * Check if device is mobile
+ * Check if device is mobile (matches the CSS breakpoint in styles.css)
  */
 export function isMobile() {
-    return window.innerWidth <= 600;
+    return window.innerWidth <= 768;
+}
+
+/**
+ * Check if this is a touch-primary device (affects tooltip behavior)
+ */
+export function isTouchDevice() {
+    return window.matchMedia('(pointer: coarse)').matches;
 }
 

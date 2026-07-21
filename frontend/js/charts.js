@@ -2,9 +2,7 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
-console.log('Charts.js loaded (v3.2.0 - both mode)');
-
-import { CONFIG, isMobile, convertWind, getWindUnit } from './config.js';
+import { CONFIG, isMobile, isTouchDevice, convertWind, getWindUnit } from './config.js';
 import { getPercentileBands } from './api.js';
 
 // Store chart instances for cleanup
@@ -53,7 +51,10 @@ function getThemeColors() {
         meanLineColor: light ? '#000000' : '#ffffff',
         tooltipBg: light ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.9)',
         tooltipText: light ? '#1c1c1e' : '#fff',
-        tooltipBorder: light ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.1)'
+        tooltipBorder: light ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.1)',
+        nowLineColor: light ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.5)',
+        nowLabelBg: light ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.5)',
+        nowLabelText: light ? '#1c1c1e' : '#fff'
     };
 }
 
@@ -358,15 +359,15 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                             type: 'line',
                             xMin: Date.now(),
                             xMax: Date.now(),
-                            borderColor: 'rgba(255, 255, 255, 0.5)',
+                            borderColor: theme.nowLineColor,
                             borderWidth: 2,
                             borderDash: [4, 4],
                             label: {
                                 display: true,
                                 content: 'Now',
                                 position: 'start',
-                                backgroundColor: 'rgba(0, 0, 0, 0.5)',
-                                color: '#fff',
+                                backgroundColor: theme.nowLabelBg,
+                                color: theme.nowLabelText,
                                 font: { size: 10 }
                             }
                         }
@@ -374,7 +375,9 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 },
                 tooltip: {
                     enabled: true,
-                    position: 'rightOfCursor',
+                    // On touch devices the +50px offset pushes the tooltip
+                    // off-screen - use the default positioner there
+                    position: isTouchDevice() ? 'nearest' : 'rightOfCursor',
                     backgroundColor: theme.tooltipBg,
                     titleColor: theme.tooltipText,
                     bodyColor: theme.tooltipText,
@@ -387,8 +390,14 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     boxWidth: 10,
                     boxHeight: 10,
                     filter: (item) => {
-                        // In bands mode, hide P10/P25/P75/P90 from tooltip
-                        if (viewMode === 'bands' && item.dataset._band) {
+                        // Hide band boundary lines from tooltip
+                        if (item.dataset._band) {
+                            return false;
+                        }
+                        // On small screens a 26-member list is unreadable -
+                        // show only the Mean and comparison-run overlays
+                        if (isMobile() && item.dataset.label &&
+                            !item.dataset.label.includes('Mean')) {
                             return false;
                         }
                         return true;

@@ -26,3 +26,6 @@ sref-viewer-standalone.html
 
 # Local data persistence
 backend/data/
+
+# Runtime data (compose volume)
+/data/

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Radar - NYC SREF Viewer</title>
+    <meta name="description" content="Live weather radar with 60-minute forecast for the NYC area">
+
+    <!-- Icons -->
+    <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/icon-180.png">
+
+    <!-- MapLibre GL (self-hosted) -->
+    <link rel="stylesheet" href="/vendor/maplibre-gl.css">
+    <script defer src="/vendor/maplibre-gl.js"></script>
+
+    <link rel="stylesheet" href="/css/radar.css">
+
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#0a0a0f" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js').catch(() => { });
+            });
+        }
+    </script>
+</head>
+
+<body class="radar-page">
+    <div id="map"></div>
+
+    <header class="radar-header">
+        <a href="/" class="nav-link back-link">&larr; Plumes</a>
+        <div class="radar-title">Radar</div>
+        <div class="radar-updated" id="radarUpdated"></div>
+    </header>
+
+    <div class="radar-controls">
+        <button id="playBtn" class="play-btn" title="Play/pause animation" aria-label="Play animation">&#9654;</button>
+        <div class="scrubber-wrap">
+            <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="Radar frame time">
+            <div class="scrubber-labels">
+                <span id="frameTime" class="frame-time">Loading radar&hellip;</span>
+                <span id="frameBadge" class="frame-badge"></span>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/js/radar.js"></script>
+</body>
+
+</html>

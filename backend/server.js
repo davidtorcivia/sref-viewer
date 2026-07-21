@@ -2,9 +2,18 @@ const express = require('express');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Behind the nginx container (one proxy hop) - required so req.ip reflects
+// the real client from X-Forwarded-For instead of the nginx container IP.
+// Without this, all visitors share one rate-limit bucket.
+app.set('trust proxy', 1);
+
+// Body limit sized for base64 image uploads (admin favicon/OG image)
+app.use(express.json({ limit: '15mb' }));
 
 // ============ Persistent Cache ============
 const DATA_DIR = path.join(__dirname, 'data');
@@ -37,29 +46,11 @@ try {
     console.error('[CACHE] Failed to load cache from disk:', err);
 }
 
-// SREF model runs at 03Z, 09Z, 15Z, 21Z
-const MODEL_RUNS = [3, 9, 15, 21];
-
 /**
- * Calculate cache TTL based on when next model run will be available
+ * Get a cache entry (with flags), or null if missing/expired.
+ * Entries may carry `incomplete` (partial member set, short TTL) or
+ * `negative` (upstream failure, short TTL) flags.
  */
-function getCacheTTL(runHour) {
-    const now = new Date();
-    const currentUTC = now.getUTCHours();
-    const runIndex = MODEL_RUNS.indexOf(runHour);
-    const nextRunHour = MODEL_RUNS[(runIndex + 1) % MODEL_RUNS.length];
-
-    let hoursUntilNext;
-    if (nextRunHour > currentUTC) {
-        hoursUntilNext = nextRunHour - currentUTC + 2;
-    } else {
-        hoursUntilNext = (24 - currentUTC) + nextRunHour + 2;
-    }
-
-    const ttlHours = Math.max(1, Math.min(8, hoursUntilNext));
-    return ttlHours * 60 * 60 * 1000;
-}
-
 function getFromCache(key) {
     const item = cache.get(key);
     if (!item) return null;
@@ -67,13 +58,15 @@ function getFromCache(key) {
         cache.delete(key);
         return null;
     }
-    return item.data;
+    return item;
 }
 
 const CACHE_MAX_ENTRIES = 1000;
-const CACHE_TTL_DAYS = 14;  // Keep entries for 14 days
+const CACHE_TTL_DAYS = 14;       // Complete runs are immutable - keep for 14 days
+const INCOMPLETE_TTL_MS = 10 * 60 * 1000;  // Partial data: retry after 10 min
+const NEGATIVE_TTL_MS = 5 * 60 * 1000;     // Upstream failure: retry after 5 min
 
-function setInCache(key, data) {
+function setInCache(key, data, ttlMs = CACHE_TTL_DAYS * 24 * 60 * 60 * 1000, flags = {}) {
     // Evict oldest entries if at capacity
     if (cache.size >= CACHE_MAX_ENTRIES) {
         // Find oldest entries by cachedAt timestamp
@@ -90,8 +83,9 @@ function setInCache(key, data) {
 
     cache.set(key, {
         data,
-        expiry: Date.now() + (CACHE_TTL_DAYS * 24 * 60 * 60 * 1000),
-        cachedAt: new Date().toISOString()
+        expiry: Date.now() + ttlMs,
+        cachedAt: new Date().toISOString(),
+        ...flags
     });
     saveCacheToDisk();
 }
@@ -207,13 +201,18 @@ function processData(raw) {
     const memberKeys = Object.keys(processed);
 
     if (memberKeys.length > 0) {
-        processed['Mean'] = sortedTimes.map(time => {
-            let sum = 0, count = 0;
-            for (const key of memberKeys) {
-                const point = processed[key].find(p => p.x === time);
-                if (point) { sum += point.y; count++; }
+        const sums = new Map();
+        for (const key of memberKeys) {
+            for (const p of processed[key]) {
+                const agg = sums.get(p.x) || { sum: 0, count: 0 };
+                agg.sum += p.y;
+                agg.count++;
+                sums.set(p.x, agg);
             }
-            return { x: time, y: count > 0 ? sum / count : 0 };
+        }
+        processed['Mean'] = sortedTimes.map(time => {
+            const agg = sums.get(time);
+            return { x: time, y: agg && agg.count > 0 ? agg.sum / agg.count : 0 };
         });
     }
 
@@ -294,9 +293,14 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
     // Check cache first - cache hits don't count against rate limit
     const cached = getFromCache(cacheKey);
     if (cached) {
-        console.log(`[CACHE HIT] ${cacheKey}`);
-        res.set('X-Cache', 'HIT');
-        return res.json(cached);
+        if (cached.negative) {
+            console.log(`[NEGATIVE HIT] ${cacheKey}`);
+            res.set('X-Cache', 'NEGATIVE');
+            return res.status(502).json({ error: 'Failed to fetch from NOAA', details: cached.data, cached: true });
+        }
+        console.log(`[CACHE HIT] ${cacheKey}${cached.incomplete ? ' (incomplete)' : ''}`);
+        res.set('X-Cache', cached.incomplete ? 'INCOMPLETE-HIT' : 'HIT');
+        return res.json(cached.data);
     }
 
     // Rate limiting only for cache misses (actual NOAA requests)
@@ -318,13 +322,19 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
             console.log(`[CACHED] ${cacheKey} for ${CACHE_TTL_DAYS} days (${memberCount} members)`);
             res.set('X-Cache', 'MISS');
         } else {
-            console.log(`[NOT CACHED] ${cacheKey} - incomplete (${memberCount} members)`);
+            // Cache partial data briefly so every visitor doesn't re-hit NOAA
+            // for runs that aren't fully published yet
+            setInCache(cacheKey, processed, INCOMPLETE_TTL_MS, { incomplete: true });
+            console.log(`[CACHED INCOMPLETE] ${cacheKey} for 10 min (${memberCount} members)`);
             res.set('X-Cache', 'INCOMPLETE');
         }
 
         res.json(processed);
     } catch (err) {
         console.error(`[ERROR] ${cacheKey}:`, err.message);
+        // Negative-cache the failure so repeated loads don't hammer NOAA
+        // for runs/dates that don't exist
+        setInCache(cacheKey, err.message, NEGATIVE_TTL_MS, { negative: true });
         res.status(502).json({ error: 'Failed to fetch from NOAA', details: err.message });
     }
 });
@@ -332,7 +342,6 @@ app.get('/api/sref/:station/:run/:param', async (req, res) => {
 // ============ Admin Panel ============
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const crypto = require('crypto');
 
 // Ensure uploads directory exists
 try {
@@ -346,7 +355,18 @@ try {
 // Admin credentials from environment
 const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'changeme';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret';
+
+// Constant-time string comparison to avoid timing side-channels on login
+function safeEqual(a, b) {
+    const bufA = Buffer.from(String(a || ''));
+    const bufB = Buffer.from(String(b || ''));
+    if (bufA.length !== bufB.length) {
+        // Compare b against itself to keep timing consistent
+        crypto.timingSafeEqual(bufB, bufB);
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+}
 
 // Active sessions (in-memory, cleared on restart)
 const sessions = new Map();
@@ -423,9 +443,6 @@ function requireAuth(req, res, next) {
     next();
 }
 
-// Parse JSON bodies
-app.use(express.json());
-
 // Rate limiting for login (simple in-memory)
 const loginAttempts = new Map();
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
@@ -457,7 +474,7 @@ app.post('/api/admin/login', (req, res) => {
 
     const { username, password } = req.body;
 
-    if (username === ADMIN_USER && password === ADMIN_PASS) {
+    if (safeEqual(username, ADMIN_USER) && safeEqual(password, ADMIN_PASS)) {
         const token = createSession();
         console.log('[ADMIN] Login successful');
         res.json({ token });
@@ -558,6 +575,60 @@ app.get('/api/settings', (req, res) => {
         analyticsScript: settings.analyticsEnabled ? settings.analyticsScript : '',
         customCss: settings.customCss
     });
+});
+
+// ============ Radar Frame Index (LibreWXR) ============
+// Proxies the LibreWXR frame catalog so all visitors share one upstream
+// request per minute. Tiles themselves load directly from api.librewxr.net.
+let radarFramesCache = { data: null, fetchedAt: 0 };
+const RADAR_FRAMES_TTL_MS = 60 * 1000;
+
+function fetchRadarFrames() {
+    return new Promise((resolve, reject) => {
+        const req = https.get('https://api.librewxr.net/public/weather-maps.json', {
+            headers: { 'User-Agent': 'SREF-Viewer/1.0 (Personal Weather Tool)', 'Accept': 'application/json' }
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => {
+                if (res.statusCode !== 200) {
+                    return reject(new Error(`LibreWXR returned ${res.statusCode}`));
+                }
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    reject(new Error('Failed to parse LibreWXR response'));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(10000, () => {
+            req.destroy();
+            reject(new Error('LibreWXR request timeout'));
+        });
+    });
+}
+
+app.get('/api/radar/frames', async (req, res) => {
+    const now = Date.now();
+    if (radarFramesCache.data && now - radarFramesCache.fetchedAt < RADAR_FRAMES_TTL_MS) {
+        res.set('X-Cache', 'HIT');
+        return res.json(radarFramesCache.data);
+    }
+    try {
+        const data = await fetchRadarFrames();
+        radarFramesCache = { data, fetchedAt: now };
+        res.set('X-Cache', 'MISS');
+        res.json(data);
+    } catch (err) {
+        console.error('[RADAR]', err.message);
+        // Serve stale frames if we have them - better than nothing
+        if (radarFramesCache.data) {
+            res.set('X-Cache', 'STALE');
+            return res.json(radarFramesCache.data);
+        }
+        res.status(502).json({ error: 'Failed to fetch radar frames', details: err.message });
+    }
 });
 
 // ============ Start Server ============
