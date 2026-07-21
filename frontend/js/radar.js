@@ -5,16 +5,21 @@
  *
  * Frame index comes from our backend (/api/radar/frames, 60s shared cache);
  * tiles load directly from api.librewxr.net.
+ *
+ * Animation is a continuous rAF loop over a fractional frame position:
+ * the frame below is fully opaque and the next frame fades in on top,
+ * so playback reads as smooth motion instead of discrete steps.
  */
 
 const TILE_HOST = 'https://api.librewxr.net';
-const TILE_SIZE = 512;    // 4x fewer tile requests than 256
+const TILE_PX = 512;      // Request 512px tiles...
+const TILE_SIZE = 256;    // ...but declare 256 so they render at 2x density (sharper)
 const COLOR_SCHEME = 2;   // Universal Blue
 const SMOOTH = 1;
 const SNOW = 1;           // Per-pixel rain/snow classification
 const RADAR_OPACITY = 0.75;
-const FRAME_INTERVAL_MS = 450;      // Animation speed
-const LAST_FRAME_HOLD_MS = 1350;    // Pause on the latest/last frame
+const PLAY_SPEED = 2.4;             // Frames per second while playing
+const LAST_FRAME_HOLD_MS = 1500;    // Pause on the final nowcast frame
 const REFRESH_MS = 2 * 60 * 1000;   // Re-fetch frame index
 
 const NYC = { center: [-73.95, 40.75], zoom: 8.2 };
@@ -45,13 +50,16 @@ const els = {
 
 let map = null;
 let frames = [];          // [{ time, path, nowcast }]
-let currentFrame = 0;
+let position = 0;         // Fractional frame index (0 .. frames.length-1)
 let playing = false;
-let playTimer = null;
+let rafId = null;
+let holdUntil = 0;        // Timestamp until which playback holds on last frame
+let lastTick = null;
 let loadedLayerIds = new Set();
+let labeledFrame = -1;    // Last frame index the label was rendered for
 
 function tileUrl(frame) {
-    return `${TILE_HOST}${frame.path}/${TILE_SIZE}/{z}/{x}/{y}/${COLOR_SCHEME}/${SMOOTH}_${SNOW}.png`;
+    return `${TILE_HOST}${frame.path}/${TILE_PX}/{z}/{x}/{y}/${COLOR_SCHEME}/${SMOOTH}_${SNOW}.png`;
 }
 
 function layerId(frame) {
@@ -99,7 +107,7 @@ function syncLayers() {
         });
         // Opacity 0 layers still fetch their tiles (opacity is a paint
         // property), so every frame preloads and scrubbing is instant.
-        // No transitions/fades - crossfading between frames reads as blur.
+        // Transitions are 0 because the rAF loop sets opacity every frame.
         map.addLayer({
             id,
             type: 'raster',
@@ -114,21 +122,37 @@ function syncLayers() {
     }
 }
 
-function showFrame(index) {
+/**
+ * Render a fractional position: frame floor(pos) fully visible, frame
+ * floor(pos)+1 cross-fading in on top of it.
+ */
+function setPosition(pos) {
     if (!frames.length) return;
-    currentFrame = Math.max(0, Math.min(index, frames.length - 1));
+    position = Math.max(0, Math.min(pos, frames.length - 1));
+    const base = Math.floor(position);
+    const frac = position - base;
+
     for (let i = 0; i < frames.length; i++) {
         const id = layerId(frames[i]);
-        if (map.getLayer(id)) {
-            map.setPaintProperty(id, 'raster-opacity', i === currentFrame ? RADAR_OPACITY : 0);
-        }
+        if (!map.getLayer(id)) continue;
+        let opacity = 0;
+        if (i === base) opacity = RADAR_OPACITY;
+        else if (i === base + 1) opacity = RADAR_OPACITY * frac;
+        map.setPaintProperty(id, 'raster-opacity', opacity);
     }
-    els.scrubber.value = String(currentFrame);
-    updateFrameLabel();
+
+    els.scrubber.value = String(position);
+
+    // Label follows the nearest frame; only touch the DOM when it changes
+    const nearest = Math.round(position);
+    if (nearest !== labeledFrame) {
+        labeledFrame = nearest;
+        updateFrameLabel(nearest);
+    }
 }
 
-function updateFrameLabel() {
-    const frame = frames[currentFrame];
+function updateFrameLabel(index) {
+    const frame = frames[index];
     if (!frame) return;
     const d = new Date(frame.time * 1000);
     els.frameTime.textContent = d.toLocaleTimeString('en-US', {
@@ -145,24 +169,41 @@ function updateFrameLabel() {
     }
 }
 
+function tick(ts) {
+    if (!playing) return;
+    if (lastTick === null) lastTick = ts;
+    const dt = (ts - lastTick) / 1000;
+    lastTick = ts;
+
+    if (ts >= holdUntil) {
+        let next = position + dt * PLAY_SPEED;
+        if (next >= frames.length - 1) {
+            // Reached the end: hold on the last frame, then loop
+            if (position >= frames.length - 1) {
+                next = 0;
+            } else {
+                next = frames.length - 1;
+                holdUntil = ts + LAST_FRAME_HOLD_MS;
+            }
+        }
+        setPosition(next);
+    }
+    rafId = requestAnimationFrame(tick);
+}
+
 function play() {
     if (playing || frames.length === 0) return;
     playing = true;
+    lastTick = null;
+    holdUntil = 0;
     els.playBtn.textContent = '❚❚';
     els.playBtn.setAttribute('aria-label', 'Pause animation');
-    const step = () => {
-        if (!playing) return;
-        const next = (currentFrame + 1) % frames.length;
-        showFrame(next);
-        const hold = next === frames.length - 1 ? LAST_FRAME_HOLD_MS : FRAME_INTERVAL_MS;
-        playTimer = setTimeout(step, hold);
-    };
-    playTimer = setTimeout(step, FRAME_INTERVAL_MS);
+    rafId = requestAnimationFrame(tick);
 }
 
 function pause() {
     playing = false;
-    clearTimeout(playTimer);
+    cancelAnimationFrame(rafId);
     els.playBtn.textContent = '▶';
     els.playBtn.setAttribute('aria-label', 'Play animation');
 }
@@ -177,18 +218,19 @@ async function refreshFrames({ initial = false } = {}) {
             return idx === -1 ? newFrames.length - 1 : idx - 1;
         })();
 
-        const prevTime = frames[currentFrame]?.time;
+        const prevTime = frames[Math.round(position)]?.time;
         frames = newFrames;
         els.scrubber.max = String(frames.length - 1);
+        labeledFrame = -1;
         syncLayers();
 
         if (initial) {
             // Start on the most recent observed frame
-            showFrame(latestPastIdx);
+            setPosition(latestPastIdx);
         } else {
             // Keep the closest frame to what was showing
             const keep = frames.findIndex(f => f.time >= (prevTime || 0));
-            showFrame(keep === -1 ? latestPastIdx : keep);
+            setPosition(keep === -1 ? latestPastIdx : keep);
         }
 
         const latest = frames[latestPastIdx];
@@ -252,7 +294,7 @@ function init() {
     els.playBtn.addEventListener('click', () => playing ? pause() : play());
     els.scrubber.addEventListener('input', (e) => {
         pause();
-        showFrame(Number(e.target.value));
+        setPosition(Number(e.target.value));
     });
 
     // Pause the animation while the tab is hidden to save battery

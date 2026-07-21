@@ -3,9 +3,9 @@
  * Orchestrates UI, state management, and data loading
  */
 
-import { CONFIG, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js';
-import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js';
-import { createChart, toggleCore, exportChartPng } from './charts.js';
+import { CONFIG, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js?v=3';
+import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js?v=3';
+import { createChart, toggleCore, exportChartPng } from './charts.js?v=3';
 
 // ============ Application State ============
 // Get local date in YYYY-MM-DD format (not UTC, which may be tomorrow already)

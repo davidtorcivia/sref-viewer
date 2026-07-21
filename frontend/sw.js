@@ -3,7 +3,7 @@
  * Provides offline support and caching
  */
 
-const STATIC_CACHE = 'sref-static-v3';
+const STATIC_CACHE = 'sref-static-v4';
 const API_CACHE = 'sref-api-v1';
 const API_MAX_ENTRIES = 80;               // Bound Cache Storage growth
 const API_MAX_AGE_MS = 24 * 60 * 60 * 1000; // Don't serve API data older than 24h offline
@@ -14,13 +14,13 @@ const PRECACHE_URLS = [
     '/index.html',
     '/radar',
     '/radar.html',
-    '/css/styles.css',
+    '/css/styles.css?v=3',
     '/css/radar.css',
     '/icons/favicon.svg',
-    '/js/app.js',
-    '/js/api.js',
-    '/js/charts.js',
-    '/js/config.js',
+    '/js/app.js?v=3',
+    '/js/api.js?v=3',
+    '/js/charts.js?v=3',
+    '/js/config.js?v=3',
     '/js/radar.js',
     '/vendor/chart.umd.min.js',
     '/vendor/chartjs-adapter-date-fns.bundle.min.js',

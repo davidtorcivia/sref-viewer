@@ -3,7 +3,7 @@
  * Handles all data fetching from the local caching proxy
  */
 
-import { CONFIG } from './config.js';
+import { CONFIG } from './config.js?v=3';
 
 /**
  * Fetch SREF data for a specific parameter
