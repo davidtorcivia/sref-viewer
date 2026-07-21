@@ -143,21 +143,27 @@ body {
 }
 
 .speed-btn {
-    background: transparent;
+    background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
-    min-width: 44px;
-    height: 36px;
-    border-radius: 8px;
-    font-size: 0.85rem;
+    min-width: 48px;
+    height: 44px;
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 0.9rem;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     cursor: pointer;
-    transition: border-color 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: border-color 0.15s, color 0.15s;
 }
 
 .speed-btn:hover {
     border-color: var(--accent);
+    color: var(--accent);
 }
 
 .scrubber-wrap {
@@ -215,6 +221,22 @@ body {
     .maplibregl-ctrl-attrib a {
         color: var(--text-dim) !important;
     }
+}
+
+/* Scale bar - restyle MapLibre's default (white box, heavy black border)
+   to match the app chrome in both themes */
+.maplibregl-ctrl-scale {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    border-top: none !important;
+    border-radius: 0 0 6px 6px;
+    color: var(--text-dim) !important;
+    font-family: inherit !important;
+    font-size: 0.7rem !important;
+    font-variant-numeric: tabular-nums;
+    padding: 0.1rem 0.45rem !important;
+    backdrop-filter: blur(8px);
+    box-sizing: border-box;
 }
 
 @media (max-width: 480px) {

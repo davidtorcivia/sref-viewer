@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/vendor/maplibre-gl.css">
     <script defer src="/vendor/maplibre-gl.js"></script>
 
-    <link rel="stylesheet" href="/css/radar.css">
+    <link rel="stylesheet" href="/css/radar.css?v=6">
 
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#0a0a0f" media="(prefers-color-scheme: dark)">
@@ -43,7 +43,7 @@
         <button id="playBtn" class="play-btn" title="Play/pause animation" aria-label="Play animation">&#9654;</button>
         <button id="speedBtn" class="speed-btn" title="Animation speed" aria-label="Animation speed">1&times;</button>
         <div class="scrubber-wrap">
-            <input type="range" id="scrubber" min="0" max="0" value="0" step="0.01" aria-label="Radar frame time">
+            <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="Radar frame time">
             <div class="scrubber-labels">
                 <span id="frameTime" class="frame-time">Loading radar&hellip;</span>
                 <span id="frameBadge" class="frame-badge"></span>
@@ -51,7 +51,7 @@
         </div>
     </div>
 
-    <script type="module" src="/js/radar.js?v=5"></script>
+    <script type="module" src="/js/radar.js?v=6"></script>
 </body>
 
 </html>
