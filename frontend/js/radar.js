@@ -123,8 +123,16 @@ function syncLayers() {
 }
 
 /**
- * Render a fractional position: frame floor(pos) fully visible, frame
- * floor(pos)+1 cross-fading in on top of it.
+ * Render a fractional position as a constant-intensity dissolve between
+ * frame floor(pos) and floor(pos)+1.
+ *
+ * Naive crossfade (bottom held at A, top fading to A) makes overlapping
+ * echoes stack to 1-(1-A)^2 - visibly brighter - then snap back at each
+ * frame boundary, which reads as flashing. Instead, with the top layer at
+ * p, set the bottom to (A-p)/(1-p): composited intensity for overlapping
+ * pixels stays exactly A for the whole fade, so steady rain holds still
+ * while moving edges softly dissolve. Both endpoints equal a single layer
+ * at A, so boundary crossings are seamless.
  */
 function setPosition(pos) {
     if (!frames.length) return;
@@ -132,12 +140,15 @@ function setPosition(pos) {
     const base = Math.floor(position);
     const frac = position - base;
 
+    const top = RADAR_OPACITY * frac;
+    const bottom = (RADAR_OPACITY - top) / (1 - top);
+
     for (let i = 0; i < frames.length; i++) {
         const id = layerId(frames[i]);
         if (!map.getLayer(id)) continue;
         let opacity = 0;
-        if (i === base) opacity = RADAR_OPACITY;
-        else if (i === base + 1) opacity = RADAR_OPACITY * frac;
+        if (i === base) opacity = bottom;
+        else if (i === base + 1) opacity = top;
         map.setPaintProperty(id, 'raster-opacity', opacity);
     }
 
