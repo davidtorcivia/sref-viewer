@@ -142,6 +142,24 @@ body {
     opacity: 0.9;
 }
 
+.speed-btn {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    min-width: 44px;
+    height: 36px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.speed-btn:hover {
+    border-color: var(--accent);
+}
+
 .scrubber-wrap {
     flex: 1;
     display: flex;

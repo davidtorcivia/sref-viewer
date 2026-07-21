@@ -21,7 +21,7 @@ const PRECACHE_URLS = [
     '/js/api.js?v=3',
     '/js/charts.js?v=3',
     '/js/config.js?v=3',
-    '/js/radar.js?v=4',
+    '/js/radar.js?v=5',
     '/vendor/chart.umd.min.js',
     '/vendor/chartjs-adapter-date-fns.bundle.min.js',
     '/vendor/chartjs-plugin-annotation.min.js',
