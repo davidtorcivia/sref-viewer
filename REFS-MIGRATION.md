@@ -31,7 +31,47 @@ Notes:
   completion-time table) and `backend/server.js` (`validRuns`) must change to the
   REFS cycle times once real availability lag is measured.
 
-## Two migration paths
+## Status: IMPLEMENTED (July 2026) - via BUFR member soundings
+
+Neither path below was used. During implementation we found a better
+permanent source: **per-member station sounding BUFR files** (the BUFKIT
+feed), published for every RRFS/REFS member. One small (~110KB) file per
+station per member per cycle contains the complete hourly 0-60h series -
+2m temp (T2MS), 10m wind (U10M/V10M), 1h precip (TP01), 1h snowfall
+(SNFL) and snow ratio (SNRA). Five fetches per station-cycle replaces
+hundreds of grib_filter requests, and the data is hourly instead of
+3-hourly.
+
+Architecture:
+- `extractor/` container: NCEPLIBS-bufr (`debufr`) + Python HTTP service.
+  Fetches member BUFR files, decodes, serves raw series JSON. Source URL
+  is the `REFS_BUFR_URL` env template.
+- `backend/server.js`: `/api/refs/:station/:run/:param` shapes raw series
+  into the chart JSON format (cumulative totals, 3h buckets, ensemble
+  mean) with the same cache/negative-cache logic as SREF.
+- Frontend: SREF | REFS model toggle; REFS runs 00/06/12/18Z, members
+  M01-M05, single "Members" group instead of ARW/NMB.
+
+Current source (pre-operational): AWS Open Data
+`noaa-rrfs-pds/rrfs_a/rrfsens.YYYYMMDD/CC/mNNN/bufr.CC/bufr.SSSSSS.YYYYMMDDCC`
+
+**Post-cutover action (Aug 31, 2026):** the experimental `rrfs_a` prefix
+will presumably stop updating when REFS goes operational. Switch
+`REFS_BUFR_URL` in docker-compose.yml to the prod feed (NOMADS
+`com/refs/prod/` or the operational AWS bucket - check layout when it
+appears; ecCodes cannot decode these files, NCEPLIBS-bufr is required).
+
+Notes/caveats:
+- Snow depth = SNFL (liquid equivalent) x snow ratio (SNRA, 10:1
+  fallback when missing/implausible). Unverified against real snow -
+  revisit on the first winter event.
+- ICAO->BUFR station map in server.js covers JFK/LGA/EWR/BOS; other
+  stations can be added after verifying RPID, or queried directly by
+  6-digit station number.
+- 18Z cycle wasn't observed on the experimental feed at build time; the
+  UI handles its absence via negative caching.
+
+## Original migration paths (for reference - superseded)
 
 ### Path A - SPC (or another center) publishes a REFS plume product (preferred, low effort)
 

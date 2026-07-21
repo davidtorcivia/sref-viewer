@@ -577,6 +577,207 @@ app.get('/api/settings', (req, res) => {
     });
 });
 
+// ============ REFS (RRFS Ensemble) via BUFR extractor ============
+// The extractor container decodes per-member station BUFR soundings into
+// raw hourly series; this route shapes them into the same
+// { member: [{x, y}] } format the SREF charts consume.
+const http = require('http');
+const EXTRACTOR_URL = process.env.EXTRACTOR_URL || 'http://extractor:3002';
+
+// ICAO -> 6-digit BUFR station number (verified against RPID in the files).
+// Unknown stations may be passed directly as 6-digit numbers.
+const REFS_STATIONS = {
+    JFK: '744860',
+    LGA: '725030',
+    EWR: '725020',
+    BOS: '725090'
+};
+
+function fetchExtractor(sid, date, cycle) {
+    return new Promise((resolve, reject) => {
+        const url = `${EXTRACTOR_URL}/plume?sid=${sid}&date=${date}&cycle=${cycle}`;
+        const req = http.get(url, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => {
+                if (res.statusCode !== 200) {
+                    return reject(new Error(`Extractor returned ${res.statusCode}`));
+                }
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    reject(new Error('Failed to parse extractor response'));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(120000, () => {
+            req.destroy();
+            reject(new Error('Extractor timeout'));
+        });
+    });
+}
+
+const K_TO_F = k => (k - 273.15) * 9 / 5 + 32;
+const MS_TO_KTS = 1.94384;
+const MM_TO_IN = 1 / 25.4;
+
+/**
+ * Liquid-equivalent snowfall (mm) -> snow depth (inches) using the
+ * model's explicit snow ratio when it looks sane, else 10:1.
+ * SNRA is nominally percent; values that look like ratio*100 are scaled.
+ */
+function snowInches(snflMm, snra) {
+    if (snflMm === null || snflMm === undefined) return 0;
+    let ratio = 10;
+    if (typeof snra === 'number' && snra > 0) {
+        const r = snra > 100 ? snra / 100 : snra;
+        if (r >= 2 && r <= 40) ratio = r;
+    }
+    return snflMm * MM_TO_IN * ratio;
+}
+
+/**
+ * Shape one member's raw hourly series into [{x, y}] for a param.
+ */
+function shapeMemberSeries(series, param, cycleEpochMs) {
+    const n = series.ftimes.length;
+    const hourly = [];  // { x, qpf, sno, tmp, wnd }
+    for (let i = 0; i < n; i++) {
+        const x = cycleEpochMs + series.ftimes[i] * 1000;
+        hourly.push({
+            x,
+            tmp: series.t2ms[i] !== null ? K_TO_F(series.t2ms[i]) : null,
+            wnd: (series.u10m[i] !== null && series.v10m[i] !== null)
+                ? Math.hypot(series.u10m[i], series.v10m[i]) * MS_TO_KTS : null,
+            qpf: series.tp01[i] !== null ? series.tp01[i] * MM_TO_IN : 0,
+            sno: snowInches(series.snfl[i], series.snra ? series.snra[i] : null)
+        });
+    }
+
+    switch (param) {
+        case '3hrly-TMP':
+            return hourly.filter(h => h.tmp !== null).map(h => ({ x: h.x, y: round2(h.tmp) }));
+        case '3h-10mWND':
+            return hourly.filter(h => h.wnd !== null).map(h => ({ x: h.x, y: round2(h.wnd) }));
+        case 'Total-QPF': {
+            let sum = 0;
+            return hourly.map(h => { sum += h.qpf; return { x: h.x, y: round2(sum) }; });
+        }
+        case 'Total-SNO': {
+            let sum = 0;
+            return hourly.map(h => { sum += h.sno; return { x: h.x, y: round2(sum) }; });
+        }
+        case '3hrly-QPF':
+        case '3hrly-SNO': {
+            // Sum hourly values into 3-hour buckets (x at bucket end),
+            // matching the SREF 3-hourly presentation
+            const key = param === '3hrly-QPF' ? 'qpf' : 'sno';
+            const out = [];
+            for (let i = 1; i < hourly.length; i += 3) {
+                const bucket = hourly.slice(i, i + 3);
+                if (bucket.length === 0) continue;
+                const total = bucket.reduce((s, h) => s + h[key], 0);
+                out.push({ x: bucket[bucket.length - 1].x, y: round2(total) });
+            }
+            return out;
+        }
+        default:
+            return [];
+    }
+}
+
+const round2 = v => Math.round(v * 100) / 100;
+
+app.get('/api/refs/:station/:run/:param', async (req, res) => {
+    const { station, run, param } = req.params;
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+
+    const stationKey = station.toUpperCase();
+    const sid = REFS_STATIONS[stationKey] || (/^\d{6}$/.test(station) ? station : null);
+    if (!sid) {
+        return res.status(400).json({
+            error: `Unknown REFS station. Known: ${Object.keys(REFS_STATIONS).join(', ')}, or a 6-digit BUFR station number.`
+        });
+    }
+    if (!['00', '06', '12', '18'].includes(run)) {
+        return res.status(400).json({ error: 'Invalid run time' });
+    }
+    const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
+    if (!validParams.includes(param)) {
+        return res.status(400).json({ error: 'Invalid parameter' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ error: 'Invalid date' });
+    }
+
+    const cacheKey = `refs_${date}_${run}_${sid}_${param}`;
+    const cached = getFromCache(cacheKey);
+    if (cached) {
+        if (cached.negative) {
+            res.set('X-Cache', 'NEGATIVE');
+            return res.status(502).json({ error: 'REFS data unavailable', details: cached.data, cached: true });
+        }
+        res.set('X-Cache', cached.incomplete ? 'INCOMPLETE-HIT' : 'HIT');
+        return res.json(cached.data);
+    }
+
+    const ip = req.ip || req.connection.remoteAddress;
+    if (!checkApiRateLimit(ip)) {
+        return res.status(429).json({ error: 'Too many requests. Please slow down.' });
+    }
+
+    const ymd = date.replace(/-/g, '');
+    console.log(`[REFS MISS] ${cacheKey} - extracting...`);
+
+    try {
+        const plume = await fetchExtractor(sid, ymd, run);
+        const cycleEpochMs = Date.UTC(
+            Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1,
+            Number(ymd.slice(6, 8)), Number(run));
+
+        const shaped = {};
+        const memberNames = Object.keys(plume.members).sort();
+        for (const member of memberNames) {
+            const label = 'M' + member.replace(/^m0*/, '').padStart(2, '0');
+            const pts = shapeMemberSeries(plume.members[member], param, cycleEpochMs);
+            if (pts.length > 0) shaped[label] = pts;
+        }
+
+        // Ensemble mean across members
+        const labels = Object.keys(shaped);
+        if (labels.length > 0) {
+            const sums = new Map();
+            for (const label of labels) {
+                for (const p of shaped[label]) {
+                    const agg = sums.get(p.x) || { sum: 0, count: 0 };
+                    agg.sum += p.y;
+                    agg.count++;
+                    sums.set(p.x, agg);
+                }
+            }
+            shaped['Mean'] = [...sums.entries()].sort((a, b) => a[0] - b[0])
+                .map(([x, agg]) => ({ x, y: round2(agg.sum / agg.count) }));
+        }
+
+        const steps = labels.length ? Math.min(...labels.map(l => shaped[l].length)) : 0;
+        const complete = labels.length >= 5 && steps >= 16;
+        if (complete) {
+            setInCache(cacheKey, shaped);
+            res.set('X-Cache', 'MISS');
+        } else {
+            setInCache(cacheKey, shaped, INCOMPLETE_TTL_MS, { incomplete: true });
+            res.set('X-Cache', 'INCOMPLETE');
+        }
+        console.log(`[REFS] ${cacheKey}: ${labels.length} members, ${steps} pts, complete=${complete}`);
+        res.json(shaped);
+    } catch (err) {
+        console.error(`[REFS ERROR] ${cacheKey}:`, err.message);
+        setInCache(cacheKey, err.message, NEGATIVE_TTL_MS, { negative: true });
+        res.status(502).json({ error: 'REFS data unavailable', details: err.message });
+    }
+});
+
 // ============ Radar Frame Index (LibreWXR) ============
 // Proxies the LibreWXR frame catalog so all visitors share one upstream
 // request per minute. Tiles themselves load directly from api.librewxr.net.

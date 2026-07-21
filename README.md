@@ -2,8 +2,10 @@
 
 A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View snowfall, precipitation, temperature, and wind forecasts from NOAA's Short Range Ensemble Forecast model for JFK, LGA, and EWR airports. Includes a live radar map with a 60-minute nowcast.
 
-> **Heads up:** NOAA retires the SREF model on **August 31, 2026**. See
-> [REFS-MIGRATION.md](REFS-MIGRATION.md) for the plan to move to its successor (REFS).
+> **Heads up:** NOAA retires the SREF model on **August 31, 2026**. Its successor
+> **REFS** (RRFS ensemble, 5 members, hourly to 60h) is already supported via the
+> model toggle. See [REFS-MIGRATION.md](REFS-MIGRATION.md) for details and the
+> post-cutover source switch.
 
 ## Features
 
@@ -121,11 +123,17 @@ sref-viewer/
 - `GET /health` - Health check with cache stats
 - `GET /api/cache-stats` - Detailed cache information
 - `GET /api/sref/:station/:run/:param?date=YYYY-MM-DD` - Fetch SREF data
+- `GET /api/refs/:station/:run/:param?date=YYYY-MM-DD` - Fetch REFS ensemble data (runs 00/06/12/18)
 - `GET /api/radar/frames` - LibreWXR frame index (60s shared cache)
+
+### Extractor (internal, port 3002)
+
+- `GET /plume?sid=744860&date=YYYYMMDD&cycle=00` - Decoded per-member BUFR series
 
 ## Data Sources
 
 - SREF plumes: [NOAA Storm Prediction Center](https://www.spc.noaa.gov/exper/sref/)
+- REFS member soundings: [NOAA RRFS on AWS Open Data](https://registry.opendata.aws/noaa-rrfs/) (BUFR, decoded with NCEPLIBS-bufr)
 - Radar tiles: [LibreWXR](https://librewxr.net/) (CC-BY-4.0, self-hostable)
 - Basemap: [OpenFreeMap](https://openfreemap.org/) (OpenMapTiles / OpenStreetMap)
 

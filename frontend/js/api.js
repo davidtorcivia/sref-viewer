@@ -3,7 +3,7 @@
  * Handles all data fetching from the local caching proxy
  */
 
-import { CONFIG } from './config.js?v=3';
+import { CONFIG } from './config.js?v=4';
 
 /**
  * Fetch SREF data for a specific parameter
@@ -13,8 +13,8 @@ import { CONFIG } from './config.js?v=3';
  * @param {string} date - Date in YYYY-MM-DD format
  * @returns {Promise<Object>} Processed ensemble data with Mean included
  */
-export async function fetchSREFData(station, run, param, date) {
-    const url = `${CONFIG.apiBase}/${station}/${run}/${param}?date=${date}`;
+export async function fetchSREFData(station, run, param, date, apiBase = CONFIG.apiBase) {
+    const url = `${apiBase}/${station}/${run}/${param}?date=${date}`;
 
     const response = await fetch(url);
 

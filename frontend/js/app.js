@@ -3,9 +3,9 @@
  * Orchestrates UI, state management, and data loading
  */
 
-import { CONFIG, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js?v=3';
-import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js?v=3';
-import { createChart, toggleCore, exportChartPng } from './charts.js?v=3';
+import { CONFIG, MODELS, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js?v=4';
+import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js?v=4';
+import { createChart, toggleCore, exportChartPng } from './charts.js?v=4';
 
 // ============ Application State ============
 // Get local date in YYYY-MM-DD format (not UTC, which may be tomorrow already)
@@ -20,6 +20,7 @@ function getLocalDateString() {
 }
 
 const state = {
+    model: localStorage.getItem('sref-model') || 'sref',
     station: 'JFK',
     date: getLocalDateString(),
     run: null, // Will be set by initializeRunSelection
@@ -30,18 +31,17 @@ const state = {
     // Run comparison feature
     previousRuns: {}, // { '03': { param: data }, '09': { param: data }, ... }
     // Overlays default off on phones: 26 lines + 3 dashed means is unreadable there
-    visibleRuns: Object.fromEntries(['03', '09', '15', '21'].map(r => [r, !isMobile()])),
+    visibleRuns: Object.fromEntries(
+        ['00', '03', '06', '09', '12', '15', '18', '21'].map(r => [r, !isMobile()])),
     // Chart display mode: 'spaghetti' (individual lines), 'bands', or 'both'.
     // Bands are the only legible default at phone widths.
     chartViewMode: localStorage.getItem('sref-chart-view-mode') || (isMobile() ? 'bands' : 'spaghetti'),
 };
 
-// Run colors for comparison overlay
+// Run colors for comparison overlay (SREF and REFS cycle times)
 const RUN_COLORS = {
-    '03': '#ff9f43',  // orange
-    '09': '#10ac84',  // green
-    '15': '#ee5a24',  // red
-    '21': '#8854d0',  // purple
+    '03': '#ff9f43', '09': '#10ac84', '15': '#ee5a24', '21': '#8854d0',
+    '00': '#ff9f43', '06': '#10ac84', '12': '#ee5a24', '18': '#8854d0',
 };
 
 // ============ DOM Elements ============
@@ -81,14 +81,22 @@ async function init() {
 
     // Parse URL parameters for share links
     const urlParams = new URLSearchParams(window.location.search);
+    const urlModel = urlParams.get('model');
     const urlStation = urlParams.get('station');
     const urlRun = urlParams.get('run');
     const urlDate = urlParams.get('date');
 
     // Apply URL params if present (highest priority)
+    if (urlModel && MODELS[urlModel]) state.model = urlModel;
     if (urlStation) state.station = urlStation.toUpperCase();
-    if (urlRun && ['03', '09', '15', '21'].includes(urlRun)) state.run = urlRun;
+    if (urlRun && MODELS[state.model].runs.includes(urlRun)) state.run = urlRun;
     if (urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate)) state.date = urlDate;
+
+    // Model toggle buttons
+    document.querySelectorAll('#modelBtns button').forEach(b => {
+        b.classList.toggle('active', b.dataset.model === state.model);
+        b.addEventListener('click', () => handleModelChange(b.dataset.model));
+    });
 
     // If no URL station, try localStorage (second priority)  
     if (!urlStation) {
@@ -270,26 +278,36 @@ async function loadSiteSettings() {
  * - Sets both the run AND the correct date (handles midnight rollover)
  */
 function initializeRunSelection(preserveState = false) {
-    // All runs are always enabled - user can select any
-    const options = elements.runSelect.querySelectorAll('option');
-    options.forEach(opt => {
-        opt.disabled = false;
-        opt.textContent = `${opt.value}Z`;
-    });
+    // Rebuild run options for the active model's cycle times
+    const runs = MODELS[state.model].runs;
+    elements.runSelect.innerHTML = runs
+        .map(r => `<option value="${r}">${r}Z</option>`).join('');
 
-    if (!preserveState) {
+    if (!preserveState || !runs.includes(state.run)) {
         // Auto-select the most likely available run AND correct date
-        const { run, date } = getLatestRunWithDate();
+        const { run, date } = getLatestRunWithDate(state.model);
         state.run = run;
-        state.date = date;
-    } else if (!state.run) {
-        // Shared URL had a date but no run
-        state.run = getLatestRunWithDate().run;
+        if (!preserveState) state.date = date;
+        else state.date = state.date || date;
     }
     elements.runSelect.value = state.run;
     elements.dateInput.value = state.date;
 
     loadAllCharts();
+}
+
+function handleModelChange(model) {
+    if (!MODELS[model] || model === state.model || state.isLoading) return;
+    state.model = model;
+    localStorage.setItem('sref-model', model);
+    document.querySelectorAll('#modelBtns button').forEach(b => {
+        b.classList.toggle('active', b.dataset.model === model);
+    });
+    // Reset run comparison data - runs differ between models
+    state.previousRuns = {};
+    state.run = null;
+    initializeRunSelection();
+    updateShareUrl();
 }
 
 // ============ Event Handlers ============
@@ -345,6 +363,7 @@ function updateTimeDisplay() {
  */
 function updateShareUrl() {
     const params = new URLSearchParams();
+    params.set('model', state.model);
     params.set('station', state.station);
     params.set('run', state.run);
     params.set('date', state.date);
@@ -410,9 +429,9 @@ function buildLayout() {
                                     ` : ''}
                                 </div>
                                 <div class="chart-actions">
-                                    <button class="active tooltip-trigger" data-core="ARW" data-param="${param}" data-tooltip="Advanced Research WRF core (red lines)">ARW</button>
-                                    <button class="active tooltip-trigger" data-core="NMB" data-param="${param}" data-tooltip="NEMS-NMMB core (blue lines)">NMB</button>
-                                    <button class="active tooltip-trigger" data-core="Mean" data-param="${param}" data-tooltip="Average of all 26 ensemble members">Mean</button>
+                                    ${MODELS[state.model].cores.map(core => `
+                                        <button class="active tooltip-trigger" data-core="${core.key}" data-param="${param}" data-tooltip="${core.tooltip}">${core.label || core.key}</button>
+                                    `).join('')}
                                 </div>
                             </div>
                             <div class="chart-body">
@@ -568,7 +587,7 @@ async function loadChart(param) {
     loading.classList.remove('hidden', 'error');
 
     try {
-        const data = await fetchSREFData(state.station, state.run, param, state.date);
+        const data = await fetchSREFData(state.station, state.run, param, state.date, MODELS[state.model].apiBase);
 
         // Check if we got actual data
         if (!data || Object.keys(data).length === 0) {
@@ -635,7 +654,7 @@ async function loadAllCharts() {
 
     try {
         // Check for snow first
-        const snowData = await fetchSREFData(state.station, state.run, 'Total-SNO', state.date);
+        const snowData = await fetchSREFData(state.station, state.run, 'Total-SNO', state.date, MODELS[state.model].apiBase);
         state.data['Total-SNO'] = snowData;
         state.hasSnow = hasSnowForecast(snowData);
 
@@ -720,7 +739,7 @@ function renderComparisonControls() {
     }
 
     // Only show other runs
-    const allRuns = ['03', '09', '15', '21'];
+    const allRuns = MODELS[state.model].runs;
     const otherRuns = allRuns.filter(r => r !== state.run);
 
     controls.innerHTML = `
@@ -781,9 +800,9 @@ function renderComparisonControls() {
  *   21Z ready by ~02:20 UTC (next day)
  */
 function getDateForRun(run) {
-    const now = new Date();
-    const todayUTC = now.toISOString().split('T')[0];
-    const latestDate = getLatestRunWithDate().date;
+    const now = Date.now();
+    const todayUTC = new Date(now).toISOString().split('T')[0];
+    const latestDate = getLatestRunWithDate(state.model).date;
 
     // Viewing a historical date: every run from that date already exists,
     // so compare runs from the SAME date instead of mixing in today's
@@ -791,43 +810,17 @@ function getDateForRun(run) {
         return state.date;
     }
 
-    const utcHour = now.getUTCHours();
-    const utcMinute = now.getUTCMinutes();
-    const utcTime = utcHour + utcMinute / 60;
-
-    // Completion times in decimal UTC hours
-    const completionTimes = {
-        '03': 8.33,   // 08:20 UTC
-        '09': 14.33,  // 14:20 UTC
-        '15': 20.33,  // 20:20 UTC
-        '21': 2.33    // 02:20 UTC (next day, special handling)
-    };
-
-    const runCompleteTime = completionTimes[run];
-
-    // 21Z is special - it completes after midnight UTC
-    // If we're before 02:20 UTC, 21Z from TODAY hasn't completed, use yesterday
-    // If we're after 02:20 UTC but 21Z is still "future", it means today's 21Z hasn't run
-    let needsYesterday;
-    if (run === '21') {
-        // 21Z completes at 02:20 UTC next day
-        // Use today's date only if utcTime >= 2.33 (meaning yesterday's 21Z completed)
-        // But we want yesterday's 21Z data, not today's (which hasn't run)
-        needsYesterday = utcTime < 2.33 || utcTime >= 21; // Before 02:20 or after 21:00
-    } else {
-        // For other runs, use yesterday if current time < completion time
-        needsYesterday = utcTime < runCompleteTime;
+    // Current view: use the most recent completed instance of this run -
+    // today's if its ready time has passed, else yesterday's
+    const lagMs = MODELS[state.model].readyLagHours * 3600000;
+    for (const dayOffset of [0, -1]) {
+        const day = new Date(now + dayOffset * 86400000);
+        const runEpoch = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(),
+            day.getUTCDate(), Number(run));
+        if (runEpoch + lagMs <= now) {
+            return new Date(runEpoch).toISOString().split('T')[0];
+        }
     }
-
-    if (needsYesterday) {
-        const yesterday = new Date(now);
-        yesterday.setDate(yesterday.getDate() - 1);
-        const year = yesterday.getFullYear();
-        const month = String(yesterday.getMonth() + 1).padStart(2, '0');
-        const day = String(yesterday.getDate()).padStart(2, '0');
-        return `${year}-${month}-${day}`;
-    }
-
     return state.date;
 }
 
@@ -843,7 +836,7 @@ async function ensureRunData(run) {
     await Promise.all(paramsToFetch.map(async (param) => {
         if (state.previousRuns[run][param]) return;
         try {
-            const data = await fetchSREFData(state.station, run, param, dateForRun);
+            const data = await fetchSREFData(state.station, run, param, dateForRun, MODELS[state.model].apiBase);
             if (data && Object.keys(data).length > 0) {
                 state.previousRuns[run][param] = data;
             }
@@ -854,7 +847,7 @@ async function ensureRunData(run) {
 }
 
 async function fetchPreviousRuns() {
-    const allRuns = ['03', '09', '15', '21'];
+    const allRuns = MODELS[state.model].runs;
     const otherRuns = allRuns.filter(r => r !== state.run);
 
     // When no overlays are shown (the mobile default), only the summary
@@ -872,7 +865,7 @@ async function fetchPreviousRuns() {
             state.previousRuns[run] = {};
             const dateForRun = getDateForRun(run);
             try {
-                const data = await fetchSREFData(state.station, run, trendParam, dateForRun);
+                const data = await fetchSREFData(state.station, run, trendParam, dateForRun, MODELS[state.model].apiBase);
                 if (data && Object.keys(data).length > 0) {
                     state.previousRuns[run][trendParam] = data;
                 }
@@ -898,7 +891,7 @@ function updateTrendText() {
     if (!currentStats) return;
 
     // Find the most recent previous run
-    const allRuns = ['03', '09', '15', '21'];
+    const allRuns = MODELS[state.model].runs;
     const currentIdx = allRuns.indexOf(state.run);
     const prevRun = allRuns[(currentIdx - 1 + 4) % 4]; // Previous in cycle
 
@@ -1010,8 +1003,11 @@ function showHelpModal() {
         modal.className = 'modal-overlay';
         modal.innerHTML = `
             <div class="modal-content">
-                <h2>Understanding SREF Ensemble Plumes</h2>
+                <h2>Understanding Ensemble Plumes</h2>
                 <p>This tool visualizes forecast data from NOAA's <strong>Short Range Ensemble Forecast (SREF)</strong> model, providing probabilistic weather forecasts up to 87 hours ahead.</p>
+
+                <h3>SREF vs REFS</h3>
+                <p>SREF retires on <strong>August 31, 2026</strong>. Its successor is <strong>REFS</strong> (the RRFS ensemble): 5 members at 3km resolution with <strong>hourly</strong> output to 60 hours, cycles at 00Z/06Z/12Z/18Z. Use the model toggle in the header to switch. REFS has a single model core, so there is no ARW/NMB split - just Members and Mean.</p>
                 
                 <h3>What are the colored lines?</h3>
                 <p>Each line represents a different "ensemble member" - a model run with slightly different initial conditions or physics settings. The <strong>26 members</strong> span a range of possible outcomes, helping show forecast uncertainty.</p>

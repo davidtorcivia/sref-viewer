@@ -21,11 +21,32 @@ services:
       - PORT=3001
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      - EXTRACTOR_URL=http://extractor:3002
     volumes:
       - /nvme-mirror/apps/sref-viewer/data:/app/data
+    depends_on:
+      - extractor
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "wget", "-q", "--spider", "http://localhost:3001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  extractor:
+    build: ./extractor
+    expose:
+      - "3002"
+    environment:
+      - PORT=3002
+      # Post-cutover (Aug 31, 2026): switch to the NOMADS prod feed, e.g.
+      # REFS_BUFR_URL=https://nomads.ncep.noaa.gov/pub/data/nccf/com/refs/prod/refs.{date}/{cycle}/...
+      - CACHE_DIR=/data/refs-cache
+    volumes:
+      - /nvme-mirror/apps/sref-viewer/data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3002/health', timeout=5)" ]
       interval: 30s
       timeout: 10s
       retries: 3

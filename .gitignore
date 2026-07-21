@@ -29,3 +29,6 @@ backend/data/
 
 # Runtime data (compose volume)
 /data/
+
+# Python
+__pycache__/

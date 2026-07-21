@@ -19,6 +19,10 @@ export const CONFIG = {
     snowOrder: ['Total-SNO', '3hrly-SNO', '3hrly-TMP', 'Total-QPF', '3hrly-QPF', '3h-10mWND'],
 
     memberColors: {
+        // REFS (RRFS ensemble) members
+        M01: '#ff6b6b', M02: '#ffa94d', M03: '#69db7c',
+        M04: '#4dabf7', M05: '#da77f2',
+        // SREF members
         ARWC: '#ff4444',
         ARN1: '#cc3333', ARN2: '#bb2222', ARN3: '#aa1111',
         ARN4: '#991111', ARN5: '#881111', ARN6: '#771111',
@@ -36,6 +40,35 @@ export const CONFIG = {
 
     // Stations available
     stations: ['JFK', 'LGA', 'EWR']
+};
+
+/**
+ * Forecast models. SREF retires 2026-08-31; REFS (RRFS ensemble) is its
+ * successor - 5 members, hourly output to 60h, cycles at 00/06/12/18Z.
+ * readyLagHours: how long after cycle time the data is typically complete.
+ */
+export const MODELS = {
+    sref: {
+        label: 'SREF',
+        apiBase: '/api/sref',
+        runs: ['03', '09', '15', '21'],
+        readyLagHours: 5.33,
+        cores: [
+            { key: 'ARW', tooltip: 'Advanced Research WRF core (red lines)' },
+            { key: 'NMB', tooltip: 'NEMS-NMMB core (blue lines)' },
+            { key: 'Mean', tooltip: 'Average of all 26 ensemble members' },
+        ]
+    },
+    refs: {
+        label: 'REFS',
+        apiBase: '/api/refs',
+        runs: ['00', '06', '12', '18'],
+        readyLagHours: 6,
+        cores: [
+            { key: 'MEM', label: 'Members', tooltip: 'Individual RRFS ensemble members' },
+            { key: 'Mean', tooltip: 'Average of the ensemble members' },
+        ]
+    }
 };
 
 // User preferences (persisted to localStorage)
@@ -72,61 +105,39 @@ export function getWindUnit() {
 }
 
 /**
- * Determine the most recent available model run based on current time
- * SREF runs at 03Z, 09Z, 15Z, 21Z
- * Data availability times (ET/EST):
- *   03Z ready by ~03:20 AM EST (08:20 UTC)
- *   09Z ready by ~09:20 AM EST (14:20 UTC)
- *   15Z ready by ~03:20 PM EST (20:20 UTC)
- *   21Z ready by ~09:20 PM EST (02:20 UTC next day)
- * 
- * Returns the run time string. Use getLatestRunWithDate() if you also need the date.
+ * Get the most recent available run AND the correct date for that run,
+ * for any model: a run is "ready" readyLagHours after its cycle time.
+ * Handles date rollover (e.g. SREF 21Z isn't ready until 02:20 UTC the
+ * next day, so shortly after midnight UTC the latest run is yesterday's).
  */
-export function getLatestRun() {
-    return getLatestRunWithDate().run;
-}
+export function getLatestRunWithDate(modelKey = 'sref') {
+    const model = MODELS[modelKey] || MODELS.sref;
+    const now = Date.now();
 
-/**
- * Get the most recent available run AND the correct date for that run
- * This handles the date rollover correctly - e.g., at 00:50 ET on 12/14,
- * we should load 21Z from 12/13, not 21Z from 12/14 (which doesn't exist yet).
- */
-export function getLatestRunWithDate() {
-    const now = new Date();
-    const utcHour = now.getUTCHours();
-    const utcMinute = now.getUTCMinutes();
-    const utcTime = utcHour + utcMinute / 60; // Decimal hours
-
-    let run;
-    let needsYesterday = false;
-
-    // Check in reverse order (most recent first)
-    if (utcTime >= 20.33) {
-        run = '15';         // After 20:20 UTC - 15Z is ready
-    } else if (utcTime >= 14.33) {
-        run = '09';         // After 14:20 UTC - 09Z is ready
-    } else if (utcTime >= 8.33) {
-        run = '03';         // After 08:20 UTC - 03Z is ready
-    } else if (utcTime >= 2.33) {
-        run = '21';         // After 02:20 UTC - 21Z from YESTERDAY is ready
-        needsYesterday = true;
-    } else {
-        run = '15';         // Before 02:20 UTC - 15Z from YESTERDAY is the latest
-        needsYesterday = true;
+    // Consider today's and yesterday's cycles; pick the most recent one
+    // whose ready time has passed
+    let best = null;
+    for (const dayOffset of [0, -1]) {
+        const day = new Date(now + dayOffset * 86400000);
+        const y = day.getUTCFullYear(), m = day.getUTCMonth(), d = day.getUTCDate();
+        for (const run of model.runs) {
+            const runEpoch = Date.UTC(y, m, d, Number(run));
+            const readyEpoch = runEpoch + model.readyLagHours * 3600000;
+            if (readyEpoch <= now && (!best || runEpoch > best.runEpoch)) {
+                const iso = new Date(runEpoch).toISOString();
+                best = { run, date: iso.split('T')[0], runEpoch };
+            }
+        }
     }
 
-    // Calculate the correct date
-    let date;
-    if (needsYesterday) {
-        const yesterday = new Date(now);
-        yesterday.setDate(yesterday.getDate() - 1);
-        date = yesterday.toISOString().split('T')[0];
-    } else {
-        date = now.toISOString().split('T')[0];
+    if (!best) {
+        // Degenerate fallback (shouldn't happen with 4 cycles/day)
+        const iso = new Date(now).toISOString();
+        best = { run: model.runs[0], date: iso.split('T')[0] };
     }
 
-    console.log(`[RUN] UTC ${utcHour}:${String(utcMinute).padStart(2, '0')} (${utcTime.toFixed(2)}) → ${run}Z on ${date}`);
-    return { run, date };
+    console.log(`[RUN] ${modelKey} → ${best.run}Z on ${best.date}`);
+    return { run: best.run, date: best.date };
 }
 
 /**
