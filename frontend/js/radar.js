@@ -87,6 +87,12 @@ async function fetchFrames() {
     return past.concat(nowcast);
 }
 
+function labelLayerId() {
+    const labelLayer = map.getStyle().layers.find(l =>
+        l.type === 'symbol' && (l.id.includes('label') || l.id.includes('place')));
+    return labelLayer ? labelLayer.id : undefined;
+}
+
 /**
  * Sync map layers to the current frame list: add new frames as raster
  * layers (opacity 0), remove frames that fell out of the window.
@@ -103,10 +109,9 @@ function syncLayers() {
         }
     }
 
-    // Add missing ones. Insert below label layers so place names stay readable.
-    const labelLayer = map.getStyle().layers.find(l =>
-        l.type === 'symbol' && (l.id.includes('label') || l.id.includes('place')));
-    const beforeId = labelLayer ? labelLayer.id : undefined;
+    // Add missing ones. Insert below warning polygons (and labels) so
+    // alert outlines stay visible on top of the radar.
+    const beforeId = map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId();
 
     for (const frame of frames) {
         const id = layerId(frame);
@@ -192,6 +197,85 @@ function pause() {
     els.playBtn.setAttribute('aria-label', 'Play animation');
 }
 
+// ============ Weather Alerts ============
+const ALERTS_RADIUS_KM = 700;
+const ALERTS_REFRESH_MS = 2 * 60 * 1000;
+let lastAlertsCenter = null;
+
+function alertColor(props) {
+    const t = (props.title || '').toLowerCase();
+    if (t.includes('tornado')) return '#ff2d55';
+    if (t.includes('severe thunderstorm')) return '#ff9f0a';
+    if (t.includes('winter') || t.includes('snow') || t.includes('blizzard') || t.includes('ice storm')) return '#bf5af2';
+    if (t.includes('flood')) return '#30d158';
+    const sev = (props.severity || '').toLowerCase();
+    if (sev === 'extreme') return '#ff2d55';
+    if (sev === 'severe') return '#ff9f0a';
+    if (sev === 'moderate') return '#ffd60a';
+    return '#8e8e93';
+}
+
+function showAlertPopup(e) {
+    const p = e.features[0].properties;
+    const wrap = document.createElement('div');
+    wrap.className = 'alert-popup';
+    const title = document.createElement('div');
+    title.className = 'alert-popup-title';
+    // Titles are long ("X issued <date> until <date> by NWS Y") - keep the lead
+    title.textContent = (p.title || 'Weather alert').split(' issued ')[0];
+    wrap.appendChild(title);
+    if (p.expires) {
+        const until = document.createElement('div');
+        until.className = 'alert-popup-until';
+        until.textContent = 'Until ' + new Date(Number(p.expires) * 1000).toLocaleString('en-US', {
+            weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+        }) + ' ET';
+        wrap.appendChild(until);
+    }
+    new maplibregl.Popup({ maxWidth: '320px', closeButton: true })
+        .setLngLat(e.lngLat)
+        .setDOMContent(wrap)
+        .addTo(map);
+}
+
+async function loadAlerts() {
+    try {
+        const c = map.getCenter();
+        const res = await fetch(`/api/radar/alerts?lat=${c.lat.toFixed(2)}&lon=${c.lng.toFixed(2)}&radius=${ALERTS_RADIUS_KM}`);
+        if (!res.ok) return;
+        const geojson = await res.json();
+        const nowSec = Date.now() / 1000;
+        geojson.features = (geojson.features || []).filter(f =>
+            f.geometry && (!f.properties?.expires || Number(f.properties.expires) > nowSec));
+        for (const f of geojson.features) {
+            f.properties.color = alertColor(f.properties);
+        }
+        lastAlertsCenter = [c.lng, c.lat];
+
+        const src = map.getSource('alerts');
+        if (src) {
+            src.setData(geojson);
+            return;
+        }
+        map.addSource('alerts', { type: 'geojson', data: geojson });
+        const beforeId = labelLayerId();
+        map.addLayer({
+            id: 'alerts-fill', type: 'fill', source: 'alerts',
+            paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.10 }
+        }, beforeId);
+        map.addLayer({
+            id: 'alerts-line', type: 'line', source: 'alerts',
+            paint: { 'line-color': ['get', 'color'], 'line-width': 1.8, 'line-opacity': 0.9 }
+        }, beforeId);
+
+        map.on('click', 'alerts-fill', showAlertPopup);
+        map.on('mouseenter', 'alerts-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'alerts-fill', () => { map.getCanvas().style.cursor = ''; });
+    } catch (err) {
+        console.error('[ALERTS]', err);
+    }
+}
+
 async function refreshFrames({ initial = false } = {}) {
     try {
         const newFrames = await fetchFrames();
@@ -262,6 +346,8 @@ function init() {
     map.addControl(new maplibregl.ScaleControl({ unit: 'imperial' }), 'bottom-right');
 
     map.on('load', async () => {
+        loadAlerts();
+        setInterval(loadAlerts, ALERTS_REFRESH_MS);
         await refreshFrames({ initial: true });
         // Don't animate until every frame's tiles are loaded - playing
         // through half-loaded frames looks broken. 'idle' fires once all
@@ -272,6 +358,15 @@ function init() {
         ]);
         play();
         setInterval(() => refreshFrames(), REFRESH_MS);
+    });
+
+    // Refetch alerts when the map moves well away from the last fetch center
+    map.on('moveend', () => {
+        if (!lastAlertsCenter) return;
+        const c = map.getCenter();
+        if (Math.abs(c.lng - lastAlertsCenter[0]) > 3 || Math.abs(c.lat - lastAlertsCenter[1]) > 3) {
+            loadAlerts();
+        }
     });
 
     els.playBtn.addEventListener('click', () => playing ? pause() : play());

@@ -17,7 +17,7 @@
     <script defer src="/vendor/chartjs-plugin-annotation.min.js"></script>
 
     <!-- Styles -->
-    <link rel="stylesheet" href="css/styles.css?v=3">
+    <link rel="stylesheet" href="css/styles.css?v=__V__">
 
     <!-- PWA Manifest -->
     <link rel="manifest" href="/manifest.json">
@@ -30,7 +30,7 @@
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js?v=3')
+                navigator.serviceWorker.register('/sw.js?v=__V__')
                     .then(reg => console.log('[SW] Registered:', reg.scope))
                     .catch(err => console.log('[SW] Registration failed:', err));
             });
@@ -95,7 +95,7 @@
     </footer>
 
     <!-- Application Scripts (ES Modules) -->
-    <script type="module" src="js/app.js?v=4"></script>
+    <script type="module" src="js/app.js?v=__V__"></script>
 </body>
 
 </html>

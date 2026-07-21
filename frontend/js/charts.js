@@ -2,8 +2,8 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
-import { CONFIG, isMobile, isTouchDevice, convertWind, getWindUnit } from './config.js?v=4';
-import { getPercentileBands } from './api.js?v=4';
+import { CONFIG, isMobile, isTouchDevice, convertWind, getWindUnit } from './config.js?v=__V__';
+import { getPercentileBands } from './api.js?v=__V__';
 
 // Store chart instances for cleanup
 const chartInstances = {};

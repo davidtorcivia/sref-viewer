@@ -3,9 +3,9 @@
  * Orchestrates UI, state management, and data loading
  */
 
-import { CONFIG, MODELS, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js?v=4';
-import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js?v=4';
-import { createChart, toggleCore, exportChartPng } from './charts.js?v=4';
+import { CONFIG, MODELS, getLatestRunWithDate, isMobile, toggleWindUnit, getWindUnit, convertWind } from './config.js?v=__V__';
+import { fetchSREFData, hasSnowForecast, getEnsembleStats } from './api.js?v=__V__';
+import { createChart, toggleCore, exportChartPng } from './charts.js?v=__V__';
 
 // ============ Application State ============
 // Get local date in YYYY-MM-DD format (not UTC, which may be tomorrow already)
@@ -698,6 +698,9 @@ async function loadAllCharts() {
     // Update weather summary
     updateWeatherSummary();
 
+    // Precip-type timeline (REFS only - SREF has no p-type data)
+    loadPtypeStrip();
+
     state.isLoading = false;
     elements.reloadBtn.disabled = false;
 
@@ -985,6 +988,101 @@ function updateWeatherSummary() {
     }
 
     elements.weatherSummary.textContent = 'Dry conditions expected';
+}
+
+// ============ Precip Type (REFS) ============
+const PTYPE_DEFS = [
+    { key: 'snow', label: 'Snow', color: '#a5d8ff' },
+    { key: 'rain', label: 'Rain', color: '#51cf66' },
+    { key: 'zr', label: 'Frz rain', color: '#ff8787' },
+    { key: 'ip', label: 'Sleet', color: '#da77f2' },
+];
+
+/**
+ * REFS members carry per-hour precip-type flags. Show a colored timeline
+ * strip (dominant type per hour, >=40% of members) plus transition text
+ * like "Rain -> Snow Tue 7 PM".
+ */
+async function loadPtypeStrip() {
+    const existing = document.getElementById('ptypeStrip');
+    if (state.model !== 'refs') {
+        existing?.remove();
+        return;
+    }
+
+    try {
+        const data = await fetchSREFData(state.station, state.run, 'ptype', state.date, MODELS.refs.apiBase);
+        if (!Array.isArray(data) || data.length === 0) throw new Error('no ptype');
+
+        // Dominant type per hour
+        const hours = data.map(pt => {
+            let best = null, bestFrac = 0;
+            for (const t of PTYPE_DEFS) {
+                if (pt[t.key] > bestFrac) { bestFrac = pt[t.key]; best = t; }
+            }
+            return { x: pt.x, type: bestFrac >= 0.4 ? best : null };
+        });
+
+        if (!hours.some(h => h.type)) {
+            existing?.remove();
+            return;
+        }
+
+        // Merge consecutive hours into segments
+        const segments = [];
+        for (const h of hours) {
+            const last = segments[segments.length - 1];
+            if (last && last.type === h.type) last.count++;
+            else segments.push({ type: h.type, count: 1, startX: h.x });
+        }
+
+        // Transition text: onset + type changes (skip gaps shorter than 2h)
+        const fmtTime = x => new Date(x).toLocaleString('en-US', {
+            weekday: 'short', hour: 'numeric', timeZone: 'America/New_York'
+        });
+        const events = [];
+        let prevType = null;
+        for (const seg of segments) {
+            if (!seg.type || seg.count < 2) continue;
+            if (!prevType) {
+                events.push(`${seg.type.label} ${fmtTime(seg.startX)}`);
+            } else if (seg.type !== prevType) {
+                events.push(`${seg.type.label.toLowerCase()} ${fmtTime(seg.startX)}`);
+            } else {
+                continue;
+            }
+            prevType = seg.type;
+        }
+
+        let strip = existing;
+        if (!strip) {
+            strip = document.createElement('div');
+            strip.id = 'ptypeStrip';
+            strip.className = 'ptype-strip';
+            elements.weatherSummary.parentElement.appendChild(strip);
+        }
+        strip.textContent = '';
+
+        const text = document.createElement('div');
+        text.className = 'ptype-text';
+        text.textContent = 'P-type: ' + events.slice(0, 3).join(' → ');
+        strip.appendChild(text);
+
+        const bar = document.createElement('div');
+        bar.className = 'ptype-bar';
+        for (const seg of segments) {
+            const el = document.createElement('div');
+            el.className = 'ptype-seg';
+            el.style.flexGrow = String(seg.count);
+            el.style.background = seg.type ? seg.type.color : 'transparent';
+            el.title = (seg.type ? seg.type.label : 'No precip') + ' from ' + fmtTime(seg.startX);
+            bar.appendChild(el);
+        }
+        strip.appendChild(bar);
+    } catch (err) {
+        console.log('[PTYPE]', err.message);
+        existing?.remove();
+    }
 }
 
 function getConfidenceLevel(spread) {

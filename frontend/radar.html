@@ -15,7 +15,7 @@
     <link rel="stylesheet" href="/vendor/maplibre-gl.css">
     <script defer src="/vendor/maplibre-gl.js"></script>
 
-    <link rel="stylesheet" href="/css/radar.css?v=6">
+    <link rel="stylesheet" href="/css/radar.css?v=__V__">
 
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#0a0a0f" media="(prefers-color-scheme: dark)">
@@ -24,7 +24,7 @@
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js?v=3').catch(() => { });
+                navigator.serviceWorker.register('/sw.js?v=__V__').catch(() => { });
             });
         }
     </script>
@@ -51,7 +51,7 @@
         </div>
     </div>
 
-    <script type="module" src="/js/radar.js?v=6"></script>
+    <script type="module" src="/js/radar.js?v=__V__"></script>
 </body>
 
 </html>

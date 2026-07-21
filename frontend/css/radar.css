@@ -239,6 +239,40 @@ body {
     box-sizing: border-box;
 }
 
+/* Alert popups */
+.maplibregl-popup-content {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--border);
+    border-radius: 10px !important;
+    padding: 0.75rem 1rem !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3) !important;
+    font-family: inherit;
+}
+
+.maplibregl-popup-tip {
+    border-top-color: var(--surface) !important;
+    border-bottom-color: var(--surface) !important;
+}
+
+.maplibregl-popup-close-button {
+    color: var(--text-dim) !important;
+    font-size: 1.1rem;
+    padding: 0.2rem 0.5rem;
+}
+
+.alert-popup-title {
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-right: 1rem;
+}
+
+.alert-popup-until {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+}
+
 @media (max-width: 480px) {
     .radar-updated {
         display: none;

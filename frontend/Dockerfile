@@ -17,6 +17,17 @@ COPY js/ /usr/share/nginx/html/js/
 COPY vendor/ /usr/share/nginx/html/vendor/
 COPY icons/ /usr/share/nginx/html/icons/
 
+# Stamp asset URLs with a per-build version so browsers and CDNs can
+# never mix old and new files across deploys. This layer only re-runs
+# when the copied files above actually changed.
+RUN V=$(date +%Y%m%d%H%M%S) && \
+    sed -i "s/__V__/$V/g" \
+    /usr/share/nginx/html/index.html \
+    /usr/share/nginx/html/radar.html \
+    /usr/share/nginx/html/sw.js \
+    /usr/share/nginx/html/js/*.js && \
+    echo "Asset version: $V"
+
 EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]

@@ -593,9 +593,9 @@ const REFS_STATIONS = {
     BOS: '725090'
 };
 
-function fetchExtractor(sid, date, cycle) {
+function fetchExtractorJson(path) {
     return new Promise((resolve, reject) => {
-        const url = `${EXTRACTOR_URL}/plume?sid=${sid}&date=${date}&cycle=${cycle}`;
+        const url = `${EXTRACTOR_URL}${path}`;
         const req = http.get(url, (res) => {
             let data = '';
             res.on('data', chunk => { data += chunk; });
@@ -616,6 +616,39 @@ function fetchExtractor(sid, date, cycle) {
             reject(new Error('Extractor timeout'));
         });
     });
+}
+
+function fetchExtractor(sid, date, cycle) {
+    return fetchExtractorJson(`/plume?sid=${sid}&date=${date}&cycle=${cycle}`);
+}
+
+// Full RPID -> station-number index built by the extractor (~2500 stations).
+// Lets any ICAO in the feed be used, not just the hardcoded map.
+let refsStationIndex = { stations: null, fetchedAt: 0 };
+const STATION_INDEX_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function resolveRefsSid(station) {
+    const key = station.toUpperCase();
+    if (REFS_STATIONS[key]) return REFS_STATIONS[key];
+    if (/^\d{6}$/.test(station)) return station;
+    if (!/^[A-Z]{3,4}$/.test(key)) return null;
+
+    if (!refsStationIndex.stations || Date.now() - refsStationIndex.fetchedAt > STATION_INDEX_TTL_MS) {
+        try {
+            const idx = await fetchExtractorJson('/stations');
+            refsStationIndex = { stations: idx.stations || null, fetchedAt: Date.now() };
+            console.log(`[REFS] Station index loaded: ${idx.count} stations (${idx.source})`);
+        } catch (err) {
+            console.log('[REFS] Station index unavailable:', err.message);
+        }
+    }
+    const idx = refsStationIndex.stations;
+    if (!idx) return null;
+    // 3-letter US identifiers are usually K-prefixed in the feed (JFK -> KJFK)
+    for (const candidate of key.length === 3 ? [`K${key}`, key] : [key]) {
+        if (idx[candidate]) return idx[candidate].sid;
+    }
+    return null;
 }
 
 const K_TO_F = k => (k - 273.15) * 9 / 5 + 32;
@@ -693,19 +726,18 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
     const { station, run, param } = req.params;
     const date = req.query.date || new Date().toISOString().split('T')[0];
 
-    const stationKey = station.toUpperCase();
-    const sid = REFS_STATIONS[stationKey] || (/^\d{6}$/.test(station) ? station : null);
-    if (!sid) {
-        return res.status(400).json({
-            error: `Unknown REFS station. Known: ${Object.keys(REFS_STATIONS).join(', ')}, or a 6-digit BUFR station number.`
-        });
-    }
     if (!['00', '06', '12', '18'].includes(run)) {
         return res.status(400).json({ error: 'Invalid run time' });
     }
-    const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
+    const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND', 'ptype'];
     if (!validParams.includes(param)) {
         return res.status(400).json({ error: 'Invalid parameter' });
+    }
+    const sid = await resolveRefsSid(station);
+    if (!sid) {
+        return res.status(400).json({
+            error: 'Unknown REFS station. Use an ICAO code from the RRFS feed (e.g. KJFK/JFK) or a 6-digit BUFR station number.'
+        });
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         return res.status(400).json({ error: 'Invalid date' });
@@ -735,6 +767,29 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
         const cycleEpochMs = Date.UTC(
             Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1,
             Number(ymd.slice(6, 8)), Number(run));
+
+        // Precip type: per-hour fraction of members flagging each type
+        if (param === 'ptype') {
+            const members = Object.values(plume.members);
+            const steps = Math.min(...members.map(m => m.ftimes.length));
+            const out = [];
+            for (let i = 0; i < steps; i++) {
+                const x = cycleEpochMs + members[0].ftimes[i] * 1000;
+                const frac = flag =>
+                    members.filter(m => (m[flag] || [])[i] === 1).length / members.length;
+                out.push({
+                    x,
+                    snow: frac('wxts'), rain: frac('wxtr'),
+                    zr: frac('wxtz'), ip: frac('wxtp')
+                });
+            }
+            const complete = members.length >= 5 && steps >= 16;
+            setInCache(cacheKey, out,
+                complete ? undefined : INCOMPLETE_TTL_MS,
+                complete ? {} : { incomplete: true });
+            res.set('X-Cache', complete ? 'MISS' : 'INCOMPLETE');
+            return res.json(out);
+        }
 
         const shaped = {};
         const memberNames = Object.keys(plume.members).sort();
@@ -784,9 +839,9 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
 let radarFramesCache = { data: null, fetchedAt: 0 };
 const RADAR_FRAMES_TTL_MS = 60 * 1000;
 
-function fetchRadarFrames() {
+function fetchLibreJson(url) {
     return new Promise((resolve, reject) => {
-        const req = https.get('https://api.librewxr.net/public/weather-maps.json', {
+        const req = https.get(url, {
             headers: { 'User-Agent': 'SREF-Viewer/1.0 (Personal Weather Tool)', 'Accept': 'application/json' }
         }, (res) => {
             let data = '';
@@ -817,7 +872,7 @@ app.get('/api/radar/frames', async (req, res) => {
         return res.json(radarFramesCache.data);
     }
     try {
-        const data = await fetchRadarFrames();
+        const data = await fetchLibreJson('https://api.librewxr.net/public/weather-maps.json');
         radarFramesCache = { data, fetchedAt: now };
         res.set('X-Cache', 'MISS');
         res.json(data);
@@ -831,6 +886,116 @@ app.get('/api/radar/frames', async (req, res) => {
         res.status(502).json({ error: 'Failed to fetch radar frames', details: err.message });
     }
 });
+
+// ============ Weather Alerts (LibreWXR / NWS-CAP) ============
+// Proxied + cached per rounded location so all viewers of an area share
+// one upstream request every 2 minutes.
+const alertsCache = new Map();
+const ALERTS_TTL_MS = 2 * 60 * 1000;
+
+app.get('/api/radar/alerts', async (req, res) => {
+    const lat = parseFloat(req.query.lat);
+    const lon = parseFloat(req.query.lon);
+    const radius = Math.min(1500, Math.max(50, parseInt(req.query.radius, 10) || 700));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 85 || Math.abs(lon) > 180) {
+        return res.status(400).json({ error: 'Invalid lat/lon' });
+    }
+
+    const key = `${lat.toFixed(1)},${lon.toFixed(1)},${radius}`;
+    const hit = alertsCache.get(key);
+    if (hit && Date.now() - hit.at < ALERTS_TTL_MS) {
+        res.set('X-Cache', 'HIT');
+        return res.json(hit.data);
+    }
+
+    try {
+        const data = await fetchLibreJson(
+            `https://api.librewxr.net/v2/alerts?lat=${lat.toFixed(2)}&lon=${lon.toFixed(2)}&radius=${radius}`);
+        alertsCache.set(key, { data, at: Date.now() });
+        // Bound growth from scattered map positions
+        if (alertsCache.size > 50) {
+            alertsCache.delete(alertsCache.keys().next().value);
+        }
+        res.set('X-Cache', 'MISS');
+        res.json(data);
+    } catch (err) {
+        console.error('[ALERTS]', err.message);
+        if (hit) {
+            res.set('X-Cache', 'STALE');
+            return res.json(hit.data);
+        }
+        res.status(502).json({ error: 'Failed to fetch alerts', details: err.message });
+    }
+});
+
+// ============ Cache Warming ============
+// Prefetch the latest run for the default stations so the first visitor
+// after a new run publishes gets instant charts. Negative caching keeps
+// retries for not-yet-published runs cheap (one upstream attempt per
+// 5 minutes at most).
+const WARM_STATIONS = ['JFK', 'LGA', 'EWR'];
+const WARM_PARAMS = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
+const WARM_MODELS = [
+    { base: '/api/sref', runs: [3, 9, 15, 21], lagHours: 5.33 },
+    { base: '/api/refs', runs: [0, 6, 12, 18], lagHours: 6 },
+];
+const WARM_INTERVAL_MS = 10 * 60 * 1000;
+
+function latestReadyRun(runs, lagHours) {
+    const now = Date.now();
+    let best = null;
+    for (const dayOffset of [0, -1]) {
+        const day = new Date(now + dayOffset * 86400000);
+        for (const runHour of runs) {
+            const runEpoch = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), runHour);
+            if (runEpoch + lagHours * 3600000 <= now && (!best || runEpoch > best.runEpoch)) {
+                best = {
+                    runEpoch,
+                    run: String(runHour).padStart(2, '0'),
+                    date: new Date(runEpoch).toISOString().split('T')[0]
+                };
+            }
+        }
+    }
+    return best;
+}
+
+function selfGet(path) {
+    return new Promise((resolve) => {
+        const req = http.get(`http://localhost:${PORT}${path}`, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode));
+        });
+        req.on('error', () => resolve(0));
+        req.setTimeout(150000, () => { req.destroy(); resolve(0); });
+    });
+}
+
+let warming = false;
+async function warmCache() {
+    if (warming) return;
+    warming = true;
+    try {
+        for (const model of WARM_MODELS) {
+            const latest = latestReadyRun(model.runs, model.lagHours);
+            if (!latest) continue;
+            for (const station of WARM_STATIONS) {
+                for (const param of WARM_PARAMS) {
+                    await selfGet(`${model.base}/${station}/${latest.run}/${param}?date=${latest.date}`);
+                    await new Promise(r => setTimeout(r, 250));
+                }
+            }
+        }
+        console.log('[WARM] Cache warm cycle complete');
+    } catch (err) {
+        console.error('[WARM]', err.message);
+    } finally {
+        warming = false;
+    }
+}
+
+setTimeout(warmCache, 10000);
+setInterval(warmCache, WARM_INTERVAL_MS);
 
 // ============ Start Server ============
 app.listen(PORT, () => {
