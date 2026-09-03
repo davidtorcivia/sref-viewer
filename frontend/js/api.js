@@ -41,9 +41,13 @@ export function hasSnowForecast(snowData) {
     if (!snowData) return false;
 
     for (const [label, points] of Object.entries(snowData)) {
-        if (label === 'Mean') continue;
-        const finalVal = points[points.length - 1]?.y || 0;
-        if (finalVal > 0.1) return true;
+        const last = points[points.length - 1];
+        if (label === 'Mean') {
+            // Precomputed band (REFS): the ensemble's upper range counts
+            if (last && last.p90 > 0.1) return true;
+            continue;
+        }
+        if ((last?.y || 0) > 0.1) return true;
     }
 
     return false;
@@ -72,6 +76,17 @@ export function getEnsembleStats(data, useMax = false) {
         } else {
             memberValues.push(val);
         }
+    }
+
+    // Precomputed ensemble band (REFS): report its P10-P90 range
+    const mean = data['Mean'];
+    const last = mean && mean[mean.length - 1];
+    if (last && last.p10 !== undefined) {
+        const pts = useMax ? mean : [last];
+        // Peak semantics: spread at the peak, not the range over time
+        const lo = Math.max(...pts.map(p => p.p10));
+        const hi = Math.max(...pts.map(p => p.p90));
+        return { mean: meanValue, max: hi, min: lo, spread: hi - lo };
     }
 
     if (memberValues.length === 0) return null;
@@ -109,6 +124,13 @@ function percentile(sortedArr, p) {
  */
 export function getPercentileBands(data, coreFilter = null) {
     if (!data) return null;
+
+    // Band precomputed server-side (REFS: mean +/- spread) rides on the Mean points
+    const mean = data['Mean'];
+    if (mean && mean.length > 0 && mean[0].p10 !== undefined) {
+        const series = key => mean.map(p => ({ x: p.x, y: p[key] }));
+        return { p10: series('p10'), p25: series('p25'), p75: series('p75'), p90: series('p90') };
+    }
 
     // Get all member data (exclude Mean, optionally filter by core)
     const members = [];

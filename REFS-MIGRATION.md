@@ -32,7 +32,27 @@ Notes:
   completion-time table) and `backend/server.js` (`validRuns`) must change to the
   REFS cycle times once real availability lag is measured.
 
-## Status: BROKEN since ~2026-08-12 - member BUFR feed withdrawn
+## Status: REBUILT 2026-09-03 - deterministic RRFS line + REFS mean/spread band
+
+The extractor now combines two public products from `noaa-rrfs-ops-pds`:
+
+- `rrfs.YYYYMMDD/CC/rrfs.tCCz.bufrsnd.tar.gz`: the deterministic RRFS
+  station sounding for the requested station, decoded with debufr as
+  before, served as the single member line `RRFS` (hourly to 84h, with
+  precip-type flags for the p-type strip).
+- `refs.YYYYMMDD/CC/ensprod/refs.tCCz.{mean,sprd}.fHH.conus.grib2`: 2m
+  temperature, 10m wind components, 3h APCP and 3h ASNOW pulled by byte
+  range via the `.idx` sidecars for f03..f60 and read at the nearest grid
+  point with ecCodes (Lambert 1799x1059 grid). The backend turns mean and
+  spread into `Mean` points carrying p10/p25/p75/p90 (mean +/- 1.28 and
+  0.67 spread; accumulations sum the 3h buckets and their spreads).
+
+Per cycle the extractor pulls ~117MB (tarball) + ~330MB (grib subsets),
+kept 36h so late custom-station requests reuse them; decoded per-station
+JSON is kept 14 days. The station index is rebuilt monthly from the
+tarball headers.
+
+## Previous status: BROKEN since ~2026-08-12 - member BUFR feed withdrawn
 
 Findings from 2026-09-03 (SREF still publishing; REFS 404 for every cycle):
 
@@ -52,7 +72,7 @@ Findings from 2026-09-03 (SREF still publishing; REFS 404 for every cycle):
 - Updated SCN: https://www.weather.gov/media/notification/pdf_2026/scn26-048_RRFS_and_REFS_Implementation.aab.pdf
 - Bucket index: https://noaa-rrfs-ops-pds.s3.amazonaws.com/index.html
 
-Repair options (none built yet):
+Repair options considered (options 1+2 were built, see above):
 
 1. **Deterministic RRFS plume** - extractor pulls the 00/06/12/18Z tarball,
    keeps only wanted stations, serves as a single member. Hourly to 84h.

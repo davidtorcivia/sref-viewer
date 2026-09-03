@@ -134,7 +134,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
         if (hasNMB) bandGroups.push({ name: 'NMB', core: 'NMB', filter: 'NMB', color: '100, 150, 255' });
         if (!hasARW && !hasNMB) {
             // Single-family ensemble (REFS): one band set over all members
-            bandGroups.push({ name: 'ENS', core: 'MEM', filter: null, color: '100, 150, 255' });
+            bandGroups.push({ name: 'ENS', core: 'Mean', filter: null, color: '100, 150, 255' });
         }
 
         for (const group of bandGroups) {

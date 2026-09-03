@@ -145,7 +145,7 @@ sref-viewer/
 ## Data Sources
 
 - SREF plumes: [NOAA Storm Prediction Center](https://www.spc.noaa.gov/exper/sref/)
-- REFS member soundings: [NOAA RRFS on AWS Open Data](https://registry.opendata.aws/noaa-rrfs/) (BUFR, decoded with NCEPLIBS-bufr)
+- RRFS station soundings and REFS ensemble products: [NOAA RRFS on AWS Open Data](https://registry.opendata.aws/noaa-rrfs/) (BUFR decoded with NCEPLIBS-bufr, grib2 read with ecCodes)
 - Radar tiles: [LibreWXR](https://librewxr.net/) (CC-BY-4.0, self-hostable)
 - Basemap: [OpenFreeMap](https://openfreemap.org/) (OpenMapTiles / OpenStreetMap)
 

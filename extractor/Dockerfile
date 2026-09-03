@@ -8,7 +8,8 @@ RUN cmake -S /tmp/NCEPLIBS-bufr-12.1.0 -B /tmp/build -DCMAKE_BUILD_TYPE=Release 
     && cmake --install /tmp/build >/dev/null
 
 FROM debian:bookworm-slim
-RUN apt-get update -qq && apt-get install -y -qq libgfortran5 python3 ca-certificates >/dev/null \
+# dpkg-dev: Debian's python3-eccodes runs dpkg-architecture at import time
+RUN apt-get update -qq && apt-get install -y -qq libgfortran5 python3 python3-eccodes dpkg-dev ca-certificates >/dev/null \
     && apt-get clean
 # Full install tree - debufr needs its master table files, not just the binary
 COPY --from=build /opt/bufr /opt/bufr

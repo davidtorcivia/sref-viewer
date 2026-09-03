@@ -19,9 +19,8 @@ export const CONFIG = {
     snowOrder: ['Total-SNO', '3hrly-SNO', '3hrly-TMP', 'Total-QPF', '3hrly-QPF', '3h-10mWND'],
 
     memberColors: {
-        // REFS (RRFS ensemble) members
-        M01: '#ff6b6b', M02: '#ffa94d', M03: '#69db7c',
-        M04: '#4dabf7', M05: '#da77f2',
+        // REFS: deterministic RRFS line (bands come from ensemble mean/spread)
+        RRFS: '#4dabf7',
         // SREF members
         ARWC: '#ff4444',
         ARN1: '#cc3333', ARN2: '#bb2222', ARN3: '#aa1111',
@@ -44,7 +43,9 @@ export const CONFIG = {
 
 /**
  * Forecast models. SREF retires 2026-10-06; REFS (RRFS ensemble) is its
- * successor - 5 members, hourly output to 60h, cycles at 00/06/12/18Z.
+ * successor. NOAA publishes no REFS members, so the REFS view is the
+ * deterministic RRFS run (hourly) over the REFS mean +/- spread band
+ * (3-hourly to 60h), cycles at 00/06/12/18Z.
  * readyLagHours: how long after cycle time the data is typically complete.
  */
 export const MODELS = {
@@ -63,10 +64,10 @@ export const MODELS = {
         label: 'REFS',
         apiBase: '/api/refs',
         runs: ['00', '06', '12', '18'],
-        readyLagHours: 6,
+        readyLagHours: 4,
         cores: [
-            { key: 'MEM', label: 'Members', tooltip: 'Individual RRFS ensemble members' },
-            { key: 'Mean', tooltip: 'Average of the ensemble members' },
+            { key: 'MEM', label: 'RRFS', tooltip: 'Deterministic RRFS run (hourly to 84h)' },
+            { key: 'Mean', tooltip: 'REFS ensemble mean; band = mean +/- spread' },
         ]
     }
 };

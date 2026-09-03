@@ -577,10 +577,13 @@ app.get('/api/settings', (req, res) => {
     });
 });
 
-// ============ REFS (RRFS Ensemble) via BUFR extractor ============
-// The extractor container decodes per-member station BUFR soundings into
-// raw hourly series; this route shapes them into the same
-// { member: [{x, y}] } format the SREF charts consume.
+// ============ REFS (RRFS Ensemble) via extractor ============
+// NOAA publishes no per-member REFS files. The extractor returns the
+// deterministic RRFS station sounding (hourly) plus the REFS ensemble
+// mean and spread at the station grid point (3-hourly). This route shapes
+// them into the { member: [{x, y}] } format the charts consume: one
+// 'RRFS' member line and a 'Mean' whose points carry p10/p25/p75/p90
+// derived from mean +/- spread.
 const http = require('http');
 const EXTRACTOR_URL = process.env.EXTRACTOR_URL || 'http://extractor:3002';
 
@@ -722,6 +725,42 @@ function shapeMemberSeries(series, param, cycleEpochMs) {
 
 const round2 = v => Math.round(v * 100) / 100;
 
+/**
+ * REFS ensemble mean at 3h steps as Mean points carrying a band:
+ * p10/p90 = mean -/+ 1.28 spread, p25/p75 = mean -/+ 0.67 spread
+ * (Gaussian quantiles). Accumulations sum the 3h buckets; their spread
+ * is summed too, which assumes member wetness persists across buckets.
+ */
+function shapeEnsembleMean(ens, param, cycleEpochMs) {
+    const { hours, mean, sprd } = ens;
+    const M_TO_IN = 39.3701;
+    const pick = {
+        '3hrly-TMP': i => [K_TO_F(mean.tmp[i]), sprd.tmp[i] * 9 / 5],
+        '3h-10mWND': i => [mean.wnd[i] * MS_TO_KTS, sprd.wnd[i] * MS_TO_KTS],
+        '3hrly-QPF': i => [mean.qpf[i] * MM_TO_IN, sprd.qpf[i] * MM_TO_IN],
+        '3hrly-SNO': i => [mean.sno[i] * M_TO_IN, sprd.sno[i] * M_TO_IN],
+    }[param.startsWith('Total-') ? param.replace('Total-', '3hrly-') : param];
+    if (!pick || !hours) return [];
+
+    const nonNegative = param !== '3hrly-TMP';
+    const out = [];
+    let sum = 0, sumSprd = 0;
+    for (let i = 0; i < hours.length; i++) {
+        let [m, s] = pick(i);
+        if (param.startsWith('Total-')) {
+            sum += m; sumSprd += s;
+            m = sum; s = sumSprd;
+        }
+        const q = k => round2(nonNegative ? Math.max(0, m + k * s) : m + k * s);
+        out.push({
+            x: cycleEpochMs + hours[i] * 3600000,
+            y: round2(m),
+            p10: q(-1.28), p25: q(-0.67), p75: q(0.67), p90: q(1.28)
+        });
+    }
+    return out;
+}
+
 app.get('/api/refs/:station/:run/:param', async (req, res) => {
     const { station, run, param } = req.params;
     const date = req.query.date || new Date().toISOString().split('T')[0];
@@ -743,7 +782,8 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
         return res.status(400).json({ error: 'Invalid date' });
     }
 
-    const cacheKey = `refs_${date}_${run}_${sid}_${param}`;
+    // Prefix versions the persisted cache: bump when the shaped output changes
+    const cacheKey = `refs2_${date}_${run}_${sid}_${param}`;
     const cached = getFromCache(cacheKey);
     if (cached) {
         if (cached.negative) {
@@ -783,7 +823,7 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
                     zr: frac('wxtz'), ip: frac('wxtp')
                 });
             }
-            const complete = members.length >= 5 && steps >= 16;
+            const complete = plume.complete && steps >= 16;
             setInCache(cacheKey, out,
                 complete ? undefined : INCOMPLETE_TTL_MS,
                 complete ? {} : { incomplete: true });
@@ -792,16 +832,18 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
         }
 
         const shaped = {};
-        const memberNames = Object.keys(plume.members).sort();
-        for (const member of memberNames) {
-            const label = 'M' + member.replace(/^m0*/, '').padStart(2, '0');
+        for (const member of Object.keys(plume.members).sort()) {
+            const label = member === 'rrfs' ? 'RRFS' : 'M' + member.replace(/^m0*/, '').padStart(2, '0');
             const pts = shapeMemberSeries(plume.members[member], param, cycleEpochMs);
             if (pts.length > 0) shaped[label] = pts;
         }
 
-        // Ensemble mean across members
         const labels = Object.keys(shaped);
-        if (labels.length > 0) {
+        const ensMean = plume.ens ? shapeEnsembleMean(plume.ens, param, cycleEpochMs) : [];
+        if (ensMean.length > 0) {
+            shaped['Mean'] = ensMean;
+        } else if (labels.length > 0) {
+            // No ensemble products: fall back to the mean across member lines
             const sums = new Map();
             for (const label of labels) {
                 for (const p of shaped[label]) {
@@ -816,7 +858,7 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
         }
 
         const steps = labels.length ? Math.min(...labels.map(l => shaped[l].length)) : 0;
-        const complete = labels.length >= 5 && steps >= 16;
+        const complete = plume.complete && labels.length >= 1 && steps >= 16;
         if (complete) {
             setInCache(cacheKey, shaped);
             res.set('X-Cache', 'MISS');
@@ -937,7 +979,7 @@ const WARM_STATIONS = ['JFK', 'LGA', 'EWR'];
 const WARM_PARAMS = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
 const WARM_MODELS = [
     { base: '/api/sref', runs: [3, 9, 15, 21], lagHours: 5.33 },
-    { base: '/api/refs', runs: [0, 6, 12, 18], lagHours: 6 },
+    { base: '/api/refs', runs: [0, 6, 12, 18], lagHours: 4 },
 ];
 const WARM_INTERVAL_MS = 10 * 60 * 1000;
 

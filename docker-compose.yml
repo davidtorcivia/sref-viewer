@@ -39,9 +39,8 @@ services:
       - "3002"
     environment:
       - PORT=3002
-      # The experimental rrfs_a per-member BUFR feed went dark ~2026-08-12 and
-      # the parallel/prod feeds publish no per-member files - see
-      # REFS-MIGRATION.md "Status: BROKEN" before changing REFS_BUFR_URL.
+      # Sources default to the noaa-rrfs-ops-pds bucket; override with
+      # RRFS_TAR_URL / REFS_GRIB_URL (see extractor.py) after the Oct 6 cutover
       - CACHE_DIR=/data/refs-cache
     volumes:
       - /nvme-mirror/apps/sref-viewer/data:/data
