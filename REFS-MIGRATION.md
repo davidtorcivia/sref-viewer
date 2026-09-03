@@ -2,7 +2,8 @@
 
 ## Why
 
-**SREF is retired on August 31, 2026 at 12Z.** Per NWS Service Change Notice 26-47,
+**SREF is retired on October 6, 2026 at 12Z** (moved from Aug 31 by the updated
+SCN 26-48, July 6 2026). Per NWS Service Change Notice 26-47,
 NCEP discontinues NAM, SREF, HREF, HiresW, and NAM MOS on that date. The SPC SREF
 plumes endpoint this app scrapes (`spc.noaa.gov/exper/sref/srefplumes/returndata.php`)
 will stop receiving new runs.
@@ -31,7 +32,40 @@ Notes:
   completion-time table) and `backend/server.js` (`validRuns`) must change to the
   REFS cycle times once real availability lag is measured.
 
-## Status: IMPLEMENTED (July 2026) - via BUFR member soundings
+## Status: BROKEN since ~2026-08-12 - member BUFR feed withdrawn
+
+Findings from 2026-09-03 (SREF still publishing; REFS 404 for every cycle):
+
+- The experimental `noaa-rrfs-pds/rrfs_a/rrfsens.*` prefix this app read is
+  gone. Last cached REFS run on disk is 2026-08-12 06Z.
+- NOAA's pre-operational parallel feed moved on 2026-08-14 to a new bucket,
+  `noaa-rrfs-ops-pds` (mirrors NOMADS `com/rrfs/para/` and `com/refs/para/`).
+- `refs.YYYYMMDD/CC/` on both contains **only `ensprod/`** grib2: `mean`,
+  `sprd`, `prob`, `pmmn`, `lpmm`, `avrg`, `eas`, `ffri` for conus/ak/hi/pr.
+  **No per-member files exist anywhere on S3 or NOMADS.** The five RRFS
+  members are internal to the ensemble product generator.
+- Deterministic RRFS does ship station soundings:
+  `rrfs.YYYYMMDD/CC/rrfs.tCCz.bufrsnd.tar.gz` (~117MB, 1876 stations, every
+  hourly cycle) plus `rrfs.tCCz.class1.bufr` (258MB). The per-station files
+  inside (`bufr.744860.YYYYMMDDCC`) decode with the existing `debufr`
+  pipeline: 88 forecast times, RPID/T2MS/TP01/SNFL/SNRA present.
+- Updated SCN: https://www.weather.gov/media/notification/pdf_2026/scn26-048_RRFS_and_REFS_Implementation.aab.pdf
+- Bucket index: https://noaa-rrfs-ops-pds.s3.amazonaws.com/index.html
+
+Repair options (none built yet):
+
+1. **Deterministic RRFS plume** - extractor pulls the 00/06/12/18Z tarball,
+   keeps only wanted stations, serves as a single member. Hourly to 84h.
+   Loses the ensemble spread; charts render but "Mean" = the one line.
+2. **REFS ensprod bands** - fetch `mean` + `sprd` (and `prob` for snow) via
+   NOMADS grib_filter subregion around each station, decode with wgrib2,
+   show mean +/- spread as bands. No spaghetti; new grib decode path.
+3. Both: deterministic line over ensprod band.
+
+Changing `REFS_BUFR_URL` alone cannot fix this - there is no member URL
+to point at.
+
+## Status: IMPLEMENTED (July 2026) - via BUFR member soundings (superseded, see above)
 
 Neither path below was used. During implementation we found a better
 permanent source: **per-member station sounding BUFR files** (the BUFKIT
@@ -55,7 +89,7 @@ Architecture:
 Current source (pre-operational): AWS Open Data
 `noaa-rrfs-pds/rrfs_a/rrfsens.YYYYMMDD/CC/mNNN/bufr.CC/bufr.SSSSSS.YYYYMMDDCC`
 
-**Post-cutover action (Aug 31, 2026):** the experimental `rrfs_a` prefix
+**Post-cutover action (originally Aug 31, 2026):** the experimental `rrfs_a` prefix
 will presumably stop updating when REFS goes operational. Switch
 `REFS_BUFR_URL` in docker-compose.yml to the prod feed (NOMADS
 `com/refs/prod/` or the operational AWS bucket - check layout when it
@@ -104,6 +138,6 @@ filtering, so per-station downloads are small:
 
 - **Now - mid-August 2026**: watch SPC for a REFS plumes product (Path A).
 - **Mid-August 2026**: if nothing announced, build Path B; SREF keeps working
-  until Aug 31 so there is a comparison window to validate against.
-- **After Aug 31, 2026**: SREF endpoints go dark; historical cached runs in
+  until Oct 6 so there is a comparison window to validate against.
+- **After Oct 6, 2026**: SREF endpoints go dark; historical cached runs in
   `data/cache.json` remain viewable.

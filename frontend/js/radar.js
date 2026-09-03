@@ -8,8 +8,14 @@
  *
  * Playback is deliberately simple: one discrete frame at a time, no
  * crossfading or interpolation (tried both - blending 10-minute radar
- * steps reads worse than honest frames). All frames preload as opacity-0
- * layers so stepping and scrubbing are instant.
+ * steps reads worse than honest frames).
+ *
+ * Loading: LibreWXR renders tiles on demand and a cold tile can take
+ * 10-90s, and MapLibre caps parallel image requests at 16. Adding all 18
+ * frames at once starved the visible frame behind invisible ones. So the
+ * current frame is added first and the rest trickle in a couple at a
+ * time (nearest first); playback only steps over frames whose tiles have
+ * actually arrived.
  */
 
 const TILE_HOST = 'https://api.librewxr.net';
@@ -22,6 +28,8 @@ const RADAR_OPACITY = 0.75;
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
 const REFRESH_MS = 2 * 60 * 1000;   // Re-fetch frame index
+const LOAD_PARALLEL = 2;            // Frames loading tiles at once
+const LOAD_STALL_MS = 10000;        // Give up waiting on a cold frame, move on
 
 // Radar is only ever useful slower, never faster
 const SPEEDS = [
@@ -63,7 +71,11 @@ let frames = [];          // [{ time, path, nowcast }]
 let currentFrame = 0;
 let playing = false;
 let playTimer = null;
-let loadedLayerIds = new Set();
+let loadedLayerIds = new Set();   // layers added to the map
+let readyIds = new Set();         // layers whose tiles have arrived
+let pending = [];                 // frames waiting for a load slot
+let staleTwins = new Map();       // replacement layer id -> superseded layer id kept until ready
+let inFlight = 0;
 let speedIdx = (() => {
     const saved = localStorage.getItem(SPEED_KEY);
     const idx = SPEEDS.findIndex(s => String(s.mult) === saved);
@@ -71,11 +83,17 @@ let speedIdx = (() => {
 })();
 
 function tileUrl(frame) {
-    return `${TILE_HOST}${frame.path}/${TILE_PX}/{z}/{x}/{y}/${COLOR_SCHEME}/${SMOOTH}_${SNOW}.png`;
+    const url = `${TILE_HOST}${frame.path}/${TILE_PX}/{z}/{x}/{y}/${COLOR_SCHEME}/${SMOOTH}_${SNOW}.png`;
+    // A nowcast frame shares its path with the observed frame it later
+    // becomes; a distinct URL keeps caches from serving the forecast as
+    // the observation.
+    return frame.nowcast ? `${url}?fc=${frame.basis}` : url;
 }
 
+// Nowcast frames are regenerated from each new observation, so their
+// identity includes the observation they were derived from.
 function layerId(frame) {
-    return `radar-${frame.time}`;
+    return frame.nowcast ? `radar-${frame.time}-fc${frame.basis}` : `radar-${frame.time}`;
 }
 
 async function fetchFrames() {
@@ -83,7 +101,8 @@ async function fetchFrames() {
     if (!res.ok) throw new Error(`Frame index HTTP ${res.status}`);
     const data = await res.json();
     const past = (data.radar?.past || []).map(f => ({ ...f, nowcast: false }));
-    const nowcast = (data.radar?.nowcast || []).map(f => ({ ...f, nowcast: true }));
+    const basis = past.length ? past[past.length - 1].time : 0;
+    const nowcast = (data.radar?.nowcast || []).map(f => ({ ...f, nowcast: true, basis }));
     return past.concat(nowcast);
 }
 
@@ -93,59 +112,119 @@ function labelLayerId() {
     return labelLayer ? labelLayer.id : undefined;
 }
 
+function addFrameLayer(frame) {
+    const id = layerId(frame);
+    // Insert below warning polygons (and labels) so alert outlines stay
+    // visible on top of the radar.
+    const beforeId = map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId();
+    map.addSource(id, {
+        type: 'raster',
+        tiles: [tileUrl(frame)],
+        tileSize: TILE_SIZE,
+        attribution: 'Radar &copy; <a href="https://librewxr.net/">LibreWXR</a> (CC-BY-4.0)'
+    });
+    map.addLayer({
+        id,
+        type: 'raster',
+        source: id,
+        paint: {
+            'raster-opacity': frames[currentFrame] === frame ? RADAR_OPACITY : 0,
+            'raster-opacity-transition': { duration: 0 },
+            'raster-fade-duration': 0
+        }
+    }, beforeId);
+    loadedLayerIds.add(id);
+}
+
+// Resolves once the source's tiles are in (or after LOAD_STALL_MS so one
+// cold frame can't block the queue). Readiness itself is tracked by the
+// global 'sourcedata' listener in init(), which also catches late arrivals.
+function waitForSource(id) {
+    return new Promise(resolve => {
+        const timer = setTimeout(done, LOAD_STALL_MS);
+        function onData(e) {
+            if (e.sourceId === id && e.sourceDataType !== 'metadata' && map.isSourceLoaded(id)) done();
+        }
+        function done() { clearTimeout(timer); map.off('sourcedata', onData); resolve(); }
+        map.on('sourcedata', onData);
+    });
+}
+
+function pumpQueue() {
+    while (pending.length && inFlight < LOAD_PARALLEL) {
+        const frame = pending.shift();
+        const id = layerId(frame);
+        if (loadedLayerIds.has(id)) continue;
+        addFrameLayer(frame);
+        inFlight++;
+        waitForSource(id).then(() => { inFlight--; pumpQueue(); });
+    }
+}
+
 /**
- * Sync map layers to the current frame list: add new frames as raster
- * layers (opacity 0), remove frames that fell out of the window.
+ * Sync map layers to the current frame list: drop frames that fell out
+ * of the window, add the current frame now, queue the rest nearest-first.
  */
 function syncLayers() {
     const wanted = new Set(frames.map(layerId));
 
-    // Remove stale layers/sources
+    for (const k of staleTwins.keys()) if (!wanted.has(k)) staleTwins.delete(k);
+    const byTime = new Map(frames.map(f => [String(f.time), layerId(f)]));
     for (const id of [...loadedLayerIds]) {
-        if (!wanted.has(id)) {
-            if (map.getLayer(id)) map.removeLayer(id);
-            if (map.getSource(id)) map.removeSource(id);
-            loadedLayerIds.delete(id);
+        if (wanted.has(id)) continue;
+        // A regenerated nowcast frame keeps its old layer on screen until
+        // the replacement has tiles, otherwise the map blanks every 10 min.
+        const twin = byTime.get(id.split('-')[1]);
+        if (twin && !isReady(frames.findIndex(f => layerId(f) === twin))) {
+            staleTwins.set(twin, id);
+            continue;
         }
+        removeLayer(id);
+        if (twin) staleTwins.delete(twin);
     }
 
-    // Add missing ones. Insert below warning polygons (and labels) so
-    // alert outlines stay visible on top of the radar.
-    const beforeId = map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId();
+    const current = frames[currentFrame];
+    if (current && !loadedLayerIds.has(layerId(current))) addFrameLayer(current);
 
-    for (const frame of frames) {
-        const id = layerId(frame);
-        if (loadedLayerIds.has(id)) continue;
-        map.addSource(id, {
-            type: 'raster',
-            tiles: [tileUrl(frame)],
-            tileSize: TILE_SIZE,
-            attribution: 'Radar &copy; <a href="https://librewxr.net/">LibreWXR</a> (CC-BY-4.0)'
-        });
-        // Opacity 0 layers still fetch their tiles (opacity is a paint
-        // property), so every frame preloads and stepping is instant.
-        map.addLayer({
-            id,
-            type: 'raster',
-            source: id,
-            paint: {
-                'raster-opacity': 0,
-                'raster-opacity-transition': { duration: 0 },
-                'raster-fade-duration': 0
-            }
-        }, beforeId);
-        loadedLayerIds.add(id);
+    pending = frames
+        .map((frame, i) => ({ frame, dist: Math.abs(i - currentFrame) }))
+        .filter(({ frame }) => !loadedLayerIds.has(layerId(frame)))
+        .sort((a, b) => a.dist - b.dist)
+        .map(({ frame }) => frame);
+    pumpQueue();
+}
+
+function removeLayer(id) {
+    if (map.getLayer(id)) map.removeLayer(id);
+    if (map.getSource(id)) map.removeSource(id);
+    loadedLayerIds.delete(id);
+    readyIds.delete(id);
+}
+
+// Tile errors and cache hits settle a source without a 'sourcedata'
+// event, so the event listener is only the fast path; poll too.
+function isReady(index) {
+    if (index < 0) return false;
+    const id = layerId(frames[index]);
+    if (readyIds.has(id)) return true;
+    if (loadedLayerIds.has(id) && map.getSource(id) && map.isSourceLoaded(id)) {
+        readyIds.add(id);
+        return true;
     }
+    return false;
 }
 
 function showFrame(index) {
     if (!frames.length) return;
     currentFrame = Math.max(0, Math.min(Math.round(index), frames.length - 1));
-    for (let i = 0; i < frames.length; i++) {
-        const id = layerId(frames[i]);
-        if (map.getLayer(id)) {
-            map.setPaintProperty(id, 'raster-opacity', i === currentFrame ? RADAR_OPACITY : 0);
-        }
+    // Scrubbing to a frame still in the queue: load it now
+    const curId = layerId(frames[currentFrame]);
+    if (!loadedLayerIds.has(curId)) addFrameLayer(frames[currentFrame]);
+    const stale = staleTwins.get(curId);
+    if (stale && isReady(currentFrame)) { removeLayer(stale); staleTwins.delete(curId); }
+    for (const id of loadedLayerIds) {
+        const show = (stale && !readyIds.has(curId)) ? id === stale : id === curId;
+        map.setPaintProperty(id, 'raster-opacity', show ? RADAR_OPACITY : 0);
     }
     els.scrubber.value = String(currentFrame);
     updateFrameLabel();
@@ -180,7 +259,13 @@ function play() {
     els.playBtn.setAttribute('aria-label', 'Pause animation');
     const step = () => {
         if (!playing) return;
-        const next = (currentFrame + 1) % frames.length;
+        // Advance to the next frame whose tiles have arrived; if none
+        // have yet, hold the current one rather than flash blanks.
+        let next = currentFrame;
+        for (let k = 1; k <= frames.length; k++) {
+            const i = (currentFrame + k) % frames.length;
+            if (isReady(i)) { next = i; break; }
+        }
         showFrame(next);
         const hold = next === frames.length - 1
             ? frameInterval() + LAST_FRAME_HOLD_MS
@@ -289,16 +374,12 @@ async function refreshFrames({ initial = false } = {}) {
         const prevTime = frames[currentFrame]?.time;
         frames = newFrames;
         els.scrubber.max = String(frames.length - 1);
-        syncLayers();
 
-        if (initial) {
-            // Start on the most recent observed frame
-            showFrame(latestPastIdx);
-        } else {
-            // Keep the closest frame to what was showing
-            const keep = frames.findIndex(f => f.time >= (prevTime || 0));
-            showFrame(keep === -1 ? latestPastIdx : keep);
-        }
+        // Pick the frame to show before syncing so it gets loaded first
+        const keep = initial ? -1 : frames.findIndex(f => f.time >= (prevTime || 0));
+        currentFrame = keep === -1 ? latestPastIdx : keep;
+        syncLayers();
+        showFrame(currentFrame);
 
         const latest = frames[latestPastIdx];
         if (latest) {
@@ -345,17 +426,25 @@ function init() {
     }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'imperial' }), 'bottom-right');
 
+    // Mark a frame ready once its tiles are in. Sticky: panning later
+    // makes a source momentarily "not loaded" again, which shouldn't
+    // pull frames back out of the animation.
+    map.on('sourcedata', (e) => {
+        if (e.sourceDataType !== 'metadata' && loadedLayerIds.has(e.sourceId) && map.isSourceLoaded(e.sourceId)) {
+            readyIds.add(e.sourceId);
+            // Swap a superseded frame out the moment its replacement is in
+            if (staleTwins.has(e.sourceId) && frames[currentFrame] && layerId(frames[currentFrame]) === e.sourceId) {
+                showFrame(currentFrame);
+            }
+        }
+    });
+
     map.on('load', async () => {
         loadAlerts();
         setInterval(loadAlerts, ALERTS_REFRESH_MS);
         await refreshFrames({ initial: true });
-        // Don't animate until every frame's tiles are loaded - playing
-        // through half-loaded frames looks broken. 'idle' fires once all
-        // sources finish; the timeout is a fallback for a stalled tile.
-        await Promise.race([
-            new Promise(resolve => map.once('idle', resolve)),
-            new Promise(resolve => setTimeout(resolve, 6000))
-        ]);
+        // Playback only steps over frames whose tiles have arrived, so it
+        // can start immediately and grow as frames trickle in.
         play();
         setInterval(() => refreshFrames(), REFRESH_MS);
     });

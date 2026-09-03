@@ -1105,7 +1105,7 @@ function showHelpModal() {
                 <p>This tool visualizes forecast data from NOAA's <strong>Short Range Ensemble Forecast (SREF)</strong> model, providing probabilistic weather forecasts up to 87 hours ahead.</p>
 
                 <h3>SREF vs REFS</h3>
-                <p>SREF retires on <strong>August 31, 2026</strong>. Its successor is <strong>REFS</strong> (the RRFS ensemble): 5 members at 3km resolution with <strong>hourly</strong> output to 60 hours, cycles at 00Z/06Z/12Z/18Z. Use the model toggle in the header to switch. REFS has a single model core, so there is no ARW/NMB split - just Members and Mean.</p>
+                <p>SREF retires on <strong>October 6, 2026</strong>. Its successor is <strong>REFS</strong> (the RRFS ensemble): 5 members at 3km resolution with <strong>hourly</strong> output to 60 hours, cycles at 00Z/06Z/12Z/18Z. Use the model toggle in the header to switch. REFS has a single model core, so there is no ARW/NMB split - just Members and Mean.</p>
                 
                 <h3>What are the colored lines?</h3>
                 <p>Each line represents a different "ensemble member" - a model run with slightly different initial conditions or physics settings. The <strong>26 members</strong> span a range of possible outcomes, helping show forecast uncertainty.</p>

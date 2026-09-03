@@ -2,7 +2,7 @@
 
 A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View snowfall, precipitation, temperature, and wind forecasts from NOAA's Short Range Ensemble Forecast model for JFK, LGA, and EWR airports. Includes a live radar map with a 60-minute nowcast.
 
-> **Heads up:** NOAA retires the SREF model on **August 31, 2026**. Its successor
+> **Heads up:** NOAA retires the SREF model on **October 6, 2026** (moved from Aug 31). Its successor
 > **REFS** (RRFS ensemble, 5 members, hourly to 60h) is already supported via the
 > model toggle. See [REFS-MIGRATION.md](REFS-MIGRATION.md) for details and the
 > post-cutover source switch.

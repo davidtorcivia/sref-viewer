@@ -43,7 +43,7 @@ export const CONFIG = {
 };
 
 /**
- * Forecast models. SREF retires 2026-08-31; REFS (RRFS ensemble) is its
+ * Forecast models. SREF retires 2026-10-06; REFS (RRFS ensemble) is its
  * successor - 5 members, hourly output to 60h, cycles at 00/06/12/18Z.
  * readyLagHours: how long after cycle time the data is typically complete.
  */

@@ -39,8 +39,9 @@ services:
       - "3002"
     environment:
       - PORT=3002
-      # Post-cutover (Aug 31, 2026): switch to the NOMADS prod feed, e.g.
-      # REFS_BUFR_URL=https://nomads.ncep.noaa.gov/pub/data/nccf/com/refs/prod/refs.{date}/{cycle}/...
+      # The experimental rrfs_a per-member BUFR feed went dark ~2026-08-12 and
+      # the parallel/prod feeds publish no per-member files - see
+      # REFS-MIGRATION.md "Status: BROKEN" before changing REFS_BUFR_URL.
       - CACHE_DIR=/data/refs-cache
     volumes:
       - /nvme-mirror/apps/sref-viewer/data:/data
