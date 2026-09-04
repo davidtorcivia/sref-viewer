@@ -3,8 +3,8 @@
  * MapLibre GL basemap (OpenFreeMap vector tiles) with animated radar
  * frames from LibreWXR: ~2 hours of history plus a 60-minute nowcast.
  *
- * Frame index comes from our backend (/api/radar/frames, 60s shared cache);
- * tiles load directly from api.librewxr.net.
+ * Frame index and tiles come from our backend (/api/radar/frames and
+ * /api/radar/tile), which caches tiles and pre-warms the NYC viewport.
  *
  * Playback is deliberately simple: one discrete frame at a time, no
  * crossfading or interpolation (tried both - blending 10-minute radar
@@ -18,12 +18,9 @@
  * actually arrived.
  */
 
-const TILE_HOST = 'https://api.librewxr.net';
-const TILE_PX = 512;      // Request 512px tiles...
-const TILE_SIZE = 256;    // ...but declare 256 so they render at 2x density (sharper)
-const COLOR_SCHEME = 2;   // Universal Blue
-const SMOOTH = 1;
-const SNOW = 1;           // Per-pixel rain/snow classification
+// Tiles come through our backend (/api/radar/tile), which caches them and
+// pre-renders the NYC viewport for each new frame; style options live there.
+const TILE_SIZE = 256;    // Backend requests 512px tiles; declaring 256 renders them at 2x density
 const RADAR_OPACITY = 0.75;
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
@@ -83,8 +80,8 @@ let speedIdx = (() => {
 })();
 
 function tileUrl(frame) {
-    const url = `${TILE_HOST}${frame.path}/${TILE_PX}/{z}/{x}/{y}/${COLOR_SCHEME}/${SMOOTH}_${SNOW}.png`;
-    // A nowcast frame shares its path with the observed frame it later
+    const url = `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png`;
+    // A nowcast frame shares its time with the observed frame it later
     // becomes; a distinct URL keeps caches from serving the forecast as
     // the observation.
     return frame.nowcast ? `${url}?fc=${frame.basis}` : url;

@@ -11,7 +11,7 @@ A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View
 
 - Server-side caching proxy that reduces load on NOAA servers
 - Complete runs cached 14 days (immutable); partial/unavailable runs negative-cached briefly
-- Radar map page (`/radar`) - MapLibre GL + OpenFreeMap basemap + LibreWXR radar tiles with ~2h history and 60-minute nowcast, no API keys
+- Radar map page (`/radar`) - MapLibre GL + OpenFreeMap basemap + LibreWXR radar tiles with ~2h history and 60-minute nowcast, no API keys; tiles are proxied, cached and pre-warmed by the backend so frames appear instantly
 - Responsive design optimized for mobile devices (bands view + compact header on phones)
 - PWA installable with offline support (self-hosted Chart.js/MapLibre, no CDNs)
 - Auto light/dark mode based on system preference
@@ -129,6 +129,8 @@ sref-viewer/
 - `GET /api/refs/status/:run?date=YYYY-MM-DD` - what the extractor is doing for a
   cycle being built (drives the status-bar progress while a cold cycle loads)
 - `GET /api/radar/frames` - LibreWXR frame index (60s shared cache)
+- `GET /api/radar/tile/:time/:z/:x/:y.png?fc=` - Radar tile proxy: cached 3h, and the
+  NYC viewport (z7-8) is pre-rendered for every new frame within a couple of minutes of it appearing
 - `GET /api/radar/alerts?lat=&lon=&radius=` - Weather warning polygons (GeoJSON, 2min shared cache)
 
 ### Extractor (internal, port 3002)

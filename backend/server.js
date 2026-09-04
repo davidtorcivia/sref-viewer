@@ -226,21 +226,23 @@ const BUCKET_MAX = 50;        // Max tokens (allows burst of 50 requests)
 const REFILL_RATE = 1;        // Tokens added per second
 const REFILL_INTERVAL = 1000; // 1 second
 
-function checkApiRateLimit(ip) {
+function checkApiRateLimit(ip, buckets = rateBuckets, max = BUCKET_MAX, rate = REFILL_RATE) {
     const now = Date.now();
-    let bucket = rateBuckets.get(ip);
+    let bucket = buckets.get(ip);
 
     if (!bucket) {
         // New user gets a full bucket
-        bucket = { tokens: BUCKET_MAX, lastRefill: now };
-        rateBuckets.set(ip, bucket);
+        bucket = { tokens: max, lastRefill: now };
+        buckets.set(ip, bucket);
     }
 
-    // Refill tokens based on time elapsed
-    const elapsed = now - bucket.lastRefill;
-    const tokensToAdd = Math.floor(elapsed / REFILL_INTERVAL) * REFILL_RATE;
-    bucket.tokens = Math.min(BUCKET_MAX, bucket.tokens + tokensToAdd);
-    bucket.lastRefill = now;
+    // Refill tokens based on time elapsed. Only advance lastRefill when a
+    // whole interval has passed, otherwise sub-second traffic never refills
+    const tokensToAdd = Math.floor((now - bucket.lastRefill) / REFILL_INTERVAL) * rate;
+    if (tokensToAdd > 0) {
+        bucket.tokens = Math.min(max, bucket.tokens + tokensToAdd);
+        bucket.lastRefill = now;
+    }
 
     // Try to consume a token
     if (bucket.tokens > 0) {
@@ -929,27 +931,191 @@ function fetchLibreJson(url) {
     });
 }
 
-app.get('/api/radar/frames', async (req, res) => {
+let radarFramesInFlight = null;
+async function getRadarFrames() {
     const now = Date.now();
     if (radarFramesCache.data && now - radarFramesCache.fetchedAt < RADAR_FRAMES_TTL_MS) {
-        res.set('X-Cache', 'HIT');
-        return res.json(radarFramesCache.data);
+        return { data: radarFramesCache.data, status: 'HIT' };
     }
+    // Many tile misses can expire the index at once: one upstream fetch for all
+    if (!radarFramesInFlight) {
+        radarFramesInFlight = fetchLibreJson('https://api.librewxr.net/public/weather-maps.json')
+            .then(data => {
+                radarFramesCache = { data, fetchedAt: Date.now() };
+                return { data, status: 'MISS' };
+            })
+            .catch(err => {
+                console.error('[RADAR]', err.message);
+                // Serve stale frames if we have them - better than nothing
+                if (radarFramesCache.data) {
+                    radarFramesCache.fetchedAt = Date.now();  // serve stale for a TTL, not a timeout per tile batch
+                    return { data: radarFramesCache.data, status: 'STALE' };
+                }
+                throw err;
+            })
+            .finally(() => { radarFramesInFlight = null; });
+    }
+    return radarFramesInFlight;
+}
+
+app.get('/api/radar/frames', async (req, res) => {
     try {
-        const data = await fetchLibreJson('https://api.librewxr.net/public/weather-maps.json');
-        radarFramesCache = { data, fetchedAt: now };
-        res.set('X-Cache', 'MISS');
+        const { data, status } = await getRadarFrames();
+        res.set('X-Cache', status);
         res.json(data);
     } catch (err) {
-        console.error('[RADAR]', err.message);
-        // Serve stale frames if we have them - better than nothing
-        if (radarFramesCache.data) {
-            res.set('X-Cache', 'STALE');
-            return res.json(radarFramesCache.data);
-        }
         res.status(502).json({ error: 'Failed to fetch radar frames', details: err.message });
     }
 });
+
+// ============ Radar Tiles (proxy + cache + warming) ============
+// LibreWXR renders tiles on demand and a cold tile can take 5-90s. Tiles
+// are immutable per (frame, nowcast basis), so they are cached here and
+// the default NYC viewport is pre-rendered for every new frame as soon as
+// the index shows it, so the page normally never waits on upstream.
+const TILE_HOST = 'https://api.librewxr.net';
+const TILE_OPTS = '512';            // 512px tiles, declared 256 client-side for 2x density
+const TILE_STYLE = '2/1_1';         // Universal Blue, smoothed, rain/snow classified
+const TILE_TTL_MS = 3 * 60 * 60 * 1000;
+const TILE_CACHE_MAX = 12000;       // 1-20KB each; ~2900 warm tiles live at once plus browsing
+const tileCache = new Map();        // key -> { body, type, at }
+const tileInFlight = new Map();     // key -> Promise
+const TILE_WARM_INTERVAL_MS = 60 * 1000;
+// NYC default viewport (lon -75.5..-72.5, lat 39.8..41.8). The page opens at
+// map zoom 8.2 and, because 512px tiles are declared as 256, requests source
+// zoom round(map zoom + 1) = 9; 8 covers zooming out one step.
+// ponytail: fixed box; derive from visitors' viewports if that matters.
+const TILE_WARM_ZOOMS = [8, 9];
+// One zoom action re-requests every visible tile for all 18 frames (~430 misses)
+const tileBuckets = new Map();
+const TILE_BUCKET_MAX = 500;
+const TILE_REFILL_RATE = 20;
+const TILE_WARM_BBOX = { west: -75.5, east: -72.5, south: 39.8, north: 41.8 };
+
+function tileKey(time, z, x, y, fc) {
+    return `${time}/${z}/${x}/${y}/${fc || ''}`;
+}
+
+function fetchTile(time, z, x, y) {
+    const url = `${TILE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`;
+    return new Promise((resolve, reject) => {
+        const req = https.get(url, { headers: { 'User-Agent': 'SREF-Viewer/1.0 (Personal Weather Tool)' } }, (res) => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body: Buffer.concat(chunks) }));
+        });
+        req.on('error', reject);
+        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Tile timeout')); });
+    });
+}
+
+// Cached tile or one upstream fetch shared by everyone waiting for it
+function getTile(time, z, x, y, fc) {
+    const key = tileKey(time, z, x, y, fc);
+    const hit = tileCache.get(key);
+    if (hit && Date.now() - hit.at < TILE_TTL_MS) return Promise.resolve(hit);
+    if (tileInFlight.has(key)) return tileInFlight.get(key);
+    const p = fetchTile(time, z, x, y).then(t => {
+        if (t.status === 200) {
+            if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
+            tileCache.set(key, { body: t.body, type: t.type, at: Date.now() });
+        }
+        return t;
+    }).finally(() => tileInFlight.delete(key));
+    tileInFlight.set(key, p);
+    return p;
+}
+
+app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
+    const time = Number(req.params.time), z = Number(req.params.z);
+    const x = Number(req.params.x), y = Number(req.params.y);
+    const fc = req.query.fc ? String(req.query.fc) : '';
+    if (![time, z, x, y].every(Number.isInteger) || z < 3 || z > 12
+        || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z || !/^\d*$/.test(fc)) {
+        return res.status(400).end();
+    }
+    try {
+        const key = tileKey(time, z, x, y, fc);
+        const cached = tileCache.get(key);
+        // A cached tile was validated when fetched: serve it without touching
+        // the index (which may be briefly unavailable or newer than the client)
+        if (!(cached && Date.now() - cached.at < TILE_TTL_MS) && !tileInFlight.has(key)) {
+            // Only frames in the index, and a nowcast frame only under an fc key
+            // that is an observed time: its render would otherwise be cached as
+            // the observation it becomes
+            const { data } = await getRadarFrames();
+            const pastTimes = (data.radar?.past || []).map(f => f.time);
+            const isNowcast = (data.radar?.nowcast || []).some(f => f.time === time);
+            if (!pastTimes.includes(time) && !isNowcast) return res.status(404).end();
+            if (isNowcast && !fc) return res.status(404).end();
+            if (fc && !pastTimes.includes(Number(fc))) return res.status(400).end();
+            // Misses cost an upstream render: rate-limit those, not hits
+            if (!checkApiRateLimit(req.ip, tileBuckets, TILE_BUCKET_MAX, TILE_REFILL_RATE)) {
+                return res.status(429).end();
+            }
+        }
+        const t = await getTile(time, z, x, y, fc);
+        if (t.status && t.status !== 200) return res.status(t.status).end();
+        res.set('Content-Type', t.type || 'image/png');
+        res.set('Cache-Control', 'public, max-age=3600');
+        res.send(t.body);
+    } catch (err) {
+        res.status(502).end();
+    }
+});
+
+function lonToX(lon, z) { return Math.floor((lon + 180) / 360 * 2 ** z); }
+function latToY(lat, z) {
+    const r = lat * Math.PI / 180;
+    return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z);
+}
+
+let radarWarming = false;
+async function warmRadarTiles() {
+    // A stalled upstream must not stack passes (and sockets) every minute
+    if (radarWarming) return;
+    radarWarming = true;
+    try {
+        await warmRadarTilesOnce();
+    } finally {
+        radarWarming = false;
+    }
+}
+
+async function warmRadarTilesOnce() {
+    let frames;
+    try {
+        const { data } = await getRadarFrames();
+        const past = data.radar?.past || [];
+        const basis = past.length ? past[past.length - 1].time : 0;
+        // Newest observed frame first: it is what the page opens on
+        frames = [...past].reverse().map(f => ({ time: f.time, fc: '' }))
+            .concat((data.radar?.nowcast || []).map(f => ({ time: f.time, fc: String(basis) })));
+    } catch { return; }
+    // Gate on cache state per tile so failures, eviction, expiry and
+    // restarts all get re-warmed; in-flight dedup keeps overlapping passes cheap
+    const jobs = [];
+    for (const f of frames) {
+        for (const z of TILE_WARM_ZOOMS) {
+            for (let x = lonToX(TILE_WARM_BBOX.west, z); x <= lonToX(TILE_WARM_BBOX.east, z); x++) {
+                for (let y = latToY(TILE_WARM_BBOX.north, z); y <= latToY(TILE_WARM_BBOX.south, z); y++) {
+                    const hit = tileCache.get(tileKey(f.time, z, x, y, f.fc));
+                    if (!hit || Date.now() - hit.at >= TILE_TTL_MS) jobs.push(() => getTile(f.time, z, x, y, f.fc));
+                }
+            }
+        }
+    }
+    if (!jobs.length) return;
+    const t0 = Date.now();
+    // Three at a time: gentle on a volunteer-run service
+    let i = 0;
+    await Promise.all([0, 1, 2].map(async () => {
+        while (i < jobs.length) { try { await jobs[i++](); } catch { /* still a miss: next pass retries */ } }
+    }));
+    console.log(`[RADAR WARM] ${jobs.length} tiles in ${Math.round((Date.now() - t0) / 1000)}s`);
+}
+setInterval(warmRadarTiles, TILE_WARM_INTERVAL_MS);
+setTimeout(warmRadarTiles, 5000);
 
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
 // Proxied + cached per rounded location so all viewers of an area share

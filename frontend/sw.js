@@ -59,6 +59,9 @@ self.addEventListener('fetch', (event) => {
     // Radar tiles / external hosts: let the browser handle them
     if (url.origin !== location.origin) return;
 
+    // Radar tiles: immutable per URL, the browser HTTP cache handles them
+    if (url.pathname.startsWith('/api/radar/tile/')) return;
+
     // API requests: network-first with bounded cache fallback
     if (url.pathname.startsWith('/api/')) {
         event.respondWith(networkFirstApi(event.request));
