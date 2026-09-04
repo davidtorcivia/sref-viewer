@@ -17,6 +17,7 @@ two public products in the noaa-rrfs-ops-pds bucket:
      values are kept (a few MB per cycle).
 
     GET /plume?sid=744860&date=20260903&cycle=00
+    GET /status?date=20260903&cycle=00   -> what a build in progress is doing
     GET /stations
     GET /health
 
@@ -55,7 +56,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -118,6 +119,16 @@ _locks = {}
 def file_lock(path):
     with _locks_guard:
         return _locks.setdefault(path, threading.Lock())
+
+
+# Per-cycle build progress for the UI: {'YYYYMMDDCC': {'soundings': str, 'ensemble': str, 'since': epoch}}
+progress = {}
+
+
+def set_progress(date, cycle, **parts):
+    key = f'{date}{cycle}'
+    entry = progress.setdefault(key, {'since': time.time()})
+    entry.update(parts)
 
 
 def write_json(path, obj):
@@ -311,21 +322,11 @@ def update_ens_store(date, cycle, points):
         if not need:
             return store
 
-        # One failed fetch must not discard the others: a failure is a hole
-        # that the next pass fills, exactly like an unpublished hour
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(fetch_grib_fields, date, cycle, p, h) for h, p in need]
-        fetched = []
-        for (h, p), fut in zip(need, futures):
-            if fut.exception():
-                print(f'[ENS] {date}{cycle} {p} f{h:02d}: {fut.exception()}', flush=True)
-            fetched.append(None if fut.exception() else fut.result())
-
         gidx = None
         points_n = None
-        for (h, prod), fields in zip(need, fetched):
-            if fields is None:
-                continue
+
+        def decode(h, prod, fields):
+            nonlocal gidx, points_n
             entry = {}
             for key, raw in fields.items():
                 g = ec.codes_new_from_message(raw)
@@ -338,6 +339,7 @@ def update_ens_store(date, cycle, points):
                         gidx = load_grid_index(g)
                         points_n = ec.codes_get(g, 'numberOfPoints')
                     if any(s not in gidx for s in allpoints):
+                        set_progress(date, cycle, ensemble='locating stations on the grid')
                         gidx = grid_indices(g, allpoints, gidx)
                         write_json(GRID_INDEX_FILE, {'generated': int(time.time()),
                                                      'points': points_n, 'index': gidx})
@@ -347,7 +349,26 @@ def update_ens_store(date, cycle, points):
                                   for s in allpoints if gidx[s] != OUTSIDE}
                 finally:
                     ec.codes_release(g)
-            store[f'{h:02d}:{prod}'] = entry
+            return entry
+
+        # Decode each file as soon as it lands so decoding overlaps the
+        # downloads. One failed fetch must not discard the others: a
+        # failure is a hole that the next pass fills, like an unpublished hour
+        done = 0
+        set_progress(date, cycle, ensemble=f'fetching 0/{len(need)}')
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(fetch_grib_fields, date, cycle, p, h): (h, p) for h, p in need}
+            for fut in as_completed(futures):
+                h, prod = futures[fut]
+                done += 1
+                set_progress(date, cycle, ensemble=f'fetching {done}/{len(need)}')
+                if fut.exception():
+                    print(f'[ENS] {date}{cycle} {prod} f{h:02d}: {fut.exception()}', flush=True)
+                    continue
+                fields = fut.result()
+                if fields is not None:
+                    store[f'{h:02d}:{prod}'] = decode(h, prod, fields)
+        set_progress(date, cycle, ensemble='done')
         write_json(path, store)
         return store
 
@@ -401,6 +422,28 @@ def build_plume(sid, date, cycle):
     if cached:
         return cached, True
 
+    # The ensemble fetch only needs station coordinates, which the index
+    # already has for known stations: run it while the tarball streams
+    known = station_points()
+    prepoints = {s: known[s] for s in [sid] + HOT_SIDS if s in known}
+
+    def ens_early():
+        try:
+            update_ens_store(date, cycle, prepoints)
+        except Exception as err:  # noqa: BLE001 - retried below with exact coordinates
+            print(f'[ENS] {date}{cycle} early: {err}', flush=True)
+    ens_thread = threading.Thread(target=ens_early, daemon=True)
+    ens_thread.start()
+    try:
+        return _build_plume(sid, date, cycle, ens_thread)
+    finally:
+        # Join before clearing progress: a still-running ensemble thread
+        # would otherwise recreate the entry and leave the UI "busy" forever
+        ens_thread.join()
+        progress.pop(f'{date}{cycle}', None)
+
+
+def _build_plume(sid, date, cycle, ens_thread):
     # Serialize the tarball pass per cycle so a warmer/user race streams it
     # once (the ensemble store has its own lock). ponytail: two concurrent requests for different non-hot stations
     # still stream it twice; merge wanted sets under the lock if that matters.
@@ -423,14 +466,19 @@ def build_plume(sid, date, cycle):
                               stale['members']['rrfs'])
             else:
                 need.append(s)
+        if need:
+            set_progress(date, cycle, soundings='streaming')
         raws = stream_station_bufrs(date, cycle, need) if need else {}
         if sid not in raws and sid not in decoded:
             raise FileNotFoundError(f'station {sid} not in {date}/{cycle}Z tarball')
+        set_progress(date, cycle, soundings='decoding')
         for s, raw in raws.items():
             decoded[s] = decode_bufr(raw)
+        set_progress(date, cycle, soundings='done')
 
     points = {s: (h['clat'], h['clon']) for s, (h, _) in decoded.items()
               if h.get('clat') is not None and h.get('clon') is not None}
+    ens_thread.join()
     store = None
     try:
         store = update_ens_store(date, cycle, points)
@@ -549,6 +597,16 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == '/health':
             return self.send_json(200, {'status': 'ok', 'stations': stations_state['status']})
+        if url.path == '/status':
+            q = parse_qs(url.query)
+            key = q.get('date', [''])[0] + q.get('cycle', [''])[0]
+            entry = progress.get(key)
+            # A build never takes this long; a stale entry must not read as busy
+            if not entry or time.time() - entry['since'] > 600:
+                return self.send_json(200, {'busy': False})
+            return self.send_json(200, {'busy': True, 'elapsed': round(time.time() - entry['since']),
+                                        'soundings': entry.get('soundings'),
+                                        'ensemble': entry.get('ensemble')})
         if url.path == '/stations':
             idx = read_json(STATIONS_FILE)
             if idx:

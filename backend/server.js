@@ -761,6 +761,28 @@ function shapeEnsembleMean(ens, param, cycleEpochMs) {
     return out;
 }
 
+// What the extractor is doing for a cycle right now (drives the UI status line)
+const statusCache = new Map();
+app.get('/api/refs/status/:run', async (req, res) => {
+    const date = String(req.query.date || '');
+    if (!['00', '06', '12', '18'].includes(req.params.run) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ error: 'Invalid run or date' });
+    }
+    // 1s shared TTL: N viewers polling a cold cycle cost one extractor hit
+    const key = `${date}_${req.params.run}`;
+    const hit = statusCache.get(key);
+    if (hit && Date.now() - hit.at < 1000) return res.json(hit.data);
+    let data;
+    try {
+        data = await fetchExtractorJson(`/status?date=${date.replace(/-/g, '')}&cycle=${req.params.run}`);
+    } catch {
+        data = { busy: false };
+    }
+    if (statusCache.size > 64) statusCache.clear();  // client-chosen dates must not grow the map
+    statusCache.set(key, { at: Date.now(), data });
+    res.json(data);
+});
+
 app.get('/api/refs/:station/:run/:param', async (req, res) => {
     const { station, run, param } = req.params;
     const date = req.query.date || new Date().toISOString().split('T')[0];
@@ -979,9 +1001,10 @@ const WARM_STATIONS = ['JFK', 'LGA', 'EWR'];
 const WARM_PARAMS = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
 const WARM_MODELS = [
     { base: '/api/sref', runs: [3, 9, 15, 21], lagHours: 5.33 },
-    { base: '/api/refs', runs: [0, 6, 12, 18], lagHours: 4 },
+    // Tarball lands ~3h after the cycle, the last ensemble file ~3.5h
+    { base: '/api/refs', runs: [0, 6, 12, 18], lagHours: 3.6 },
 ];
-const WARM_INTERVAL_MS = 10 * 60 * 1000;
+const WARM_INTERVAL_MS = 5 * 60 * 1000;
 
 function latestReadyRun(runs, lagHours) {
     const now = Date.now();

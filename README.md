@@ -126,18 +126,21 @@ sref-viewer/
 - `GET /api/refs/:station/:run/:param?date=YYYY-MM-DD` - Fetch REFS ensemble data
   (runs 00/06/12/18; any of ~1900 stations in the RRFS feed by ICAO, plus
   `param=ptype` for per-hour precip-type member fractions)
+- `GET /api/refs/status/:run?date=YYYY-MM-DD` - what the extractor is doing for a
+  cycle being built (drives the status-bar progress while a cold cycle loads)
 - `GET /api/radar/frames` - LibreWXR frame index (60s shared cache)
 - `GET /api/radar/alerts?lat=&lon=&radius=` - Weather warning polygons (GeoJSON, 2min shared cache)
 
 ### Extractor (internal, port 3002)
 
-- `GET /plume?sid=744860&date=YYYYMMDD&cycle=00` - Decoded per-member BUFR series
+- `GET /plume?sid=744860&date=YYYYMMDD&cycle=00` - Deterministic RRFS series plus REFS mean/spread at the station
+- `GET /status?date=YYYYMMDD&cycle=00` - Build progress for a cycle
 - `GET /stations` - ICAO -> BUFR station-number index (rebuilt monthly from the feed)
 
 ### Operational niceties
 
 - The backend prefetches the latest run for JFK/LGA/EWR (both models) every
-  10 minutes, so the first visitor after a new run gets instant charts.
+  5 minutes, so the first visitor after a new run gets instant charts.
 - Asset URLs are stamped with a per-build version at Docker build time -
   deploys are immediately visible through CDNs/browser caches with no manual
   cache busting.

@@ -64,7 +64,7 @@ export const MODELS = {
         label: 'REFS',
         apiBase: '/api/refs',
         runs: ['00', '06', '12', '18'],
-        readyLagHours: 4,
+        readyLagHours: 3.6,
         cores: [
             { key: 'MEM', label: 'RRFS', tooltip: 'Deterministic RRFS run (hourly to 84h)' },
             { key: 'Mean', tooltip: 'REFS ensemble mean; band = mean +/- spread' },

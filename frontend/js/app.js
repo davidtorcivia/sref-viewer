@@ -644,14 +644,57 @@ function updateSummary(param, data) {
     summaryEl.style.display = 'flex';
 }
 
+function setStatus(text, busy = false) {
+    elements.status.textContent = '';
+    if (busy) {
+        const spin = document.createElement('span');
+        spin.className = 'spinner';
+        elements.status.appendChild(spin);
+    }
+    elements.status.appendChild(document.createTextNode(text));
+}
+
+/**
+ * While a REFS cycle is being built server-side (a cold cycle streams
+ * ~350MB upstream), show what the extractor is doing. Returns a stop fn.
+ */
+function watchRefsProgress() {
+    const { run, date } = state;
+    let stopped = false;
+    const tick = async () => {
+        try {
+            const res = await fetch(`/api/refs/status/${run}?date=${date}`);
+            const p = await res.json();
+            // A response landing after loading finished must not repaint the final status
+            if (stopped || !p.busy) return;
+            const parts = [];
+            if (p.soundings && p.soundings !== 'done') parts.push(`soundings ${p.soundings}`);
+            if (p.ensemble && p.ensemble !== 'done') parts.push(`ensemble ${p.ensemble}`);
+            setStatus(`Building REFS ${run}Z: ${parts.join(' · ') || 'finishing'} (${p.elapsed}s)`, true);
+        } catch { /* status is best-effort */ }
+    };
+    const timer = setInterval(tick, 1000);
+    return () => { stopped = true; clearInterval(timer); };
+}
+
 async function loadAllCharts() {
     if (state.isLoading) return;
 
     state.isLoading = true;
-    elements.status.textContent = 'Loading...';
+    setStatus('Loading...', true);
     elements.reloadBtn.disabled = true;
     state.data = {};
+    const stopProgress = state.model === 'refs' ? watchRefsProgress() : () => {};
+    try {
+        await loadAllChartsInner();
+    } finally {
+        stopProgress();
+        state.isLoading = false;
+        elements.reloadBtn.disabled = false;
+    }
+}
 
+async function loadAllChartsInner() {
     try {
         // Check for snow first
         const snowData = await fetchSREFData(state.station, state.run, 'Total-SNO', state.date, MODELS[state.model].apiBase);
@@ -688,7 +731,7 @@ async function loadAllCharts() {
     }));
 
     const now = new Date();
-    elements.status.textContent = `${state.station} • ${state.run}Z`;
+    setStatus(`${state.station} • ${state.run}Z`);
     elements.lastUpdate.textContent = `Updated ${now.toLocaleTimeString('en-US', {
         hour: 'numeric',
         minute: '2-digit',
@@ -700,9 +743,6 @@ async function loadAllCharts() {
 
     // Precip-type timeline (REFS only - SREF has no p-type data)
     loadPtypeStrip();
-
-    state.isLoading = false;
-    elements.reloadBtn.disabled = false;
 
     // Fetch previous runs in background for trend comparison
     fetchPreviousRuns();
