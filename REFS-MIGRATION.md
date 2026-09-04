@@ -47,10 +47,15 @@ The extractor now combines two public products from `noaa-rrfs-ops-pds`:
   spread into `Mean` points carrying p10/p25/p75/p90 (mean +/- 1.28 and
   0.67 spread; accumulations sum the 3h buckets and their spreads).
 
-Per cycle the extractor pulls ~117MB (tarball) + ~330MB (grib subsets),
-kept 36h so late custom-station requests reuse them; decoded per-station
-JSON is kept 14 days. The station index is rebuilt monthly from the
-tarball headers.
+Per cycle the extractor pulls ~117MB (tarball) + ~230MB (grib fields),
+but stores none of it: the tarball is streamed and only the requested
+station plus the default airports (`REFS_HOT_SIDS`) are decoded from it,
+and each grib field is decoded in memory at the nearest grid point of
+every indexed station, so a cycle leaves a ~5MB point store on disk
+(3 days) plus small per-station plume JSON (14 days). A custom station
+on a cycle up to 3 days old re-streams the tarball (~10s) and reads the
+store; older than that the grib fields are refetched too. The station
+index is rebuilt monthly from the tarball headers.
 
 ## Previous status: BROKEN since ~2026-08-12 - member BUFR feed withdrawn
 
