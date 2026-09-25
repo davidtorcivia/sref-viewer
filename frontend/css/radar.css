@@ -273,6 +273,15 @@ body {
     margin-top: 0.25rem;
 }
 
+/* Bottom panel spans the width on phones - lift scale bar and
+   attribution above it instead of hiding them underneath */
+@media (max-width: 640px) {
+    .maplibregl-ctrl-bottom-left,
+    .maplibregl-ctrl-bottom-right {
+        bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 72px);
+    }
+}
+
 @media (max-width: 480px) {
     .radar-updated {
         display: none;

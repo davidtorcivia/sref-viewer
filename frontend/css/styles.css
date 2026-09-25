@@ -270,13 +270,13 @@ select:disabled {
 
 /* Help Button */
 .help-btn {
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
     padding: 0;
     font-size: 1rem;
     font-weight: 700;
     border-radius: 50%;
-    min-height: auto;
 }
 
 /* ============ Weather Summary Bar ============ */
@@ -824,6 +824,33 @@ select:disabled {
         margin-top: 0.4rem;
     }
 
+    /* Wraps onto its own line here, so the divider would dangle */
+    .chart-mode-toggle {
+        margin-left: 0;
+        padding-left: 0;
+        border-left: none;
+    }
+
+    .mode-btn {
+        min-height: 36px;
+    }
+
+    .nav-link {
+        padding: 0.5rem 0.85rem;
+    }
+
+    .unit-toggle {
+        min-width: 36px;
+        min-height: 32px;
+    }
+
+    .download-btn {
+        grid-column: 1 / -1;
+        justify-self: center;
+        margin-left: 0;
+        min-height: 36px;
+    }
+
     .main {
         padding: 0.5rem;
         max-width: 100%;
@@ -908,8 +935,7 @@ select:disabled {
     }
 
     .chart-actions {
-        width: 100%;
-        justify-content: flex-end;
+        margin-left: auto;
     }
 
     .section-header {
@@ -1034,6 +1060,14 @@ select:disabled {
         padding-top: max(0.75rem, env(safe-area-inset-top));
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
+    }
+
+    @media (max-width: 768px) {
+        .header {
+            padding-top: max(0.5rem, env(safe-area-inset-top));
+            padding-left: max(0.75rem, env(safe-area-inset-left));
+            padding-right: max(0.75rem, env(safe-area-inset-right));
+        }
     }
 
     .status-bar {
