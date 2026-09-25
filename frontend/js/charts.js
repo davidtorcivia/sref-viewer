@@ -32,25 +32,26 @@ function getResponsiveOptions() {
     };
 }
 
-function isLightMode() {
-    return window.matchMedia('(prefers-color-scheme: light)').matches;
-}
+Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
 
 /**
- * Get theme-aware colors for charts
+ * Theme colors come from the stylesheet tokens so charts match the chrome
+ * in both color schemes
  */
 function getThemeColors() {
-    const light = isLightMode();
+    const css = getComputedStyle(document.documentElement);
+    const token = name => css.getPropertyValue(name).trim();
     return {
-        gridColor: light ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.08)',
-        tickColor: light ? '#444' : '#999',
-        meanLineColor: light ? '#000000' : '#ffffff',
-        tooltipBg: light ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.9)',
-        tooltipText: light ? '#1c1c1e' : '#fff',
-        tooltipBorder: light ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.1)',
-        nowLineColor: light ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.5)',
-        nowLabelBg: light ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.5)',
-        nowLabelText: light ? '#1c1c1e' : '#fff'
+        gridColor: token('--chart-grid'),
+        tickColor: token('--chart-tick'),
+        meanLineColor: token('--chart-mean'),
+        tooltipBg: token('--tooltip-bg'),
+        tooltipText: token('--text'),
+        tooltipDim: token('--text-dim'),
+        tooltipBorder: token('--tooltip-border'),
+        nowLineColor: token('--chart-now'),
+        nowLabelBg: token('--surface'),
+        nowLabelText: token('--text-dim'),
     };
 }
 
@@ -267,15 +268,19 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                             xMin: Date.now(),
                             xMax: Date.now(),
                             borderColor: theme.nowLineColor,
-                            borderWidth: 2,
-                            borderDash: [4, 4],
+                            borderWidth: 1.5,
+                            borderDash: [3, 4],
                             label: {
                                 display: true,
-                                content: 'Now',
+                                content: 'NOW',
                                 position: 'start',
                                 backgroundColor: theme.nowLabelBg,
+                                borderColor: theme.gridColor,
+                                borderWidth: 1,
+                                borderRadius: 6,
+                                padding: { x: 6, y: 3 },
                                 color: theme.nowLabelText,
-                                font: { size: 10 }
+                                font: { size: 9, weight: '700' }
                             }
                         }
                     }
@@ -286,16 +291,21 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     // off-screen - use the default positioner there
                     position: isTouchDevice() ? 'nearest' : 'rightOfCursor',
                     backgroundColor: theme.tooltipBg,
-                    titleColor: theme.tooltipText,
+                    titleColor: theme.tooltipDim,
                     bodyColor: theme.tooltipText,
                     borderColor: theme.tooltipBorder,
                     borderWidth: 1,
-                    titleFont: { size: responsive.tooltipTitleSize, weight: 'bold' },
+                    cornerRadius: 10,
+                    caretSize: 0,
+                    titleFont: { size: responsive.tooltipTitleSize - 1, weight: '600' },
+                    titleMarginBottom: 8,
                     bodyFont: { size: responsive.tooltipBodySize },
+                    bodySpacing: 4,
                     padding: 12,
                     displayColors: true,
-                    boxWidth: 10,
-                    boxHeight: 10,
+                    usePointStyle: true,
+                    boxWidth: 8,
+                    boxHeight: 8,
                     filter: (item) => {
                         // Hide band boundary lines from tooltip
                         if (item.dataset._band) {
@@ -338,9 +348,11 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                         stepSize: responsive.stepSize,
                         displayFormats: { hour: 'EEE ha' }
                     },
-                    grid: { color: theme.gridColor },
+                    grid: { color: theme.gridColor, drawTicks: false },
+                    border: { display: false },
                     ticks: {
                         color: theme.tickColor,
+                        padding: 8,
                         maxRotation: 0,
                         font: { size: responsive.tickFontSize },
                         callback: function (value) {
@@ -354,9 +366,12 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 },
                 y: {
                     beginAtZero: info.type !== 'temp',
-                    grid: { color: theme.gridColor },
+                    grid: { color: theme.gridColor, drawTicks: false },
+                    border: { display: false },
                     ticks: {
                         color: theme.tickColor,
+                        padding: 8,
+                        maxTicksLimit: 7,
                         font: { size: responsive.tickFontSize },
                         callback: (v) => {
                             if (info.type === 'temp') return v.toFixed(0) + '°';

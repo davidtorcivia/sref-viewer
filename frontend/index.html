@@ -21,8 +21,8 @@
 
     <!-- PWA Manifest -->
     <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" content="#0a0a0f" media="(prefers-color-scheme: dark)">
-    <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#07090f" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f2f4f8" media="(prefers-color-scheme: light)">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
@@ -39,7 +39,7 @@
             <h1 class="title" id="pageTitle">NYC SREF Ensemble Plumes</h1>
             <nav class="header-nav">
                 <a href="/radar" class="nav-link" title="Live radar map">Radar</a>
-                <button class="btn help-btn" id="helpBtn" title="What is this?" aria-label="Help">?</button>
+                <button class="btn btn-ghost help-btn" id="helpBtn" title="What is this?" aria-label="Help">?</button>
             </nav>
         </div>
 
@@ -65,8 +65,8 @@
 
             <div class="time-display" id="timeDisplay">--:-- ET</div>
 
-            <button class="btn" id="shareBtn" title="Copy link to clipboard">Share</button>
-            <button class="btn" id="reloadBtn">Reload</button>
+            <button class="btn btn-ghost" id="shareBtn" title="Copy link to clipboard">Share</button>
+            <button class="btn btn-ghost" id="reloadBtn" title="Reload latest data">Reload</button>
         </div>
     </header>
 
@@ -87,7 +87,7 @@
 
     <dialog class="modal" id="helpDialog" aria-labelledby="helpTitle">
         <div class="modal-content">
-            <h2 id="helpTitle">Understanding Ensemble Plumes</h2>
+            <h2 id="helpTitle" tabindex="-1" autofocus>Understanding Ensemble Plumes</h2>
             <p>An <strong>ensemble</strong> runs a forecast model many times with slightly different starting
                 conditions or physics. Where the runs agree the forecast is confident; where they fan out, several
                 outcomes are possible.</p>

@@ -4,8 +4,8 @@
     "description": "Interactive ensemble forecast plumes from NOAA SREF and REFS models",
     "start_url": "/",
     "display": "standalone",
-    "background_color": "#0a0a0f",
-    "theme_color": "#0a0a0f",
+    "background_color": "#07090f",
+    "theme_color": "#07090f",
     "icons": [
         {
             "src": "/icons/icon-192.png",

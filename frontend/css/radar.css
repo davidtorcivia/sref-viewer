@@ -1,24 +1,29 @@
 /* Radar map page - full-viewport map with floating chrome */
 
 :root {
-    --bg: #0a0a0f;
-    --surface: rgba(18, 18, 26, 0.92);
-    --border: #2a2a3a;
-    --text: #e4e4ef;
-    --text-dim: #8a8a9f;
-    --accent: #6e9eff;
-    --nowcast: #ffd43b;
+    --bg: #07090f;
+    --surface: rgba(12, 15, 23, 0.8);
+    --border: rgba(255, 255, 255, 0.09);
+    --text: #e9edf5;
+    --text-dim: #8b94a8;
+    --accent: #7ea6ff;
+    --accent-ink: #081022;
+    --nowcast: #ffd166;
+    --shadow: 0 8px 28px -8px rgba(0, 0, 0, 0.55);
+    --blur: blur(18px) saturate(1.5);
 }
 
 @media (prefers-color-scheme: light) {
     :root {
-        --bg: #f5f5f7;
-        --surface: rgba(255, 255, 255, 0.92);
-        --border: #d1d1d6;
-        --text: #1c1c1e;
-        --text-dim: #6e6e73;
-        --accent: #0066cc;
-        --nowcast: #b8860b;
+        --bg: #f2f4f8;
+        --surface: rgba(255, 255, 255, 0.82);
+        --border: rgba(15, 23, 42, 0.1);
+        --text: #131722;
+        --text-dim: #5b6477;
+        --accent: #2f5bea;
+        --accent-ink: #ffffff;
+        --nowcast: #a86f00;
+        --shadow: 0 8px 24px -10px rgba(15, 23, 42, 0.25);
     }
 }
 
@@ -32,7 +37,7 @@ html,
 body {
     height: 100%;
     overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
     background: var(--bg);
     color: var(--text);
 }
@@ -68,9 +73,11 @@ body {
     font-size: 0.9rem;
     padding: 0.45rem 0.8rem;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 12px;
     background: var(--surface);
-    backdrop-filter: blur(8px);
+    box-shadow: var(--shadow);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
     display: inline-flex;
     align-items: center;
     min-height: 40px;
@@ -80,13 +87,16 @@ body {
     font-weight: 700;
     font-size: 1rem;
     background: var(--surface);
-    backdrop-filter: blur(8px);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.45rem 0.8rem;
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    padding: 0.45rem 0.9rem;
     min-height: 40px;
     display: inline-flex;
     align-items: center;
+    letter-spacing: -0.01em;
 }
 
 .radar-updated {
@@ -94,9 +104,12 @@ body {
     font-size: 0.8rem;
     color: var(--text-dim);
     background: var(--surface);
-    backdrop-filter: blur(8px);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    font-variant-numeric: tabular-nums;
     padding: 0.45rem 0.8rem;
     min-height: 40px;
     display: inline-flex;
@@ -115,17 +128,19 @@ body {
     gap: 0.75rem;
     width: min(560px, calc(100% - 1.5rem));
     background: var(--surface);
-    backdrop-filter: blur(8px);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 0.6rem 0.9rem;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    border-radius: 18px;
+    padding: 0.6rem 0.9rem 0.6rem 0.6rem;
+    box-shadow: var(--shadow);
 }
 
 .play-btn {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-ink);
     border: none;
+    box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 70%, transparent);
     width: 44px;
     height: 44px;
     min-width: 44px;
@@ -143,12 +158,12 @@ body {
 }
 
 .speed-btn {
-    background: var(--surface);
+    background: transparent;
     color: var(--text);
     border: 1px solid var(--border);
     min-width: 48px;
     height: 44px;
-    border-radius: 10px;
+    border-radius: 12px;
     font-family: inherit;
     font-size: 0.9rem;
     font-weight: 700;
@@ -235,7 +250,8 @@ body {
     font-size: 0.7rem !important;
     font-variant-numeric: tabular-nums;
     padding: 0.1rem 0.45rem !important;
-    backdrop-filter: blur(8px);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
     box-sizing: border-box;
 }
 

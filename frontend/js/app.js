@@ -257,7 +257,7 @@ function buildLayout() {
             const isWind = info.type === 'wind';
             return `
                         <div class="chart-card ${section.featured && idx === 0 ? 'featured' : ''}"
-                             id="card-${param}" data-param="${param}" ${param !== activeParam ? 'hidden' : ''}>
+                             id="card-${param}" data-param="${param}" data-type="${info.type}" ${param !== activeParam ? 'hidden' : ''}>
                             <div class="chart-header">
                                 <div class="chart-title-area">
                                     <h3 class="chart-title">${info.name}</h3>
@@ -517,7 +517,7 @@ function renderComparisonControls() {
         ['both', 'Both', 'Show both lines and bands'],
     ];
     controls.innerHTML = `
-        <span class="comp-label">Compare:</span>
+        <span class="comp-label">Compare</span>
         ${comparisonCycles().map(({ run, date }) => `
             <label class="run-toggle" style="color: ${RUN_COLORS[run]}" title="${date} ${run}Z run">
                 <input type="checkbox" value="${run}" ${isRunVisible(run) ? 'checked' : ''}>
@@ -525,11 +525,13 @@ function renderComparisonControls() {
             </label>
         `).join('')}
         <div class="chart-mode-toggle">
-            <span class="comp-label">Chart:</span>
+            <span class="comp-label">Chart</span>
+            <div class="seg" role="group" aria-label="Chart style">
             ${modes.map(([mode, label, title]) => `
                 <button class="mode-btn ${state.chartViewMode === mode ? 'active' : ''}" aria-pressed="${state.chartViewMode === mode}"
                     data-mode="${mode}" title="${title}">${label}</button>
             `).join('')}
+            </div>
         </div>
     `;
 
@@ -613,7 +615,7 @@ function updateWeatherSummary(hasData) {
     }
     const c = confidence(type, stats.spread);
     el.innerHTML = `<strong>${lead}</strong> ${stats.min.toFixed(digits)}-${stats.max.toFixed(digits)} in expected
-        <span class="${c.cls}">(${c.text})</span>`;
+        <span class="${c.cls}">${c.text}</span>`;
 }
 
 function updateTrendText() {
