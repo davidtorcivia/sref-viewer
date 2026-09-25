@@ -20,10 +20,11 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      # Admin is disabled until this is set (in .env)
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - EXTRACTOR_URL=http://extractor:3002
     volumes:
-      - /nvme-mirror/apps/sref-viewer/data:/app/data
+      - ./data:/app/data
     depends_on:
       - extractor
     restart: unless-stopped
@@ -43,7 +44,7 @@ services:
       # RRFS_TAR_URL / REFS_GRIB_URL (see extractor.py) after the Oct 6 cutover
       - CACHE_DIR=/data/refs-cache
     volumes:
-      - /nvme-mirror/apps/sref-viewer/data:/data
+      - ./data:/data
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3002/health', timeout=5)" ]

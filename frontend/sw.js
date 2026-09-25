@@ -1,6 +1,5 @@
 /**
- * SREF Viewer Service Worker
- * Provides offline support and caching
+ * Service worker: offline support for the app shell and forecast data
  */
 
 const STATIC_CACHE = 'sref-static-__V__';
@@ -22,6 +21,7 @@ const PRECACHE_URLS = [
     '/js/charts.js?v=__V__',
     '/js/config.js?v=__V__',
     '/js/radar.js?v=__V__',
+    '/js/site.js?v=__V__',
     '/vendor/chart.umd.min.js',
     '/vendor/chartjs-adapter-date-fns.bundle.min.js',
     '/vendor/chartjs-plugin-annotation.min.js',
@@ -56,15 +56,15 @@ self.addEventListener('fetch', (event) => {
 
     if (event.request.method !== 'GET') return;
 
-    // Radar tiles / external hosts: let the browser handle them
+    // External hosts: let the browser handle them
     if (url.origin !== location.origin) return;
 
-    // Radar tiles: immutable per URL, the browser HTTP cache handles them
-    if (url.pathname.startsWith('/api/radar/tile/')) return;
-
-    // API requests: network-first with bounded cache fallback
+    // Forecast data: network-first with a bounded offline fallback.
+    // Other API calls (status polls, radar, admin) go straight to the network.
     if (url.pathname.startsWith('/api/')) {
-        event.respondWith(networkFirstApi(event.request));
+        if (/^\/api\/(sref|refs)\//.test(url.pathname) && !url.pathname.startsWith('/api/refs/status/')) {
+            event.respondWith(networkFirstApi(event.request));
+        }
         return;
     }
 

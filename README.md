@@ -1,11 +1,12 @@
 # SREF Viewer
 
-A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View snowfall, precipitation, temperature, and wind forecasts from NOAA's Short Range Ensemble Forecast model for JFK, LGA, and EWR airports. Includes a live radar map with a 60-minute nowcast.
+A self-hosted NYC area ensemble plume viewer with intelligent caching. View snowfall, precipitation, temperature, and wind forecasts from NOAA's SREF and REFS ensembles for JFK, LGA, EWR or any airport in the feeds. Includes a live radar map with a 60-minute nowcast.
 
-> **Heads up:** NOAA retires the SREF model on **October 6, 2026** (moved from Aug 31). Its successor
-> **REFS** (RRFS ensemble, 5 members, hourly to 60h) is already supported via the
-> model toggle. See [REFS-MIGRATION.md](REFS-MIGRATION.md) for details and the
-> post-cutover source switch.
+> **Heads up:** NOAA retires the SREF model on **October 6, 2026 12Z**. Its successor
+> **REFS** (RRFS ensemble) is supported via the model toggle and becomes the default
+> once SREF is retired; SREF's last runs stay viewable from the cache until evicted
+> (roughly 12 days, as REFS runs fill the 1000-entry cache).
+> See [REFS-MIGRATION.md](REFS-MIGRATION.md).
 
 ## Features
 
@@ -17,11 +18,14 @@ A self-hosted NYC area SREF ensemble plume viewer with intelligent caching. View
 - Auto light/dark mode based on system preference
 - Wind speed toggle between knots and mph (saved to localStorage)
 - Snow alert indicator when any ensemble member forecasts accumulation
-- Run-to-run comparison overlays and confidence band (P10-P90) views
+- Overlays of the three previous runs' means, trend vs the previous run, and confidence band (P10-P90) views
+- Precipitation-type timeline (REFS)
+- Share links pinned to the run on screen; PNG export of any chart
 
 ## Quick Start
 
 ```bash
+cp .env.example .env   # set ADMIN_PASSWORD to enable /admin
 docker compose up -d
 ```
 
@@ -31,14 +35,16 @@ The app will be available at http://localhost:8091
 
 ```
 frontend (nginx:alpine)
-    - Serves static HTML/CSS/JS
-    - Proxies /api/* requests to backend
-    - Gzip compression enabled
+    - Serves static HTML/CSS/JS, proxies /api/* to backend
+    - Resolves the real client IP from X-Forwarded-For (Cloudflare/tunnel/caddy)
 
 backend (node:alpine)
-    - Express.js caching proxy
-    - Fetches from www.spc.noaa.gov
-    - In-memory cache with smart TTL
+    - Express caching proxy: SPC SREF plumes, REFS via the extractor,
+      LibreWXR radar frames/tiles/alerts
+    - Persistent cache (data/cache.json), warms the latest runs and radar tiles
+
+extractor (debian + NCEPLIBS-bufr + ecCodes, internal)
+    - Builds REFS station plumes from NOAA's RRFS soundings and REFS grib2
 ```
 
 ## Configuration
@@ -47,15 +53,15 @@ backend (node:alpine)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| ADMIN_USERNAME | admin | Admin panel login |
+| ADMIN_PASSWORD | (unset) | Admin panel password; `/admin` is disabled until set |
 | PORT | 3001 | Backend server port |
 
-### Adding Stations
+### Admin panel
 
-Edit `frontend/js/config.js`:
-
-```javascript
-stations: ['JFK', 'LGA', 'EWR', 'BOS']  // Add more airports
-```
+`/admin` edits the site name/description, favicon, analytics snippet, custom CSS
+and the header's station buttons (which the backend also pre-fetches for every
+new run). Any other airport can be loaded from the ICAO box in the header.
 
 ### Cloudflare Tunnel Deployment
 
@@ -75,6 +81,7 @@ Backend:
 ```bash
 cd backend
 npm install
+npm test          # pure-logic checks
 node server.js
 ```
 
@@ -94,19 +101,23 @@ sref-viewer/
   LICENSE
   backend/
     server.js          # Express caching proxy
-    package.json
-    Dockerfile
+    test.js            # node test.js
+  extractor/
+    extractor.py       # REFS point extraction service
   frontend/
-    index.html
+    index.html, radar.html, admin.html
     nginx.conf
-    Dockerfile
-    css/
-      styles.css       # Mobile-first responsive styles
+    sw.js              # Service worker (offline shell + forecast data)
+    css/               # styles.css (plumes), radar.css
     js/
-      config.js        # Configuration and preferences
-      api.js           # Data fetching layer
-      charts.js        # Chart.js rendering
-      app.js           # Main application
+      config.js        # Parameters, models, run-time math, preferences
+      api.js           # Data fetching and ensemble statistics
+      charts.js        # Chart.js rendering and PNG export
+      app.js           # Plume page
+      radar.js         # Radar page
+      site.js          # Admin settings applied to both pages
+  tools/
+    gen-icons.js       # Regenerates the PWA icons
 ```
 
 ## API Endpoints
@@ -121,7 +132,8 @@ sref-viewer/
 ### Backend (port 3001)
 
 - `GET /health` - Health check with cache stats
-- `GET /api/cache-stats` - Detailed cache information
+- `GET /api/cache-stats` - Cache contents (admin auth)
+- `GET /api/settings` - Public site settings
 - `GET /api/sref/:station/:run/:param?date=YYYY-MM-DD` - Fetch SREF data
 - `GET /api/refs/:station/:run/:param?date=YYYY-MM-DD` - Fetch REFS ensemble data
   (runs 00/06/12/18; any of ~1900 stations in the RRFS feed by ICAO, plus
@@ -141,8 +153,10 @@ sref-viewer/
 
 ### Operational niceties
 
-- The backend prefetches the latest run for JFK/LGA/EWR (both models) every
-  5 minutes, so the first visitor after a new run gets instant charts.
+- The backend prefetches the latest run for the default stations (both models,
+  SREF until its retirement) every 5 minutes, so the first visitor after a new
+  run gets instant charts.
+- The extractor rebuilds its station index monthly (checked on each healthcheck).
 - Asset URLs are stamped with a per-build version at Docker build time -
   deploys are immediately visible through CDNs/browser caches with no manual
   cache busting.
@@ -158,11 +172,11 @@ sref-viewer/
 
 Completed model runs never change, so the backend caches by completeness:
 
-- **Complete runs** (>= 10 members): cached 14 days, persisted to `data/cache.json`
-- **Partial runs** (< 10 members, still publishing): cached 10 minutes
+- **Complete runs** (SREF >= 10 members; REFS full soundings + ensemble): cached 14 days, persisted to `data/cache.json` (at most 1000 entries, oldest evicted first)
+- **Partial runs** (still publishing): cached 10 minutes
 - **Failed fetches** (run/date doesn't exist upstream): negative-cached 5 minutes
 
-Cache hits do not count against the per-IP rate limit.
+Only cache misses count against the per-IP rate limit.
 
 ## Browser Support
 

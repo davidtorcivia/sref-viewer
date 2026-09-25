@@ -1,55 +1,77 @@
 const express = require('express');
-const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const app = express();
 const PORT = process.env.PORT || 3001;
+const EXTRACTOR_URL = process.env.EXTRACTOR_URL || 'http://extractor:3002';
+const USER_AGENT = 'SREF-Viewer/1.0 (Personal Weather Tool)';
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
-// Behind the nginx container (one proxy hop) - required so req.ip reflects
-// the real client from X-Forwarded-For instead of the nginx container IP.
-// Without this, all visitors share one rate-limit bucket.
+// NCEP discontinues SREF at this time (SCN 26-47); its cached runs stay viewable
+const SREF_RETIRED_AT = Date.UTC(2026, 9, 6, 12);
+
+const app = express();
+
+// nginx (one hop) resolves the real client IP and sends it as X-Forwarded-For
 app.set('trust proxy', 1);
 
-// Body limit sized for base64 image uploads (admin favicon/OG image)
-app.use(express.json({ limit: '15mb' }));
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const SREF_RUNS = ['03', '09', '15', '21'];
+const REFS_RUNS = ['00', '06', '12', '18'];
+const PARAMS = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
+
+const round2 = v => Math.round(v * 100) / 100;
+const todayUtc = () => new Date().toISOString().slice(0, 10);
+
+/**
+ * GET a URL with a timeout. Non-2xx responses throw an Error carrying
+ * `status` and, when the upstream sent a JSON { error }, its message.
+ */
+async function httpGet(url, timeoutMs) {
+    const res = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const err = new Error(body.error || `${new URL(url).host} returned ${res.status}`);
+        err.status = res.status;
+        throw err;
+    }
+    return res;
+}
+
+const getJson = async (url, timeoutMs) => (await httpGet(url, timeoutMs)).json();
 
 // ============ Persistent Cache ============
 const DATA_DIR = path.join(__dirname, 'data');
 const CACHE_FILE = path.join(DATA_DIR, 'cache.json');
-let cache = new Map();
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// Ensure data directory exists
-try {
-    if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-} catch (err) {
-    console.error('[CACHE] Failed to create data dir:', err);
-}
+const CACHE_MAX_ENTRIES = 1000;
+const COMPLETE_TTL_MS = 14 * DAY;       // Complete runs never change
+const INCOMPLETE_TTL_MS = 10 * MINUTE;  // Partial data: retry after 10 min
+const NEGATIVE_TTL_MS = 5 * MINUTE;     // Upstream failure: retry after 5 min
 
-// Load cache from disk on startup
+const cache = new Map();
 try {
-    if (fs.existsSync(CACHE_FILE)) {
-        const raw = fs.readFileSync(CACHE_FILE, 'utf8');
-        const json = JSON.parse(raw);
-        const now = Date.now();
-        Object.entries(json).forEach(([key, val]) => {
-            if (val.expiry > now) {
-                cache.set(key, val);
-            }
-        });
-        console.log(`[CACHE] Loaded ${cache.size} items from disk`);
+    const now = Date.now();
+    for (const [key, val] of Object.entries(JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')))) {
+        if (val.expiry > now) cache.set(key, val);
     }
+    console.log(`[CACHE] Loaded ${cache.size} items from disk`);
 } catch (err) {
-    console.error('[CACHE] Failed to load cache from disk:', err);
+    if (err.code !== 'ENOENT') console.error('[CACHE] Failed to load cache from disk:', err.message);
 }
 
 /**
- * Get a cache entry (with flags), or null if missing/expired.
- * Entries may carry `incomplete` (partial member set, short TTL) or
- * `negative` (upstream failure, short TTL) flags.
+ * A cache entry or null if missing/expired. Entries may carry `incomplete`
+ * (partial member set) or `negative` (upstream failure) flags.
  */
 function getFromCache(key) {
     const item = cache.get(key);
@@ -61,196 +83,86 @@ function getFromCache(key) {
     return item;
 }
 
-const CACHE_MAX_ENTRIES = 1000;
-const CACHE_TTL_DAYS = 14;       // Complete runs are immutable - keep for 14 days
-const INCOMPLETE_TTL_MS = 10 * 60 * 1000;  // Partial data: retry after 10 min
-const NEGATIVE_TTL_MS = 5 * 60 * 1000;     // Upstream failure: retry after 5 min
-
-function setInCache(key, data, ttlMs = CACHE_TTL_DAYS * 24 * 60 * 60 * 1000, flags = {}) {
-    // Evict oldest entries if at capacity
+function setInCache(key, data, ttlMs = COMPLETE_TTL_MS, flags = {}) {
     if (cache.size >= CACHE_MAX_ENTRIES) {
-        // Find oldest entries by cachedAt timestamp
-        const entries = [...cache.entries()].sort((a, b) =>
-            new Date(a[1].cachedAt) - new Date(b[1].cachedAt)
-        );
-        // Remove oldest 10% to avoid constant eviction
-        const toRemove = Math.ceil(CACHE_MAX_ENTRIES * 0.1);
-        for (let i = 0; i < toRemove && i < entries.length; i++) {
-            cache.delete(entries[i][0]);
-            console.log(`[CACHE] Evicted: ${entries[i][0]}`);
-        }
+        const now = Date.now();
+        for (const [k, v] of cache) if (v.expiry <= now) cache.delete(k);
     }
-
-    cache.set(key, {
-        data,
-        expiry: Date.now() + ttlMs,
-        cachedAt: new Date().toISOString(),
-        ...flags
-    });
-    saveCacheToDisk();
+    if (cache.size >= CACHE_MAX_ENTRIES) {
+        // Map order is insertion order: drop the oldest 10% in one go
+        const drop = [...cache.keys()].slice(0, CACHE_MAX_ENTRIES / 10);
+        for (const k of drop) cache.delete(k);
+        console.log(`[CACHE] Evicted ${drop.length} oldest entries`);
+    }
+    cache.delete(key);  // re-insert at the end so eviction order stays by age
+    cache.set(key, { data, expiry: Date.now() + ttlMs, cachedAt: new Date().toISOString(), ...flags });
+    scheduleCacheSave();
 }
 
 let saveTimeout;
-function saveCacheToDisk() {
+function scheduleCacheSave() {
     clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => {
-        try {
-            const obj = Object.fromEntries(cache);
-            fs.writeFile(CACHE_FILE, JSON.stringify(obj), (err) => {
-                if (err) console.error('[CACHE] Write error:', err);
-            });
-        } catch (err) {
-            console.error('[CACHE] Serialize error:', err);
-        }
+        // Write-then-rename: a crash mid-write must not destroy the cache
+        const tmp = `${CACHE_FILE}.tmp`;
+        fs.writeFile(tmp, JSON.stringify(Object.fromEntries(cache)), (err) => {
+            if (err) return console.error('[CACHE] Write error:', err.message);
+            fs.rename(tmp, CACHE_FILE, (e) => e && console.error('[CACHE] Rename error:', e.message));
+        });
     }, 5000);
 }
 
-/**
- * Fetch data from NOAA SREF API
- */
-function fetchFromNOAA(station, run, param, date) {
-    return new Promise((resolve, reject) => {
-        const ymd = date.replace(/-/g, '');
-        const reqPath = `/exper/sref/srefplumes/returndata.php?` +
-            `search=${station}-${run}-${param}` +
-            `&file=json_sid/${ymd}_${run}/${station}` +
-            `&mem=:&means=`;
-
-        const options = {
-            hostname: 'www.spc.noaa.gov',
-            port: 443,
-            path: reqPath,
-            method: 'GET',
-            headers: {
-                'User-Agent': 'SREF-Viewer/1.0 (Personal Weather Tool)',
-                'Accept': 'application/json'
-            }
-        };
-
-        const req = https.request(options, (res) => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                if (res.statusCode !== 200) {
-                    reject(new Error(`NOAA returned ${res.statusCode}`));
-                    return;
-                }
-                try {
-                    let parsed;
-                    try {
-                        parsed = JSON.parse(JSON.parse(data));
-                    } catch {
-                        parsed = JSON.parse(data);
-                    }
-                    resolve(parsed);
-                } catch (e) {
-                    reject(new Error('Failed to parse NOAA response'));
-                }
-            });
-        });
-
-        req.on('error', reject);
-        req.setTimeout(15000, () => {
-            req.destroy();
-            reject(new Error('Request timeout'));
-        });
-        req.end();
-    });
+// Serve a cached/negative entry. Returns true when the response was sent.
+function sendCached(res, key, errorLabel) {
+    const cached = getFromCache(key);
+    if (!cached) return false;
+    if (cached.negative) {
+        res.set('X-Cache', 'NEGATIVE');
+        res.status(502).json({ error: errorLabel, details: cached.data, cached: true });
+    } else {
+        res.set('X-Cache', cached.incomplete ? 'INCOMPLETE-HIT' : 'HIT');
+        res.json(cached.data);
+    }
+    return true;
 }
 
-/**
- * Fetch with exponential backoff retry
- * Retries on network errors and 5xx status codes
- */
-async function fetchWithRetry(station, run, param, date, retries = 3) {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-        try {
-            return await fetchFromNOAA(station, run, param, date);
-        } catch (err) {
-            const isRetryable = err.message.includes('timeout') ||
-                err.message.includes('ECONNRESET') ||
-                err.message.includes('NOAA returned 5');
-
-            if (attempt === retries || !isRetryable) {
-                throw err;
-            }
-
-            const delay = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
-            console.log(`[RETRY] Attempt ${attempt} failed (${err.message}), retrying in ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-        }
-    }
+// Complete data for the long TTL; partial data briefly so every visitor
+// doesn't re-hit upstream for a run that is still publishing
+function cacheResult(res, key, data, complete) {
+    if (complete) setInCache(key, data);
+    else setInCache(key, data, INCOMPLETE_TTL_MS, { incomplete: true });
+    res.set('X-Cache', complete ? 'MISS' : 'INCOMPLETE');
 }
 
-/**
- * Process raw NOAA data into a cleaner format with computed mean
- */
-function processData(raw) {
-    const processed = {};
-    const timePoints = new Set();
+// ============ Rate Limiting (token buckets, per client IP) ============
+// Only upstream work (cache misses) spends tokens.
+const apiBuckets = new Map();
+const tileBuckets = new Map();
 
-    for (const [label, series] of Object.entries(raw)) {
-        if (!series.data || series.data.length === 0) continue;
-        processed[label] = series.data.map(([time, value]) => {
-            timePoints.add(time);
-            return { x: time, y: parseFloat(value) || 0 };
-        });
-    }
-
-    const sortedTimes = Array.from(timePoints).sort((a, b) => a - b);
-    const memberKeys = Object.keys(processed);
-
-    if (memberKeys.length > 0) {
-        const sums = new Map();
-        for (const key of memberKeys) {
-            for (const p of processed[key]) {
-                const agg = sums.get(p.x) || { sum: 0, count: 0 };
-                agg.sum += p.y;
-                agg.count++;
-                sums.set(p.x, agg);
-            }
-        }
-        processed['Mean'] = sortedTimes.map(time => {
-            const agg = sums.get(time);
-            return { x: time, y: agg && agg.count > 0 ? agg.sum / agg.count : 0 };
-        });
-    }
-
-    return processed;
-}
-
-// ============ API Rate Limiting (Token Bucket) ============
-// Token bucket allows bursts for initial cache population, then refills over time
-const rateBuckets = new Map();
-const BUCKET_MAX = 50;        // Max tokens (allows burst of 50 requests)
-const REFILL_RATE = 1;        // Tokens added per second
-const REFILL_INTERVAL = 1000; // 1 second
-
-function checkApiRateLimit(ip, buckets = rateBuckets, max = BUCKET_MAX, rate = REFILL_RATE) {
+function takeToken(ip, buckets = apiBuckets, max = 50, perSecond = 1) {
     const now = Date.now();
     let bucket = buckets.get(ip);
-
     if (!bucket) {
-        // New user gets a full bucket
         bucket = { tokens: max, lastRefill: now };
         buckets.set(ip, bucket);
     }
-
-    // Refill tokens based on time elapsed. Only advance lastRefill when a
-    // whole interval has passed, otherwise sub-second traffic never refills
-    const tokensToAdd = Math.floor((now - bucket.lastRefill) / REFILL_INTERVAL) * rate;
-    if (tokensToAdd > 0) {
-        bucket.tokens = Math.min(max, bucket.tokens + tokensToAdd);
+    // Only advance lastRefill by whole seconds, else sub-second traffic never refills
+    const secs = Math.floor((now - bucket.lastRefill) / 1000);
+    if (secs > 0) {
+        bucket.tokens = Math.min(max, bucket.tokens + secs * perSecond);
         bucket.lastRefill = now;
     }
-
-    // Try to consume a token
     if (bucket.tokens > 0) {
         bucket.tokens--;
         return true;
     }
-
     return false;
+}
+
+function rateLimited(req, res, buckets, max, perSecond) {
+    if (takeToken(req.ip, buckets, max, perSecond)) return false;
+    res.status(429).json({ error: 'Too many requests. Please slow down.' });
+    return true;
 }
 
 // ============ Routes ============
@@ -259,323 +171,252 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', cacheSize: cache.size, uptime: process.uptime() });
 });
 
-app.get('/api/cache-stats', (req, res) => {
-    const stats = { entries: cache.size, keys: [] };
-    const now = Date.now();
-    for (const [key, value] of cache.entries()) {
-        stats.keys.push({
-            key,
-            cachedAt: value.cachedAt,
-            expiresIn: Math.round((value.expiry - now) / 1000 / 60) + ' minutes'
+// ============ SREF (SPC plumes) ============
+
+async function fetchSref(station, run, param, date) {
+    const ymd = date.replace(/-/g, '');
+    const url = 'https://www.spc.noaa.gov/exper/sref/srefplumes/returndata.php?' +
+        `search=${station}-${run}-${param}&file=json_sid/${ymd}_${run}/${station}&mem=:&means=`;
+    // Retry network errors, timeouts and 5xx with exponential backoff
+    for (let attempt = 1; ; attempt++) {
+        try {
+            const text = await (await httpGet(url, 15000)).text();
+            // SPC double-encodes the JSON (a JSON string holding JSON)
+            const parsed = JSON.parse(text);
+            return typeof parsed === 'string' ? JSON.parse(parsed) : parsed;
+        } catch (err) {
+            if (attempt === 3 || err.status < 500 || err instanceof SyntaxError) throw err;
+            console.log(`[RETRY] Attempt ${attempt} failed (${err.message})`);
+            await new Promise(r => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+        }
+    }
+}
+
+/** Raw SPC member series -> { label: [{x, y}] } plus a computed 'Mean'. */
+function processSref(raw) {
+    const processed = {};
+    const sums = new Map();
+    for (const [label, series] of Object.entries(raw)) {
+        if (!series.data || series.data.length === 0) continue;
+        processed[label] = series.data.map(([x, value]) => {
+            const y = parseFloat(value) || 0;
+            const agg = sums.get(x) || { sum: 0, count: 0 };
+            agg.sum += y;
+            agg.count++;
+            sums.set(x, agg);
+            return { x, y };
         });
     }
-    res.json(stats);
-});
+    if (sums.size > 0) {
+        processed['Mean'] = [...sums.entries()].sort((a, b) => a[0] - b[0])
+            .map(([x, agg]) => ({ x, y: agg.sum / agg.count }));
+    }
+    return processed;
+}
 
 app.get('/api/sref/:station/:run/:param', async (req, res) => {
-    const { station, run, param } = req.params;
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const station = req.params.station.toUpperCase();
+    const { run, param } = req.params;
+    const date = String(req.query.date || todayUtc());
 
-    // Validate inputs
-    if (!/^[A-Za-z]{3,4}$/.test(station)) {
-        return res.status(400).json({ error: 'Invalid station format' });
-    }
-    const validRuns = ['03', '09', '15', '21'];
-    const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
-
-    if (!validRuns.includes(run)) {
-        return res.status(400).json({ error: 'Invalid run time' });
-    }
-    if (!validParams.includes(param)) {
-        return res.status(400).json({ error: 'Invalid parameter' });
-    }
+    if (!/^[A-Z]{3,4}$/.test(station)) return res.status(400).json({ error: 'Invalid station format' });
+    if (!SREF_RUNS.includes(run)) return res.status(400).json({ error: 'Invalid run time' });
+    if (!PARAMS.includes(param)) return res.status(400).json({ error: 'Invalid parameter' });
+    if (!DATE_RE.test(date)) return res.status(400).json({ error: 'Invalid date' });
 
     const cacheKey = `${date}_${run}_${station}_${param}`;
+    if (sendCached(res, cacheKey, 'Failed to fetch from NOAA')) return;
+    if (rateLimited(req, res)) return;
 
-    // Check cache first - cache hits don't count against rate limit
-    const cached = getFromCache(cacheKey);
-    if (cached) {
-        if (cached.negative) {
-            console.log(`[NEGATIVE HIT] ${cacheKey}`);
-            res.set('X-Cache', 'NEGATIVE');
-            return res.status(502).json({ error: 'Failed to fetch from NOAA', details: cached.data, cached: true });
-        }
-        console.log(`[CACHE HIT] ${cacheKey}${cached.incomplete ? ' (incomplete)' : ''}`);
-        res.set('X-Cache', cached.incomplete ? 'INCOMPLETE-HIT' : 'HIT');
-        return res.json(cached.data);
-    }
-
-    // Rate limiting only for cache misses (actual NOAA requests)
-    const ip = req.ip || req.connection.remoteAddress;
-    if (!checkApiRateLimit(ip)) {
-        console.log(`[RATE LIMIT] ${ip} - ${cacheKey}`);
-        return res.status(429).json({ error: 'Too many requests. Please slow down.' });
-    }
-
-    console.log(`[CACHE MISS] ${cacheKey} - fetching from NOAA...`);
-
+    console.log(`[SREF MISS] ${cacheKey}`);
     try {
-        const raw = await fetchWithRetry(station.toUpperCase(), run, param, date);
-        const processed = processData(raw);
-        const memberCount = Object.keys(processed).filter(k => k !== 'Mean').length;
-
-        if (memberCount >= 10) {
-            setInCache(cacheKey, processed);
-            console.log(`[CACHED] ${cacheKey} for ${CACHE_TTL_DAYS} days (${memberCount} members)`);
-            res.set('X-Cache', 'MISS');
-        } else {
-            // Cache partial data briefly so every visitor doesn't re-hit NOAA
-            // for runs that aren't fully published yet
-            setInCache(cacheKey, processed, INCOMPLETE_TTL_MS, { incomplete: true });
-            console.log(`[CACHED INCOMPLETE] ${cacheKey} for 10 min (${memberCount} members)`);
-            res.set('X-Cache', 'INCOMPLETE');
-        }
-
+        const processed = processSref(await fetchSref(station, run, param, date));
+        const memberCount = Object.keys(processed).length - 1;
+        cacheResult(res, cacheKey, processed, memberCount >= 10);
         res.json(processed);
     } catch (err) {
-        console.error(`[ERROR] ${cacheKey}:`, err.message);
-        // Negative-cache the failure so repeated loads don't hammer NOAA
-        // for runs/dates that don't exist
+        console.error(`[SREF ERROR] ${cacheKey}:`, err.message);
+        // Negative-cache so repeated loads don't hammer NOAA for runs that don't exist
         setInCache(cacheKey, err.message, NEGATIVE_TTL_MS, { negative: true });
         res.status(502).json({ error: 'Failed to fetch from NOAA', details: err.message });
     }
 });
 
-// ============ Admin Panel ============
-const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
-const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-
-// Ensure uploads directory exists
-try {
-    if (!fs.existsSync(UPLOADS_DIR)) {
-        fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-    }
-} catch (err) {
-    console.error('[ADMIN] Failed to create uploads dir:', err);
-}
-
-// Admin credentials from environment
+// ============ Admin ============
 const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'changeme';
+const ADMIN_PASS = process.env.ADMIN_PASSWORD || '';
+const ADMIN_ENABLED = ADMIN_PASS !== '' && ADMIN_PASS !== 'changeme';
+if (!ADMIN_ENABLED) console.warn('[ADMIN] Disabled: set ADMIN_PASSWORD (not "changeme") to enable');
 
-// Constant-time string comparison to avoid timing side-channels on login
-function safeEqual(a, b) {
-    const bufA = Buffer.from(String(a || ''));
-    const bufB = Buffer.from(String(b || ''));
-    if (bufA.length !== bufB.length) {
-        // Compare b against itself to keep timing consistent
-        crypto.timingSafeEqual(bufB, bufB);
-        return false;
-    }
-    return crypto.timingSafeEqual(bufA, bufB);
-}
-
-// Active sessions (in-memory, cleared on restart)
-const sessions = new Map();
-
-// Default settings
 const DEFAULT_SETTINGS = {
     siteName: 'NYC SREF Ensemble Plumes',
     siteDescription: 'SREF ensemble plume diagrams for weather forecasting',
     favicon: '',
-    ogImage: '',
     defaultStations: ['JFK', 'LGA', 'EWR'],
     analyticsScript: '',
     analyticsEnabled: false,
     customCss: ''
 };
 
-// Load settings
+let settings = null;
 function loadSettings() {
-    try {
-        if (fs.existsSync(SETTINGS_FILE)) {
-            const raw = fs.readFileSync(SETTINGS_FILE, 'utf8');
-            return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (!settings) {
+        settings = { ...DEFAULT_SETTINGS };
+        try {
+            Object.assign(settings, pickSettings(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))));
+        } catch (err) {
+            if (err.code !== 'ENOENT') console.error('[ADMIN] Failed to load settings:', err.message);
         }
-    } catch (err) {
-        console.error('[ADMIN] Failed to load settings:', err);
     }
-    return { ...DEFAULT_SETTINGS };
+    return settings;
 }
 
-// Save settings
-function saveSettings(settings) {
-    try {
-        // Ensure data directory exists
-        if (!fs.existsSync(DATA_DIR)) {
-            fs.mkdirSync(DATA_DIR, { recursive: true });
+function saveSettings(next) {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2));
+    settings = next;
+}
+
+/** Known keys only, each with its default's type; stations must look like ICAO codes. */
+function pickSettings(input) {
+    const out = {};
+    for (const [key, def] of Object.entries(DEFAULT_SETTINGS)) {
+        const v = input?.[key];
+        if (Array.isArray(def)) {
+            if (Array.isArray(v) && v.length && v.every(s => typeof s === 'string' && /^[A-Z]{3,4}$/.test(s))) {
+                out[key] = v.slice(0, 8);
+            }
+        } else if (typeof v === typeof def) {
+            out[key] = v;
         }
-        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-        console.log('[ADMIN] Settings saved to:', SETTINGS_FILE);
-        return true;
-    } catch (err) {
-        console.error('[ADMIN] Failed to save settings:', err.message);
-        console.error('[ADMIN] Settings file path:', SETTINGS_FILE);
-        console.error('[ADMIN] Full error:', err);
-        return false;
     }
+    return out;
 }
 
-// Generate session token
-function createSession() {
-    const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { created: Date.now() });
-    return token;
+function safeEqual(a, b) {
+    // Hash first: equal-length inputs for timingSafeEqual, no length leak
+    const h = s => crypto.createHash('sha256').update(String(s ?? '')).digest();
+    return crypto.timingSafeEqual(h(a), h(b));
 }
 
-// Validate session
-function validateSession(token) {
-    if (!token) return false;
-    const session = sessions.get(token);
-    if (!session) return false;
-    // Sessions expire after 24 hours
-    if (Date.now() - session.created > 24 * 60 * 60 * 1000) {
-        sessions.delete(token);
-        return false;
-    }
-    return true;
-}
+const SESSION_TTL_MS = DAY;
+const sessions = new Map();  // token -> created (in-memory, cleared on restart)
 
-// Auth middleware
 function requireAuth(req, res, next) {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!validateSession(token)) {
+    const token = (req.headers.authorization || '').replace(/^Bearer /, '');
+    const created = sessions.get(token);
+    if (!created || Date.now() - created > SESSION_TTL_MS) {
+        sessions.delete(token);
         return res.status(401).json({ error: 'Unauthorized' });
     }
     next();
 }
 
-// Rate limiting for login (simple in-memory)
-const loginAttempts = new Map();
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
-const MAX_ATTEMPTS = 5;
+// Failed logins per IP within the window
+const LOGIN_WINDOW_MS = 15 * MINUTE;
+const LOGIN_MAX_FAILURES = 5;
+const loginFailures = new Map();  // ip -> [timestamps]
 
-function checkRateLimit(ip) {
+function recentFailures(ip) {
     const now = Date.now();
-    const attempts = loginAttempts.get(ip) || [];
-    // Filter to recent attempts only
-    const recentAttempts = attempts.filter(t => now - t < RATE_LIMIT_WINDOW);
-    loginAttempts.set(ip, recentAttempts);
-    return recentAttempts.length < MAX_ATTEMPTS;
+    const recent = (loginFailures.get(ip) || []).filter(t => now - t < LOGIN_WINDOW_MS);
+    if (recent.length) loginFailures.set(ip, recent);
+    else loginFailures.delete(ip);
+    return recent;
 }
 
-function recordLoginAttempt(ip) {
-    const attempts = loginAttempts.get(ip) || [];
-    attempts.push(Date.now());
-    loginAttempts.set(ip, attempts);
-}
+const smallJson = express.json({ limit: '100kb' });
 
-// Admin login
-app.post('/api/admin/login', (req, res) => {
-    const ip = req.ip || req.connection.remoteAddress;
-
-    if (!checkRateLimit(ip)) {
-        console.log(`[ADMIN] Rate limited: ${ip}`);
+app.post('/api/admin/login', smallJson, (req, res) => {
+    if (!ADMIN_ENABLED) return res.status(503).json({ error: 'Admin is disabled: ADMIN_PASSWORD is not set' });
+    const failures = recentFailures(req.ip);
+    if (failures.length >= LOGIN_MAX_FAILURES) {
         return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
     }
-
-    const { username, password } = req.body;
-
-    if (safeEqual(username, ADMIN_USER) && safeEqual(password, ADMIN_PASS)) {
-        const token = createSession();
+    const { username, password } = req.body || {};
+    // Both compared unconditionally so timing doesn't reveal which was wrong
+    const userOk = safeEqual(username, ADMIN_USER);
+    const passOk = safeEqual(password, ADMIN_PASS);
+    if (userOk && passOk) {
+        const token = crypto.randomBytes(32).toString('hex');
+        sessions.set(token, Date.now());
         console.log('[ADMIN] Login successful');
-        res.json({ token });
-    } else {
-        recordLoginAttempt(ip);
-        console.log('[ADMIN] Login failed');
-        res.status(401).json({ error: 'Invalid credentials' });
+        return res.json({ token });
     }
+    loginFailures.set(req.ip, [...failures, Date.now()]);
+    console.log(`[ADMIN] Login failed from ${req.ip}`);
+    res.status(401).json({ error: 'Invalid credentials' });
 });
 
-// Check auth status
-app.get('/api/admin/check', requireAuth, (req, res) => {
-    res.json({ authenticated: true });
-});
+app.get('/api/admin/check', requireAuth, (req, res) => res.json({ authenticated: true }));
 
-// Get settings
-app.get('/api/admin/settings', requireAuth, (req, res) => {
-    res.json(loadSettings());
-});
+app.get('/api/admin/settings', requireAuth, (req, res) => res.json(loadSettings()));
 
-// Update settings
-app.post('/api/admin/settings', requireAuth, (req, res) => {
-    const current = loadSettings();
-    const updated = { ...current, ...req.body };
-
-    // Validate
-    if (updated.defaultStations && !Array.isArray(updated.defaultStations)) {
-        return res.status(400).json({ error: 'defaultStations must be an array' });
+app.post('/api/admin/settings', requireAuth, smallJson, (req, res) => {
+    const picked = pickSettings(req.body);
+    if (req.body?.defaultStations !== undefined && !picked.defaultStations) {
+        return res.status(400).json({ error: 'Stations must be 1-8 codes of 3-4 letters' });
     }
-
-    if (saveSettings(updated)) {
+    const updated = { ...loadSettings(), ...picked };
+    try {
+        saveSettings(updated);
         console.log('[ADMIN] Settings updated');
         res.json(updated);
-    } else {
+    } catch (err) {
+        console.error('[ADMIN] Failed to save settings:', err.message);
         res.status(500).json({ error: 'Failed to save settings' });
     }
 });
 
-// File upload (favicon, OG image)
-app.post('/api/admin/upload/:type', requireAuth, (req, res) => {
-    const { type } = req.params;
-
-    if (!['favicon', 'ogImage'].includes(type)) {
-        return res.status(400).json({ error: 'Invalid upload type' });
-    }
-
-    // Simple base64 upload handling
-    const { data, filename } = req.body;
-    if (!data || !filename) {
+// Base64 JSON upload; the large body limit applies only after auth
+const FAVICON_EXTS = ['.ico', '.png', '.svg'];
+app.post('/api/admin/upload/favicon', requireAuth, express.json({ limit: '2mb' }), (req, res) => {
+    const { data, filename } = req.body || {};
+    if (typeof data !== 'string' || typeof filename !== 'string') {
         return res.status(400).json({ error: 'Missing data or filename' });
     }
-
-    // Validate file extension
     const ext = path.extname(filename).toLowerCase();
-    const allowedExts = type === 'favicon'
-        ? ['.ico', '.png', '.svg']
-        : ['.jpg', '.jpeg', '.png', '.webp'];
-
-    if (!allowedExts.includes(ext)) {
-        return res.status(400).json({ error: `Invalid file type. Allowed: ${allowedExts.join(', ')}` });
+    if (!FAVICON_EXTS.includes(ext)) {
+        return res.status(400).json({ error: `Invalid file type. Allowed: ${FAVICON_EXTS.join(', ')}` });
     }
-
-    // Sanitize filename
-    const safeName = `${type}${ext}`;
-    const filePath = path.join(UPLOADS_DIR, safeName);
-
+    const safeName = `favicon${ext}`;
     try {
-        // Decode base64 and save
-        const buffer = Buffer.from(data, 'base64');
-        fs.writeFileSync(filePath, buffer);
-
-        // Update settings with the file path
-        const settings = loadSettings();
-        settings[type] = `/uploads/${safeName}`;
-        saveSettings(settings);
-
-        console.log(`[ADMIN] Uploaded ${type}: ${safeName}`);
-        res.json({ path: `/uploads/${safeName}` });
+        fs.writeFileSync(path.join(UPLOADS_DIR, safeName), Buffer.from(data, 'base64'));
+        // Version the URL so browsers pick up a replaced icon
+        const url = `/uploads/${safeName}?v=${Date.now()}`;
+        saveSettings({ ...loadSettings(), favicon: url });
+        console.log(`[ADMIN] Uploaded ${safeName}`);
+        res.json({ path: url });
     } catch (err) {
-        console.error('[ADMIN] Upload error:', err);
+        console.error('[ADMIN] Upload error:', err.message);
         res.status(500).json({ error: 'Upload failed' });
     }
 });
 
-// Serve uploaded files
-app.use('/uploads', express.static(UPLOADS_DIR));
+// Uploaded SVGs are same-origin: serve them inert
+app.use('/uploads', express.static(UPLOADS_DIR, {
+    setHeaders: res => res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+}));
 
-// Public settings endpoint (for frontend to load site config)
-app.get('/api/settings', (req, res) => {
-    const settings = loadSettings();
-    // Don't expose admin-only fields
+app.get('/api/cache-stats', requireAuth, (req, res) => {
+    const now = Date.now();
     res.json({
-        siteName: settings.siteName,
-        siteDescription: settings.siteDescription,
-        favicon: settings.favicon,
-        ogImage: settings.ogImage,
-        defaultStations: settings.defaultStations,
-        analyticsScript: settings.analyticsEnabled ? settings.analyticsScript : '',
-        customCss: settings.customCss
+        entries: cache.size,
+        keys: [...cache].map(([key, v]) => ({
+            key, cachedAt: v.cachedAt, expiresInMinutes: Math.round((v.expiry - now) / MINUTE)
+        }))
+    });
+});
+
+// Public site config for the frontend
+app.get('/api/settings', (req, res) => {
+    const s = loadSettings();
+    res.json({
+        siteName: s.siteName,
+        siteDescription: s.siteDescription,
+        favicon: s.favicon,
+        defaultStations: s.defaultStations,
+        analyticsScript: s.analyticsEnabled ? s.analyticsScript : '',
+        customCss: s.customCss
     });
 });
 
@@ -586,61 +427,23 @@ app.get('/api/settings', (req, res) => {
 // them into the { member: [{x, y}] } format the charts consume: one
 // 'RRFS' member line and a 'Mean' whose points carry p10/p25/p75/p90
 // derived from mean +/- spread.
-const http = require('http');
-const EXTRACTOR_URL = process.env.EXTRACTOR_URL || 'http://extractor:3002';
 
-// ICAO -> 6-digit BUFR station number (verified against RPID in the files).
-// Unknown stations may be passed directly as 6-digit numbers.
-const REFS_STATIONS = {
-    JFK: '744860',
-    LGA: '725030',
-    EWR: '725020',
-    BOS: '725090'
-};
+// ICAO -> 6-digit BUFR station number (verified against RPID in the files)
+const REFS_STATIONS = { JFK: '744860', LGA: '725030', EWR: '725020', BOS: '725090' };
 
-function fetchExtractorJson(path) {
-    return new Promise((resolve, reject) => {
-        const url = `${EXTRACTOR_URL}${path}`;
-        const req = http.get(url, (res) => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                if (res.statusCode !== 200) {
-                    return reject(new Error(`Extractor returned ${res.statusCode}`));
-                }
-                try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    reject(new Error('Failed to parse extractor response'));
-                }
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(120000, () => {
-            req.destroy();
-            reject(new Error('Extractor timeout'));
-        });
-    });
-}
-
-function fetchExtractor(sid, date, cycle) {
-    return fetchExtractorJson(`/plume?sid=${sid}&date=${date}&cycle=${cycle}`);
-}
-
-// Full RPID -> station-number index built by the extractor (~2500 stations).
-// Lets any ICAO in the feed be used, not just the hardcoded map.
+// Full RPID -> station-number index built by the extractor (~1900 stations)
 let refsStationIndex = { stations: null, fetchedAt: 0 };
-const STATION_INDEX_TTL_MS = 6 * 60 * 60 * 1000;
+const STATION_INDEX_TTL_MS = 6 * HOUR;
 
 async function resolveRefsSid(station) {
     const key = station.toUpperCase();
     if (REFS_STATIONS[key]) return REFS_STATIONS[key];
-    if (/^\d{6}$/.test(station)) return station;
+    if (/^\d{6}$/.test(key)) return key;
     if (!/^[A-Z]{3,4}$/.test(key)) return null;
 
     if (!refsStationIndex.stations || Date.now() - refsStationIndex.fetchedAt > STATION_INDEX_TTL_MS) {
         try {
-            const idx = await fetchExtractorJson('/stations');
+            const idx = await getJson(`${EXTRACTOR_URL}/stations`, 30000);
             refsStationIndex = { stations: idx.stations || null, fetchedAt: Date.now() };
             console.log(`[REFS] Station index loaded: ${idx.count} stations (${idx.source})`);
         } catch (err) {
@@ -656,9 +459,22 @@ async function resolveRefsSid(station) {
     return null;
 }
 
+// Every param of a page load asks for the same plume at once: one extractor call
+const plumeInFlight = new Map();
+function fetchPlume(sid, ymd, run) {
+    const key = `${sid}_${ymd}_${run}`;
+    if (!plumeInFlight.has(key)) {
+        // Above a cold cycle's build time; nginx's proxy timeout is longer still
+        plumeInFlight.set(key, getJson(`${EXTRACTOR_URL}/plume?sid=${sid}&date=${ymd}&cycle=${run}`, 120000)
+            .finally(() => plumeInFlight.delete(key)));
+    }
+    return plumeInFlight.get(key);
+}
+
 const K_TO_F = k => (k - 273.15) * 9 / 5 + 32;
 const MS_TO_KTS = 1.94384;
 const MM_TO_IN = 1 / 25.4;
+const M_TO_IN = 39.3701;
 
 /**
  * Liquid-equivalent snowfall (mm) -> snow depth (inches) using the
@@ -675,57 +491,42 @@ function snowInches(snflMm, snra) {
     return snflMm * MM_TO_IN * ratio;
 }
 
-/**
- * Shape one member's raw hourly series into [{x, y}] for a param.
- */
+/** Shape one member's raw hourly series into [{x, y}] for a param. */
 function shapeMemberSeries(series, param, cycleEpochMs) {
-    const n = series.ftimes.length;
-    const hourly = [];  // { x, qpf, sno, tmp, wnd }
-    for (let i = 0; i < n; i++) {
-        const x = cycleEpochMs + series.ftimes[i] * 1000;
-        hourly.push({
-            x,
-            tmp: series.t2ms[i] !== null ? K_TO_F(series.t2ms[i]) : null,
-            wnd: (series.u10m[i] !== null && series.v10m[i] !== null)
-                ? Math.hypot(series.u10m[i], series.v10m[i]) * MS_TO_KTS : null,
-            qpf: series.tp01[i] !== null ? series.tp01[i] * MM_TO_IN : 0,
-            sno: snowInches(series.snfl[i], series.snra ? series.snra[i] : null)
-        });
-    }
+    const hourly = series.ftimes.map((ftime, i) => ({
+        x: cycleEpochMs + ftime * 1000,
+        tmp: series.t2ms[i] !== null ? K_TO_F(series.t2ms[i]) : null,
+        wnd: (series.u10m[i] !== null && series.v10m[i] !== null)
+            ? Math.hypot(series.u10m[i], series.v10m[i]) * MS_TO_KTS : null,
+        qpf: series.tp01[i] !== null ? series.tp01[i] * MM_TO_IN : 0,
+        sno: snowInches(series.snfl[i], series.snra ? series.snra[i] : null)
+    }));
+
+    const cumulative = key => {
+        let sum = 0;
+        return hourly.map(h => ({ x: h.x, y: round2(sum += h[key]) }));
+    };
+    // Sum hours 1-3, 4-6, ... into 3-hour buckets (x at bucket end), matching SREF
+    const buckets = key => {
+        const out = [];
+        for (let i = 1; i < hourly.length; i += 3) {
+            const bucket = hourly.slice(i, i + 3);
+            out.push({ x: bucket[bucket.length - 1].x, y: round2(bucket.reduce((s, h) => s + h[key], 0)) });
+        }
+        return out;
+    };
+    const instant = key => hourly.filter(h => h[key] !== null).map(h => ({ x: h.x, y: round2(h[key]) }));
 
     switch (param) {
-        case '3hrly-TMP':
-            return hourly.filter(h => h.tmp !== null).map(h => ({ x: h.x, y: round2(h.tmp) }));
-        case '3h-10mWND':
-            return hourly.filter(h => h.wnd !== null).map(h => ({ x: h.x, y: round2(h.wnd) }));
-        case 'Total-QPF': {
-            let sum = 0;
-            return hourly.map(h => { sum += h.qpf; return { x: h.x, y: round2(sum) }; });
-        }
-        case 'Total-SNO': {
-            let sum = 0;
-            return hourly.map(h => { sum += h.sno; return { x: h.x, y: round2(sum) }; });
-        }
-        case '3hrly-QPF':
-        case '3hrly-SNO': {
-            // Sum hourly values into 3-hour buckets (x at bucket end),
-            // matching the SREF 3-hourly presentation
-            const key = param === '3hrly-QPF' ? 'qpf' : 'sno';
-            const out = [];
-            for (let i = 1; i < hourly.length; i += 3) {
-                const bucket = hourly.slice(i, i + 3);
-                if (bucket.length === 0) continue;
-                const total = bucket.reduce((s, h) => s + h[key], 0);
-                out.push({ x: bucket[bucket.length - 1].x, y: round2(total) });
-            }
-            return out;
-        }
-        default:
-            return [];
+        case '3hrly-TMP': return instant('tmp');
+        case '3h-10mWND': return instant('wnd');
+        case 'Total-QPF': return cumulative('qpf');
+        case 'Total-SNO': return cumulative('sno');
+        case '3hrly-QPF': return buckets('qpf');
+        case '3hrly-SNO': return buckets('sno');
+        default: return [];
     }
 }
-
-const round2 = v => Math.round(v * 100) / 100;
 
 /**
  * REFS ensemble mean at 3h steps as Mean points carrying a band:
@@ -735,39 +536,77 @@ const round2 = v => Math.round(v * 100) / 100;
  */
 function shapeEnsembleMean(ens, param, cycleEpochMs) {
     const { hours, mean, sprd } = ens;
-    const M_TO_IN = 39.3701;
+    const total = param.startsWith('Total-');
     const pick = {
         '3hrly-TMP': i => [K_TO_F(mean.tmp[i]), sprd.tmp[i] * 9 / 5],
         '3h-10mWND': i => [mean.wnd[i] * MS_TO_KTS, sprd.wnd[i] * MS_TO_KTS],
         '3hrly-QPF': i => [mean.qpf[i] * MM_TO_IN, sprd.qpf[i] * MM_TO_IN],
         '3hrly-SNO': i => [mean.sno[i] * M_TO_IN, sprd.sno[i] * M_TO_IN],
-    }[param.startsWith('Total-') ? param.replace('Total-', '3hrly-') : param];
+    }[total ? param.replace('Total-', '3hrly-') : param];
     if (!pick || !hours) return [];
 
     const nonNegative = param !== '3hrly-TMP';
-    const out = [];
     let sum = 0, sumSprd = 0;
-    for (let i = 0; i < hours.length; i++) {
+    return hours.map((hour, i) => {
         let [m, s] = pick(i);
-        if (param.startsWith('Total-')) {
-            sum += m; sumSprd += s;
-            m = sum; s = sumSprd;
+        if (total) {
+            m = sum += m;
+            s = sumSprd += s;
         }
         const q = k => round2(nonNegative ? Math.max(0, m + k * s) : m + k * s);
-        out.push({
-            x: cycleEpochMs + hours[i] * 3600000,
+        return {
+            x: cycleEpochMs + hour * HOUR,
             y: round2(m),
             p10: q(-1.28), p25: q(-0.67), p75: q(0.67), p90: q(1.28)
-        });
+        };
+    });
+}
+
+/** Per-hour fraction of members flagging each precip type. */
+function shapePtype(members, cycleEpochMs) {
+    const list = Object.values(members);
+    const steps = Math.min(...list.map(m => m.ftimes.length));
+    const frac = (flag, i) => list.filter(m => (m[flag] || [])[i] === 1).length / list.length;
+    return Array.from({ length: steps }, (_, i) => ({
+        x: cycleEpochMs + list[0].ftimes[i] * 1000,
+        snow: frac('wxts', i), rain: frac('wxtr', i), zr: frac('wxtz', i), ip: frac('wxtp', i)
+    }));
+}
+
+function shapePlume(plume, param, cycleEpochMs) {
+    const shaped = {};
+    for (const member of Object.keys(plume.members).sort()) {
+        const label = member === 'rrfs' ? 'RRFS' : 'M' + member.replace(/^m0*/, '').padStart(2, '0');
+        const pts = shapeMemberSeries(plume.members[member], param, cycleEpochMs);
+        if (pts.length > 0) shaped[label] = pts;
     }
-    return out;
+    const labels = Object.keys(shaped);
+    const ensMean = plume.ens ? shapeEnsembleMean(plume.ens, param, cycleEpochMs) : [];
+    if (ensMean.length > 0) {
+        shaped['Mean'] = ensMean;
+    } else if (labels.length > 0) {
+        // No ensemble products: fall back to the mean across member lines
+        const sums = new Map();
+        for (const label of labels) {
+            for (const p of shaped[label]) {
+                const agg = sums.get(p.x) || { sum: 0, count: 0 };
+                agg.sum += p.y;
+                agg.count++;
+                sums.set(p.x, agg);
+            }
+        }
+        shaped['Mean'] = [...sums.entries()].sort((a, b) => a[0] - b[0])
+            .map(([x, agg]) => ({ x, y: round2(agg.sum / agg.count) }));
+    }
+    const steps = labels.length ? Math.min(...labels.map(l => shaped[l].length)) : 0;
+    return { shaped, steps };
 }
 
 // What the extractor is doing for a cycle right now (drives the UI status line)
 const statusCache = new Map();
 app.get('/api/refs/status/:run', async (req, res) => {
     const date = String(req.query.date || '');
-    if (!['00', '06', '12', '18'].includes(req.params.run) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (!REFS_RUNS.includes(req.params.run) || !DATE_RE.test(date)) {
         return res.status(400).json({ error: 'Invalid run or date' });
     }
     // 1s shared TTL: N viewers polling a cold cycle cost one extractor hit
@@ -776,7 +615,7 @@ app.get('/api/refs/status/:run', async (req, res) => {
     if (hit && Date.now() - hit.at < 1000) return res.json(hit.data);
     let data;
     try {
-        data = await fetchExtractorJson(`/status?date=${date.replace(/-/g, '')}&cycle=${req.params.run}`);
+        data = await getJson(`${EXTRACTOR_URL}/status?date=${date.replace(/-/g, '')}&cycle=${req.params.run}`, 5000);
     } catch {
         data = { busy: false };
     }
@@ -787,174 +626,71 @@ app.get('/api/refs/status/:run', async (req, res) => {
 
 app.get('/api/refs/:station/:run/:param', async (req, res) => {
     const { station, run, param } = req.params;
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const date = String(req.query.date || todayUtc());
 
-    if (!['00', '06', '12', '18'].includes(run)) {
-        return res.status(400).json({ error: 'Invalid run time' });
-    }
-    const validParams = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND', 'ptype'];
-    if (!validParams.includes(param)) {
-        return res.status(400).json({ error: 'Invalid parameter' });
-    }
+    if (!REFS_RUNS.includes(run)) return res.status(400).json({ error: 'Invalid run time' });
+    if (!PARAMS.includes(param) && param !== 'ptype') return res.status(400).json({ error: 'Invalid parameter' });
+    if (!DATE_RE.test(date)) return res.status(400).json({ error: 'Invalid date' });
     const sid = await resolveRefsSid(station);
     if (!sid) {
         return res.status(400).json({
             error: 'Unknown REFS station. Use an ICAO code from the RRFS feed (e.g. KJFK/JFK) or a 6-digit BUFR station number.'
         });
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        return res.status(400).json({ error: 'Invalid date' });
-    }
 
     // Prefix versions the persisted cache: bump when the shaped output changes
     const cacheKey = `refs2_${date}_${run}_${sid}_${param}`;
-    const cached = getFromCache(cacheKey);
-    if (cached) {
-        if (cached.negative) {
-            res.set('X-Cache', 'NEGATIVE');
-            return res.status(502).json({ error: 'REFS data unavailable', details: cached.data, cached: true });
-        }
-        res.set('X-Cache', cached.incomplete ? 'INCOMPLETE-HIT' : 'HIT');
-        return res.json(cached.data);
-    }
-
-    const ip = req.ip || req.connection.remoteAddress;
-    if (!checkApiRateLimit(ip)) {
-        return res.status(429).json({ error: 'Too many requests. Please slow down.' });
-    }
+    if (sendCached(res, cacheKey, 'REFS data unavailable')) return;
+    if (rateLimited(req, res)) return;
 
     const ymd = date.replace(/-/g, '');
-    console.log(`[REFS MISS] ${cacheKey} - extracting...`);
-
     try {
-        const plume = await fetchExtractor(sid, ymd, run);
-        const cycleEpochMs = Date.UTC(
-            Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1,
-            Number(ymd.slice(6, 8)), Number(run));
+        const plume = await fetchPlume(sid, ymd, run);
+        const cycleEpochMs = Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8), +run);
 
-        // Precip type: per-hour fraction of members flagging each type
         if (param === 'ptype') {
-            const members = Object.values(plume.members);
-            const steps = Math.min(...members.map(m => m.ftimes.length));
-            const out = [];
-            for (let i = 0; i < steps; i++) {
-                const x = cycleEpochMs + members[0].ftimes[i] * 1000;
-                const frac = flag =>
-                    members.filter(m => (m[flag] || [])[i] === 1).length / members.length;
-                out.push({
-                    x,
-                    snow: frac('wxts'), rain: frac('wxtr'),
-                    zr: frac('wxtz'), ip: frac('wxtp')
-                });
-            }
-            const complete = plume.complete && steps >= 16;
-            setInCache(cacheKey, out,
-                complete ? undefined : INCOMPLETE_TTL_MS,
-                complete ? {} : { incomplete: true });
-            res.set('X-Cache', complete ? 'MISS' : 'INCOMPLETE');
+            const out = shapePtype(plume.members, cycleEpochMs);
+            cacheResult(res, cacheKey, out, plume.complete && out.length >= 16);
             return res.json(out);
         }
 
-        const shaped = {};
-        for (const member of Object.keys(plume.members).sort()) {
-            const label = member === 'rrfs' ? 'RRFS' : 'M' + member.replace(/^m0*/, '').padStart(2, '0');
-            const pts = shapeMemberSeries(plume.members[member], param, cycleEpochMs);
-            if (pts.length > 0) shaped[label] = pts;
-        }
-
-        const labels = Object.keys(shaped);
-        const ensMean = plume.ens ? shapeEnsembleMean(plume.ens, param, cycleEpochMs) : [];
-        if (ensMean.length > 0) {
-            shaped['Mean'] = ensMean;
-        } else if (labels.length > 0) {
-            // No ensemble products: fall back to the mean across member lines
-            const sums = new Map();
-            for (const label of labels) {
-                for (const p of shaped[label]) {
-                    const agg = sums.get(p.x) || { sum: 0, count: 0 };
-                    agg.sum += p.y;
-                    agg.count++;
-                    sums.set(p.x, agg);
-                }
-            }
-            shaped['Mean'] = [...sums.entries()].sort((a, b) => a[0] - b[0])
-                .map(([x, agg]) => ({ x, y: round2(agg.sum / agg.count) }));
-        }
-
-        const steps = labels.length ? Math.min(...labels.map(l => shaped[l].length)) : 0;
-        const complete = plume.complete && labels.length >= 1 && steps >= 16;
-        if (complete) {
-            setInCache(cacheKey, shaped);
-            res.set('X-Cache', 'MISS');
-        } else {
-            setInCache(cacheKey, shaped, INCOMPLETE_TTL_MS, { incomplete: true });
-            res.set('X-Cache', 'INCOMPLETE');
-        }
-        console.log(`[REFS] ${cacheKey}: ${labels.length} members, ${steps} pts, complete=${complete}`);
+        const { shaped, steps } = shapePlume(plume, param, cycleEpochMs);
+        const complete = plume.complete && steps >= 16;
+        cacheResult(res, cacheKey, shaped, complete);
+        console.log(`[REFS] ${cacheKey}: ${steps} pts, complete=${complete}`);
         res.json(shaped);
     } catch (err) {
         console.error(`[REFS ERROR] ${cacheKey}:`, err.message);
-        setInCache(cacheKey, err.message, NEGATIVE_TTL_MS, { negative: true });
+        // A timed-out build keeps running in the extractor: let the next request pick it up
+        if (err.name !== 'TimeoutError') setInCache(cacheKey, err.message, NEGATIVE_TTL_MS, { negative: true });
         res.status(502).json({ error: 'REFS data unavailable', details: err.message });
     }
 });
 
 // ============ Radar Frame Index (LibreWXR) ============
-// Proxies the LibreWXR frame catalog so all visitors share one upstream
-// request per minute. Tiles themselves load directly from api.librewxr.net.
+// All visitors share one upstream request per minute.
+const LIBRE_HOST = 'https://api.librewxr.net';
 let radarFramesCache = { data: null, fetchedAt: 0 };
-const RADAR_FRAMES_TTL_MS = 60 * 1000;
-
-function fetchLibreJson(url) {
-    return new Promise((resolve, reject) => {
-        const req = https.get(url, {
-            headers: { 'User-Agent': 'SREF-Viewer/1.0 (Personal Weather Tool)', 'Accept': 'application/json' }
-        }, (res) => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                if (res.statusCode !== 200) {
-                    return reject(new Error(`LibreWXR returned ${res.statusCode}`));
-                }
-                try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    reject(new Error('Failed to parse LibreWXR response'));
-                }
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(10000, () => {
-            req.destroy();
-            reject(new Error('LibreWXR request timeout'));
-        });
-    });
-}
-
 let radarFramesInFlight = null;
+
 async function getRadarFrames() {
-    const now = Date.now();
-    if (radarFramesCache.data && now - radarFramesCache.fetchedAt < RADAR_FRAMES_TTL_MS) {
+    if (radarFramesCache.data && Date.now() - radarFramesCache.fetchedAt < MINUTE) {
         return { data: radarFramesCache.data, status: 'HIT' };
     }
     // Many tile misses can expire the index at once: one upstream fetch for all
-    if (!radarFramesInFlight) {
-        radarFramesInFlight = fetchLibreJson('https://api.librewxr.net/public/weather-maps.json')
-            .then(data => {
-                radarFramesCache = { data, fetchedAt: Date.now() };
-                return { data, status: 'MISS' };
-            })
-            .catch(err => {
-                console.error('[RADAR]', err.message);
-                // Serve stale frames if we have them - better than nothing
-                if (radarFramesCache.data) {
-                    radarFramesCache.fetchedAt = Date.now();  // serve stale for a TTL, not a timeout per tile batch
-                    return { data: radarFramesCache.data, status: 'STALE' };
-                }
-                throw err;
-            })
-            .finally(() => { radarFramesInFlight = null; });
-    }
+    radarFramesInFlight ??= getJson(`${LIBRE_HOST}/public/weather-maps.json`, 10000)
+        .then(data => {
+            radarFramesCache = { data, fetchedAt: Date.now() };
+            return { data, status: 'MISS' };
+        })
+        .catch(err => {
+            console.error('[RADAR]', err.message);
+            if (!radarFramesCache.data) throw err;
+            // Serve stale for a TTL rather than retrying upstream per tile batch
+            radarFramesCache.fetchedAt = Date.now();
+            return { data: radarFramesCache.data, status: 'STALE' };
+        })
+        .finally(() => { radarFramesInFlight = null; });
     return radarFramesInFlight;
 }
 
@@ -973,62 +709,52 @@ app.get('/api/radar/frames', async (req, res) => {
 // are immutable per (frame, nowcast basis), so they are cached here and
 // the default NYC viewport is pre-rendered for every new frame as soon as
 // the index shows it, so the page normally never waits on upstream.
-const TILE_HOST = 'https://api.librewxr.net';
 const TILE_OPTS = '512';            // 512px tiles, declared 256 client-side for 2x density
 const TILE_STYLE = '2/1_1';         // Universal Blue, smoothed, rain/snow classified
-const TILE_TTL_MS = 3 * 60 * 60 * 1000;
+const TILE_TTL_MS = 3 * HOUR;
 const TILE_CACHE_MAX = 12000;       // 1-20KB each; ~2900 warm tiles live at once plus browsing
 const tileCache = new Map();        // key -> { body, type, at }
 const tileInFlight = new Map();     // key -> Promise
-const TILE_WARM_INTERVAL_MS = 60 * 1000;
 // NYC default viewport (lon -75.5..-72.5, lat 39.8..41.8). The page opens at
 // map zoom 8.2 and, because 512px tiles are declared as 256, requests source
 // zoom round(map zoom + 1) = 9; 8 covers zooming out one step.
 // ponytail: fixed box; derive from visitors' viewports if that matters.
 const TILE_WARM_ZOOMS = [8, 9];
-// One zoom action re-requests every visible tile for all 18 frames (~430 misses)
-const tileBuckets = new Map();
-const TILE_BUCKET_MAX = 500;
-const TILE_REFILL_RATE = 20;
 const TILE_WARM_BBOX = { west: -75.5, east: -72.5, south: 39.8, north: 41.8 };
 
-function tileKey(time, z, x, y, fc) {
-    return `${time}/${z}/${x}/${y}/${fc || ''}`;
-}
+const tileKey = (time, z, x, y, fc) => `${time}/${z}/${x}/${y}/${fc || ''}`;
+const freshTile = key => {
+    const hit = tileCache.get(key);
+    return hit && Date.now() - hit.at < TILE_TTL_MS ? hit : null;
+};
 
-function fetchTile(time, z, x, y) {
-    const url = `${TILE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`;
-    return new Promise((resolve, reject) => {
-        const req = https.get(url, { headers: { 'User-Agent': 'SREF-Viewer/1.0 (Personal Weather Tool)' } }, (res) => {
-            const chunks = [];
-            res.on('data', c => chunks.push(c));
-            res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body: Buffer.concat(chunks) }));
-        });
-        req.on('error', reject);
-        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Tile timeout')); });
+async function fetchTile(time, z, x, y) {
+    const res = await fetch(`${LIBRE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: AbortSignal.timeout(120000)
     });
+    return { status: res.status, type: res.headers.get('content-type'), body: Buffer.from(await res.arrayBuffer()) };
 }
 
 // Cached tile or one upstream fetch shared by everyone waiting for it
 function getTile(time, z, x, y, fc) {
     const key = tileKey(time, z, x, y, fc);
-    const hit = tileCache.get(key);
-    if (hit && Date.now() - hit.at < TILE_TTL_MS) return Promise.resolve(hit);
-    if (tileInFlight.has(key)) return tileInFlight.get(key);
-    const p = fetchTile(time, z, x, y).then(t => {
-        if (t.status === 200) {
-            if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
-            tileCache.set(key, { body: t.body, type: t.type, at: Date.now() });
-        }
-        return t;
-    }).finally(() => tileInFlight.delete(key));
-    tileInFlight.set(key, p);
-    return p;
+    const hit = freshTile(key);
+    if (hit) return Promise.resolve(hit);
+    if (!tileInFlight.has(key)) {
+        tileInFlight.set(key, fetchTile(time, z, x, y).then(t => {
+            if (t.status === 200) {
+                if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
+                tileCache.set(key, { ...t, at: Date.now() });
+            }
+            return t;
+        }).finally(() => tileInFlight.delete(key)));
+    }
+    return tileInFlight.get(key);
 }
 
 app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
-    const time = Number(req.params.time), z = Number(req.params.z);
-    const x = Number(req.params.x), y = Number(req.params.y);
+    const [time, z, x, y] = [req.params.time, req.params.z, req.params.x, req.params.y].map(Number);
     const fc = req.query.fc ? String(req.query.fc) : '';
     if (![time, z, x, y].every(Number.isInteger) || z < 3 || z > 12
         || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z || !/^\d*$/.test(fc)) {
@@ -1036,10 +762,9 @@ app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
     }
     try {
         const key = tileKey(time, z, x, y, fc);
-        const cached = tileCache.get(key);
         // A cached tile was validated when fetched: serve it without touching
         // the index (which may be briefly unavailable or newer than the client)
-        if (!(cached && Date.now() - cached.at < TILE_TTL_MS) && !tileInFlight.has(key)) {
+        if (!freshTile(key) && !tileInFlight.has(key)) {
             // Only frames in the index, and a nowcast frame only under an fc key
             // that is an observed time: its render would otherwise be cached as
             // the observation it becomes
@@ -1049,22 +774,20 @@ app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
             if (!pastTimes.includes(time) && !isNowcast) return res.status(404).end();
             if (isNowcast && !fc) return res.status(404).end();
             if (fc && !pastTimes.includes(Number(fc))) return res.status(400).end();
-            // Misses cost an upstream render: rate-limit those, not hits
-            if (!checkApiRateLimit(req.ip, tileBuckets, TILE_BUCKET_MAX, TILE_REFILL_RATE)) {
-                return res.status(429).end();
-            }
+            // One zoom action re-requests every visible tile for all 18 frames (~430 misses)
+            if (!takeToken(req.ip, tileBuckets, 500, 20)) return res.status(429).end();
         }
         const t = await getTile(time, z, x, y, fc);
-        if (t.status && t.status !== 200) return res.status(t.status).end();
+        if (t.status !== 200) return res.status(t.status).end();
         res.set('Content-Type', t.type || 'image/png');
         res.set('Cache-Control', 'public, max-age=3600');
         res.send(t.body);
-    } catch (err) {
+    } catch {
         res.status(502).end();
     }
 });
 
-function lonToX(lon, z) { return Math.floor((lon + 180) / 360 * 2 ** z); }
+const lonToX = (lon, z) => Math.floor((lon + 180) / 360 * 2 ** z);
 function latToY(lat, z) {
     const r = lat * Math.PI / 180;
     return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z);
@@ -1077,21 +800,20 @@ async function warmRadarTiles() {
     radarWarming = true;
     try {
         await warmRadarTilesOnce();
+    } catch (err) {
+        console.error('[RADAR WARM]', err.message);
     } finally {
         radarWarming = false;
     }
 }
 
 async function warmRadarTilesOnce() {
-    let frames;
-    try {
-        const { data } = await getRadarFrames();
-        const past = data.radar?.past || [];
-        const basis = past.length ? past[past.length - 1].time : 0;
-        // Newest observed frame first: it is what the page opens on
-        frames = [...past].reverse().map(f => ({ time: f.time, fc: '' }))
-            .concat((data.radar?.nowcast || []).map(f => ({ time: f.time, fc: String(basis) })));
-    } catch { return; }
+    const { data } = await getRadarFrames();
+    const past = data.radar?.past || [];
+    const basis = past.length ? String(past[past.length - 1].time) : '';
+    // Newest observed frame first: it is what the page opens on
+    const frames = [...past].reverse().map(f => ({ time: f.time, fc: '' }))
+        .concat((data.radar?.nowcast || []).map(f => ({ time: f.time, fc: basis })));
     // Gate on cache state per tile so failures, eviction, expiry and
     // restarts all get re-warmed; in-flight dedup keeps overlapping passes cheap
     const jobs = [];
@@ -1099,8 +821,7 @@ async function warmRadarTilesOnce() {
         for (const z of TILE_WARM_ZOOMS) {
             for (let x = lonToX(TILE_WARM_BBOX.west, z); x <= lonToX(TILE_WARM_BBOX.east, z); x++) {
                 for (let y = latToY(TILE_WARM_BBOX.north, z); y <= latToY(TILE_WARM_BBOX.south, z); y++) {
-                    const hit = tileCache.get(tileKey(f.time, z, x, y, f.fc));
-                    if (!hit || Date.now() - hit.at >= TILE_TTL_MS) jobs.push(() => getTile(f.time, z, x, y, f.fc));
+                    if (!freshTile(tileKey(f.time, z, x, y, f.fc))) jobs.push(() => getTile(f.time, z, x, y, f.fc));
                 }
             }
         }
@@ -1114,14 +835,12 @@ async function warmRadarTilesOnce() {
     }));
     console.log(`[RADAR WARM] ${jobs.length} tiles in ${Math.round((Date.now() - t0) / 1000)}s`);
 }
-setInterval(warmRadarTiles, TILE_WARM_INTERVAL_MS);
-setTimeout(warmRadarTiles, 5000);
 
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
-// Proxied + cached per rounded location so all viewers of an area share
-// one upstream request every 2 minutes.
+// Cached per rounded location so all viewers of an area share one
+// upstream request every 2 minutes.
 const alertsCache = new Map();
-const ALERTS_TTL_MS = 2 * 60 * 1000;
+const ALERTS_TTL_MS = 2 * MINUTE;
 
 app.get('/api/radar/alerts', async (req, res) => {
     const lat = parseFloat(req.query.lat);
@@ -1137,15 +856,15 @@ app.get('/api/radar/alerts', async (req, res) => {
         res.set('X-Cache', 'HIT');
         return res.json(hit.data);
     }
+    if (rateLimited(req, res)) return;
 
     try {
-        const data = await fetchLibreJson(
-            `https://api.librewxr.net/v2/alerts?lat=${lat.toFixed(2)}&lon=${lon.toFixed(2)}&radius=${radius}`);
+        const data = await getJson(
+            `${LIBRE_HOST}/v2/alerts?lat=${lat.toFixed(1)}&lon=${lon.toFixed(1)}&radius=${radius}`, 10000);
+        alertsCache.delete(key);
         alertsCache.set(key, { data, at: Date.now() });
         // Bound growth from scattered map positions
-        if (alertsCache.size > 50) {
-            alertsCache.delete(alertsCache.keys().next().value);
-        }
+        if (alertsCache.size > 50) alertsCache.delete(alertsCache.keys().next().value);
         res.set('X-Cache', 'MISS');
         res.json(data);
     } catch (err) {
@@ -1163,43 +882,26 @@ app.get('/api/radar/alerts', async (req, res) => {
 // after a new run publishes gets instant charts. Negative caching keeps
 // retries for not-yet-published runs cheap (one upstream attempt per
 // 5 minutes at most).
-const WARM_STATIONS = ['JFK', 'LGA', 'EWR'];
-const WARM_PARAMS = ['Total-SNO', '3hrly-SNO', 'Total-QPF', '3hrly-QPF', '3hrly-TMP', '3h-10mWND'];
 const WARM_MODELS = [
-    { base: '/api/sref', runs: [3, 9, 15, 21], lagHours: 5.33 },
+    { base: '/api/sref', runs: SREF_RUNS, lagHours: 5.33, until: SREF_RETIRED_AT },
     // Tarball lands ~3h after the cycle, the last ensemble file ~3.5h
-    { base: '/api/refs', runs: [0, 6, 12, 18], lagHours: 3.6 },
+    { base: '/api/refs', runs: REFS_RUNS, lagHours: 3.6 },
 ];
-const WARM_INTERVAL_MS = 5 * 60 * 1000;
+const WARM_INTERVAL_MS = 5 * MINUTE;
 
-function latestReadyRun(runs, lagHours) {
-    const now = Date.now();
+/** Most recent cycle whose data should be out by `now`. */
+function latestReadyRun(runs, lagHours, now = Date.now()) {
     let best = null;
     for (const dayOffset of [0, -1]) {
-        const day = new Date(now + dayOffset * 86400000);
-        for (const runHour of runs) {
-            const runEpoch = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), runHour);
-            if (runEpoch + lagHours * 3600000 <= now && (!best || runEpoch > best.runEpoch)) {
-                best = {
-                    runEpoch,
-                    run: String(runHour).padStart(2, '0'),
-                    date: new Date(runEpoch).toISOString().split('T')[0]
-                };
+        const day = new Date(now + dayOffset * DAY);
+        for (const run of runs) {
+            const runEpoch = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), Number(run));
+            if (runEpoch + lagHours * HOUR <= now && (!best || runEpoch > best.runEpoch)) {
+                best = { runEpoch, run, date: new Date(runEpoch).toISOString().slice(0, 10) };
             }
         }
     }
     return best;
-}
-
-function selfGet(path) {
-    return new Promise((resolve) => {
-        const req = http.get(`http://localhost:${PORT}${path}`, (res) => {
-            res.resume();
-            res.on('end', () => resolve(res.statusCode));
-        });
-        req.on('error', () => resolve(0));
-        req.setTimeout(150000, () => { req.destroy(); resolve(0); });
-    });
 }
 
 let warming = false;
@@ -1208,29 +910,41 @@ async function warmCache() {
     warming = true;
     try {
         for (const model of WARM_MODELS) {
+            // A retired model's last run is already cached
+            if (model.until && Date.now() > model.until + model.lagHours * HOUR) continue;
             const latest = latestReadyRun(model.runs, model.lagHours);
             if (!latest) continue;
-            for (const station of WARM_STATIONS) {
-                for (const param of WARM_PARAMS) {
-                    await selfGet(`${model.base}/${station}/${latest.run}/${param}?date=${latest.date}`);
+            for (const station of loadSettings().defaultStations) {
+                for (const param of PARAMS) {
+                    // Through the routes so warming shares their cache and validation
+                    await fetch(`http://localhost:${PORT}${model.base}/${station}/${latest.run}/${param}?date=${latest.date}`,
+                        { signal: AbortSignal.timeout(150000) }).then(r => r.arrayBuffer()).catch(() => {});
                     await new Promise(r => setTimeout(r, 250));
                 }
             }
         }
-        console.log('[WARM] Cache warm cycle complete');
-    } catch (err) {
-        console.error('[WARM]', err.message);
     } finally {
         warming = false;
     }
 }
 
-setTimeout(warmCache, 10000);
-setInterval(warmCache, WARM_INTERVAL_MS);
+// Drop idle rate-limit buckets, stale login failures and expired sessions
+function sweep() {
+    const now = Date.now();
+    for (const buckets of [apiBuckets, tileBuckets]) {
+        for (const [ip, b] of buckets) if (now - b.lastRefill > HOUR) buckets.delete(ip);
+    }
+    for (const ip of loginFailures.keys()) recentFailures(ip);
+    for (const [token, created] of sessions) if (now - created > SESSION_TTL_MS) sessions.delete(token);
+}
 
-// ============ Start Server ============
-app.listen(PORT, () => {
-    console.log(`SREF Proxy running on port ${PORT}`);
-    console.log(`Health check: http://localhost:${PORT}/health`);
-    console.log(`Admin panel: http://localhost:${PORT}/admin`);
-});
+if (require.main === module) {
+    app.listen(PORT, () => console.log(`SREF proxy listening on :${PORT}`));
+    setTimeout(warmCache, 10000);
+    setInterval(warmCache, WARM_INTERVAL_MS);
+    setTimeout(warmRadarTiles, 5000);
+    setInterval(warmRadarTiles, MINUTE);
+    setInterval(sweep, 10 * MINUTE);
+}
+
+module.exports = { shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken };

@@ -268,27 +268,9 @@
                                 <span style="color: var(--text-dim); font-size: 0.8rem;">--</span>
                             </div>
                             <input type="file" id="faviconInput" accept=".ico,.png,.svg">
-                            <button type="button" class="btn btn-secondary"
-                                onclick="document.getElementById('faviconInput').click()">
-                                Upload Favicon
-                            </button>
+                            <button type="button" class="btn btn-secondary" id="faviconBtn">Upload Favicon</button>
                         </div>
                         <p class="help-text">Recommended: 32x32 or 64x64 PNG/ICO</p>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Open Graph Image</label>
-                        <div class="file-upload">
-                            <div class="preview" id="ogImagePreview" style="width: 120px; height: 63px;">
-                                <span style="color: var(--text-dim); font-size: 0.8rem;">--</span>
-                            </div>
-                            <input type="file" id="ogImageInput" accept=".jpg,.jpeg,.png,.webp">
-                            <button type="button" class="btn btn-secondary"
-                                onclick="document.getElementById('ogImageInput').click()">
-                                Upload OG Image
-                            </button>
-                        </div>
-                        <p class="help-text">Recommended: 1200x630 for social sharing</p>
                     </div>
                 </div>
 
@@ -298,7 +280,7 @@
                     <div class="form-group">
                         <label for="defaultStations">Station Codes (comma-separated)</label>
                         <input type="text" id="defaultStations" name="defaultStations" placeholder="JFK, LGA, EWR">
-                        <p class="help-text">ICAO codes for default station buttons</p>
+                        <p class="help-text">Station buttons in the header (3-4 letter codes, up to 8); also pre-fetched for every new run</p>
                     </div>
                 </div>
 
@@ -430,13 +412,7 @@
                     document.getElementById('analyticsScript').value = settings.analyticsScript || '';
                     document.getElementById('customCss').value = settings.customCss || '';
 
-                    // Update previews
-                    if (settings.favicon) {
-                        document.getElementById('faviconPreview').innerHTML = `<img src="${settings.favicon}" alt="Favicon">`;
-                    }
-                    if (settings.ogImage) {
-                        document.getElementById('ogImagePreview').innerHTML = `<img src="${settings.ogImage}" alt="OG Image">`;
-                    }
+                    if (settings.favicon) showFavicon(settings.favicon);
                 }
             } catch (err) {
                 console.error('Failed to load settings:', err);
@@ -510,7 +486,8 @@
                             const data = await res.json();
                             resolve(data.path);
                         } else {
-                            reject(new Error('Upload failed'));
+                            const data = await res.json().catch(() => ({}));
+                            reject(new Error(data.error || 'Upload failed'));
                         }
                     } catch (err) {
                         reject(err);
@@ -520,27 +497,20 @@
             });
         }
 
+        function showFavicon(src) {
+            document.getElementById('faviconPreview').replaceChildren(Object.assign(new Image(), { src, alt: 'Favicon' }));
+        }
+
+        document.getElementById('faviconBtn').addEventListener('click', () => document.getElementById('faviconInput').click());
+
         document.getElementById('faviconInput').addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
 
             try {
-                const path = await uploadFile('favicon', file);
-                document.getElementById('faviconPreview').innerHTML = `<img src="${path}" alt="Favicon">`;
+                showFavicon(await uploadFile('favicon', file));
             } catch (err) {
-                alert('Failed to upload favicon');
-            }
-        });
-
-        document.getElementById('ogImageInput').addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            try {
-                const path = await uploadFile('ogImage', file);
-                document.getElementById('ogImagePreview').innerHTML = `<img src="${path}" alt="OG Image">`;
-            } catch (err) {
-                alert('Failed to upload OG image');
+                alert(`Failed to upload favicon: ${err.message}`);
             }
         });
 

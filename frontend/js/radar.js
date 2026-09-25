@@ -18,6 +18,9 @@
  * actually arrived.
  */
 
+import { store } from './config.js?v=__V__';
+import { applySiteSettings } from './site.js?v=__V__';
+
 // Tiles come through our backend (/api/radar/tile), which caches them and
 // pre-renders the NYC viewport for each new frame; style options live there.
 const TILE_SIZE = 256;    // Backend requests 512px tiles; declaring 256 renders them at 2x density
@@ -41,7 +44,7 @@ const SPEED_KEY = 'sref-radar-speed';
 
 function savedPosition() {
     try {
-        const saved = JSON.parse(localStorage.getItem(POSITION_KEY));
+        const saved = JSON.parse(store.get(POSITION_KEY));
         if (saved && Array.isArray(saved.center) && typeof saved.zoom === 'number') {
             return saved;
         }
@@ -74,7 +77,7 @@ let pending = [];                 // frames waiting for a load slot
 let staleTwins = new Map();       // replacement layer id -> superseded layer id kept until ready
 let inFlight = 0;
 let speedIdx = (() => {
-    const saved = localStorage.getItem(SPEED_KEY);
+    const saved = store.get(SPEED_KEY);
     const idx = SPEEDS.findIndex(s => String(s.mult) === saved);
     return idx === -1 ? 0 : idx;
 })();
@@ -395,6 +398,10 @@ async function refreshFrames({ initial = false } = {}) {
 }
 
 function init() {
+    applySiteSettings().then(s => {
+        if (s.siteName) document.title = `Radar - ${s.siteName}`;
+    });
+
     const start = savedPosition();
     map = new maplibregl.Map({
         container: 'map',
@@ -411,7 +418,7 @@ function init() {
     // Remember where the user left the map
     map.on('moveend', () => {
         const c = map.getCenter();
-        localStorage.setItem(POSITION_KEY, JSON.stringify({
+        store.set(POSITION_KEY, JSON.stringify({
             center: [c.lng, c.lat], zoom: map.getZoom()
         }));
     });
@@ -438,12 +445,12 @@ function init() {
 
     map.on('load', async () => {
         loadAlerts();
-        setInterval(loadAlerts, ALERTS_REFRESH_MS);
+        setInterval(() => !document.hidden && loadAlerts(), ALERTS_REFRESH_MS);
         await refreshFrames({ initial: true });
         // Playback only steps over frames whose tiles have arrived, so it
         // can start immediately and grow as frames trickle in.
         play();
-        setInterval(() => refreshFrames(), REFRESH_MS);
+        setInterval(() => !document.hidden && refreshFrames(), REFRESH_MS);
     });
 
     // Refetch alerts when the map moves well away from the last fetch center
@@ -460,7 +467,7 @@ function init() {
     els.speedBtn.textContent = SPEEDS[speedIdx].label;
     els.speedBtn.addEventListener('click', () => {
         speedIdx = (speedIdx + 1) % SPEEDS.length;
-        localStorage.setItem(SPEED_KEY, String(SPEEDS[speedIdx].mult));
+        store.set(SPEED_KEY, String(SPEEDS[speedIdx].mult));
         els.speedBtn.textContent = SPEEDS[speedIdx].label;
     });
 
@@ -469,9 +476,17 @@ function init() {
         showFrame(Number(e.target.value));
     });
 
-    // Pause the animation while the tab is hidden to save battery
+    // Pause while hidden to save battery; on return, catch up and resume
+    let resumeOnShow = false;
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden) pause();
+        if (document.hidden) {
+            resumeOnShow = playing;
+            pause();
+        } else if (frames.length) {
+            refreshFrames();
+            loadAlerts();
+            if (resumeOnShow) play();
+        }
     });
 }
 

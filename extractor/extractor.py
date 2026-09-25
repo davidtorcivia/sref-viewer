@@ -513,7 +513,8 @@ def _build_plume(sid, date, cycle, ens_thread):
 # Maps report IDs (KJFK) to BUFR station numbers (plus lat/lon) by decoding
 # the header of every station file in the most recent tarball.
 
-stations_state = {'status': 'idle'}
+stations_state = {'status': 'idle', 'attempted': 0}
+INDEX_RETRY_S = 3600  # a failed build re-streams the whole tarball: not more than hourly
 
 
 def find_available_cycle():
@@ -526,7 +527,6 @@ def find_available_cycle():
 
 
 def build_station_index():
-    stations_state['status'] = 'building'
     try:
         date, cycle = find_available_cycle()
         if not date:
@@ -568,6 +568,9 @@ def build_station_index():
 
 
 def maybe_start_index_build():
+    """Rebuild the index when missing or older than STATIONS_MAX_AGE_DAYS.
+    Called on every /health hit (the container healthcheck), so a long-running
+    container keeps it fresh."""
     try:
         age = time.time() - os.path.getmtime(STATIONS_FILE)
         if age < STATIONS_MAX_AGE_DAYS * 86400:
@@ -575,14 +578,17 @@ def maybe_start_index_build():
             return
     except OSError:
         pass
-    if stations_state['status'] == 'building':
-        return
+    with _locks_guard:
+        if stations_state['status'] == 'building' or time.time() - stations_state['attempted'] < INDEX_RETRY_S:
+            return
+        stations_state.update(status='building', attempted=time.time())
     threading.Thread(target=build_station_index, daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        print('[HTTP]', fmt % args, flush=True)
+        if not self.path.startswith(('/health', '/status')):  # polled constantly
+            print('[HTTP]', fmt % args, flush=True)
 
     def send_json(self, code, obj, cached=False):
         body = json.dumps(obj).encode()
@@ -596,6 +602,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         if url.path == '/health':
+            maybe_start_index_build()
             return self.send_json(200, {'status': 'ok', 'stations': stations_state['status']})
         if url.path == '/status':
             q = parse_qs(url.query)

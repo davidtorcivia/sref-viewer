@@ -1,35 +1,18 @@
 /**
- * SREF API Client
- * Handles all data fetching from the local caching proxy
+ * Data access and ensemble statistics
  */
-
-import { CONFIG } from './config.js?v=__V__';
 
 /**
- * Fetch SREF data for a specific parameter
- * @param {string} station - Airport code (JFK, LGA, EWR)
- * @param {string} run - Model run time (03, 09, 15, 21)
- * @param {string} param - Parameter name (Total-SNO, 3hrly-TMP, etc.)
- * @param {string} date - Date in YYYY-MM-DD format
- * @returns {Promise<Object>} Processed ensemble data with Mean included
+ * Fetch one parameter's ensemble data from the caching proxy.
+ * @returns {Promise<Object>} { member: [{x, y}], Mean: [...] } (ptype: an array)
  */
-export async function fetchSREFData(station, run, param, date, apiBase = CONFIG.apiBase) {
-    const url = `${apiBase}/${station}/${run}/${param}?date=${date}`;
-
-    const response = await fetch(url);
-
+export async function fetchModelData(apiBase, station, run, param, date, signal) {
+    const response = await fetch(`${apiBase}/${station}/${run}/${param}?date=${date}`, { signal });
     if (!response.ok) {
         const error = await response.json().catch(() => ({}));
-        throw new Error(error.details || `HTTP ${response.status}`);
+        throw new Error(error.details || error.error || `HTTP ${response.status}`);
     }
-
-    const data = await response.json();
-
-    // Check cache status from header
-    const cacheStatus = response.headers.get('X-Cache') || 'UNKNOWN';
-    console.log(`[${cacheStatus}] ${station}/${run}/${param}`);
-
-    return data;
+    return response.json();
 }
 
 /**
@@ -98,8 +81,6 @@ export function getEnsembleStats(data, useMax = false) {
         spread: Math.max(...memberValues) - Math.min(...memberValues)
     };
 }
-
-
 
 /**
  * Calculate percentile value from sorted array
@@ -179,17 +160,4 @@ export function getPercentileBands(data, coreFilter = null) {
     }
 
     return { p10, p25, p75, p90 };
-}
-
-/**
- * Check backend health
- * @returns {Promise<Object>} Health status
- */
-export async function checkHealth() {
-    try {
-        const response = await fetch('/health');
-        return await response.json();
-    } catch {
-        return { status: 'error', message: 'Backend unreachable' };
-    }
 }

@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>NYC SREF Ensemble Plumes</title>
-    <meta name="description" content="Interactive ensemble forecast plumes for NYC area airports from NOAA SREF model">
+    <meta name="description" content="Interactive ensemble forecast plumes for NYC area airports from NOAA's SREF and REFS models">
 
     <!-- Icons -->
     <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
@@ -26,14 +26,9 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
-    <!-- Service Worker Registration -->
     <script>
         if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js?v=__V__')
-                    .then(reg => console.log('[SW] Registered:', reg.scope))
-                    .catch(err => console.log('[SW] Registration failed:', err));
-            });
+            window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js?v=__V__').catch(() => { }));
         }
     </script>
 </head>
@@ -41,37 +36,32 @@
 <body>
     <header class="header">
         <div class="header-top">
-            <div class="title" id="pageTitle">
-                NYC SREF Ensemble Plumes
-            </div>
+            <h1 class="title" id="pageTitle">NYC SREF Ensemble Plumes</h1>
             <nav class="header-nav">
                 <a href="/radar" class="nav-link" title="Live radar map">Radar</a>
-                <button class="btn help-btn" id="helpBtn" title="What is this?">?</button>
+                <button class="btn help-btn" id="helpBtn" title="What is this?" aria-label="Help">?</button>
             </nav>
         </div>
 
         <div class="controls">
-            <div class="btn-group" id="modelBtns" title="Forecast model (SREF retires Oct 6, 2026; REFS is its successor)">
+            <div class="btn-group" id="modelBtns" role="group" aria-label="Forecast model"
+                title="Forecast model (SREF retires Oct 6, 2026; REFS is its successor)">
                 <button data-model="sref">SREF</button>
                 <button data-model="refs">REFS</button>
             </div>
-            <div class="btn-group" id="stationBtns">
-                <button class="active" data-val="JFK">JFK</button>
+            <div class="btn-group" id="stationBtns" role="group" aria-label="Station">
+                <button data-val="JFK">JFK</button>
                 <button data-val="LGA">LGA</button>
                 <button data-val="EWR">EWR</button>
-                <input type="text" id="customStation" placeholder="ICAO" maxlength="4"
-                    title="Enter any 4-letter ICAO airport code">
+                <input type="text" id="customStation" placeholder="ICAO" maxlength="4" pattern="[A-Za-z]{3,4}"
+                    autocapitalize="characters" autocomplete="off" spellcheck="false" aria-label="Custom station"
+                    title="Any 3-4 letter airport code, e.g. BOS or KORD">
                 <button id="customStationBtn" title="Load custom station">Go</button>
             </div>
 
-            <input type="date" id="dateInput">
+            <input type="date" id="dateInput" aria-label="Run date (UTC)">
 
-            <select id="runSelect">
-                <option value="03">03Z</option>
-                <option value="09">09Z</option>
-                <option value="15">15Z</option>
-                <option value="21">21Z</option>
-            </select>
+            <select id="runSelect" aria-label="Model run"></select>
 
             <div class="time-display" id="timeDisplay">--:-- ET</div>
 
@@ -82,7 +72,8 @@
 
     <!-- Weather Summary Bar -->
     <div class="summary-bar" id="summaryBar">
-        <span id="weatherSummary">Loading forecast...</span>
+        <span id="weatherSummary">Loading forecast…</span>
+        <span class="trend-text" id="trendText"></span>
     </div>
 
     <main class="main" id="mainContent">
@@ -90,11 +81,46 @@
     </main>
 
     <footer class="status-bar">
-        <span id="status">Ready</span>
+        <span id="status" role="status">Loading…</span>
         <span id="lastUpdate"></span>
     </footer>
 
-    <!-- Application Scripts (ES Modules) -->
+    <dialog class="modal" id="helpDialog" aria-labelledby="helpTitle">
+        <div class="modal-content">
+            <h2 id="helpTitle">Understanding Ensemble Plumes</h2>
+            <p>An <strong>ensemble</strong> runs a forecast model many times with slightly different starting
+                conditions or physics. Where the runs agree the forecast is confident; where they fan out, several
+                outcomes are possible.</p>
+
+            <h3>SREF and REFS</h3>
+            <p><strong>SREF</strong> (26 members, to 87 hours, runs at 03/09/15/21Z, ready ~5h20m later) retires
+                on <strong>October 6, 2026</strong>. Its successor is <strong>REFS</strong>, the RRFS ensemble at
+                3km (runs at 00/06/12/18Z, ready ~3.5h later). NOAA doesn't publish individual REFS members, so the
+                REFS view shows the <strong>deterministic RRFS</strong> run as an hourly line and the
+                <strong>REFS ensemble mean</strong> with a band of mean &plusmn; spread (3-hourly to 60 hours),
+                plus a precipitation-type timeline. Switch models in the header; the latest available run is
+                picked automatically.</p>
+
+            <h3>Reading the charts</h3>
+            <ul>
+                <li><strong>Lines</strong> are individual members. SREF has two cores: <strong>ARW</strong>
+                    (red) and <strong>NMB</strong> (blue); when both agree, confidence is higher.</li>
+                <li><strong>Bands</strong> show the middle 50% (dark) and 80% (light) of outcomes.</li>
+                <li>The thick line is the <strong>ensemble mean</strong>, usually the best single guess.</li>
+                <li><strong>Compare</strong> overlays the means of the three previous runs, so you can see
+                    whether the forecast is trending up or down.</li>
+            </ul>
+
+            <h3>Summary statistics</h3>
+            <p>Each chart lists the mean and the range across the ensemble (SREF: member max/min; REFS: the
+                10th-90th percentile of the band). A smaller spread means more agreement.</p>
+
+            <form method="dialog">
+                <button class="btn">Got it</button>
+            </form>
+        </div>
+    </dialog>
+
     <script type="module" src="js/app.js?v=__V__"></script>
 </body>
 

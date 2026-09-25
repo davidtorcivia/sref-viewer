@@ -1,18 +1,15 @@
 /**
- * SREF Viewer Configuration
- * All constants and parameter definitions
+ * Configuration: parameters, models, preferences
  */
 
 export const CONFIG = {
-    apiBase: '/api/sref',
-
     params: {
-        'Total-SNO': { name: 'Total Snowfall', unit: 'in', type: 'snow', pair: '3hrly-SNO' },
-        '3hrly-SNO': { name: '3-Hour Snowfall', unit: 'in', type: 'snow', pair: 'Total-SNO' },
-        'Total-QPF': { name: 'Total Precipitation', unit: 'in', type: 'precip', pair: '3hrly-QPF' },
-        '3hrly-QPF': { name: '3-Hour Precipitation', unit: 'in', type: 'precip', pair: 'Total-QPF' },
-        '3hrly-TMP': { name: 'Temperature', unit: '°F', type: 'temp', pair: null },
-        '3h-10mWND': { name: '10m Wind Speed', unit: 'kts', type: 'wind', pair: null },
+        'Total-SNO': { name: 'Total Snowfall', unit: 'in', type: 'snow' },
+        '3hrly-SNO': { name: '3-Hour Snowfall', unit: 'in', type: 'snow' },
+        'Total-QPF': { name: 'Total Precipitation', unit: 'in', type: 'precip' },
+        '3hrly-QPF': { name: '3-Hour Precipitation', unit: 'in', type: 'precip' },
+        '3hrly-TMP': { name: 'Temperature', unit: '°F', type: 'temp' },
+        '3h-10mWND': { name: '10m Wind Speed', unit: 'kts', type: 'wind' },
     },
 
     defaultOrder: ['3hrly-TMP', 'Total-QPF', '3hrly-QPF', '3h-10mWND'],
@@ -33,16 +30,10 @@ export const CONFIG = {
         MBP1: '#55aaff', MBP2: '#66bbff', MBP3: '#77ccff',
         MBP4: '#88ddff', MBP5: '#99eeff', MBP6: '#aaffff',
     },
-
-    // Model run times (UTC)
-    modelRuns: ['03', '09', '15', '21'],
-
-    // Stations available
-    stations: ['JFK', 'LGA', 'EWR']
 };
 
 /**
- * Forecast models. SREF retires 2026-10-06; REFS (RRFS ensemble) is its
+ * Forecast models. SREF retires 2026-10-06 12Z; REFS (RRFS ensemble) is its
  * successor. NOAA publishes no REFS members, so the REFS view is the
  * deterministic RRFS run (hourly) over the REFS mean +/- spread band
  * (3-hourly to 60h), cycles at 00/06/12/18Z.
@@ -54,6 +45,7 @@ export const MODELS = {
         apiBase: '/api/sref',
         runs: ['03', '09', '15', '21'],
         readyLagHours: 5.33,
+        retiredAt: Date.UTC(2026, 9, 6, 12),
         cores: [
             { key: 'ARW', tooltip: 'Advanced Research WRF core (red lines)' },
             { key: 'NMB', tooltip: 'NEMS-NMMB core (blue lines)' },
@@ -67,91 +59,78 @@ export const MODELS = {
         readyLagHours: 3.6,
         cores: [
             { key: 'MEM', label: 'RRFS', tooltip: 'Deterministic RRFS run (hourly to 84h)' },
-            { key: 'Mean', tooltip: 'REFS ensemble mean; band = mean +/- spread' },
+            { key: 'Mean', tooltip: 'REFS ensemble mean; band = mean ± spread' },
         ]
     }
 };
 
-// User preferences (persisted to localStorage)
-export const preferences = {
-    windUnit: localStorage.getItem('sref-wind-unit') || 'kts' // 'kts' or 'mph'
+export const isRetired = key => Boolean(MODELS[key].retiredAt && Date.now() >= MODELS[key].retiredAt);
+
+// localStorage throws in some privacy modes: preferences are best-effort
+export const store = {
+    get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+    set(key, value) { try { localStorage.setItem(key, value); } catch { /* not persisted */ } },
 };
 
-/**
- * Toggle wind unit between kts and mph
- */
+export const preferences = {
+    windUnit: store.get('sref-wind-unit') === 'mph' ? 'mph' : 'kts'
+};
+
 export function toggleWindUnit() {
     preferences.windUnit = preferences.windUnit === 'kts' ? 'mph' : 'kts';
-    localStorage.setItem('sref-wind-unit', preferences.windUnit);
+    store.set('sref-wind-unit', preferences.windUnit);
     return preferences.windUnit;
 }
 
-/**
- * Convert wind speed based on current unit preference
- * @param {number} kts - Wind speed in knots
- * @returns {number} Wind speed in preferred unit
- */
+/** Knots -> the preferred wind unit */
 export function convertWind(kts) {
-    if (preferences.windUnit === 'mph') {
-        return kts * 1.15078; // 1 knot = 1.15078 mph
-    }
-    return kts;
+    return preferences.windUnit === 'mph' ? kts * 1.15078 : kts;
 }
 
-/**
- * Get current wind unit label
- */
 export function getWindUnit() {
     return preferences.windUnit;
 }
 
-/**
- * Get the most recent available run AND the correct date for that run,
- * for any model: a run is "ready" readyLagHours after its cycle time.
- * Handles date rollover (e.g. SREF 21Z isn't ready until 02:20 UTC the
- * next day, so shortly after midnight UTC the latest run is yesterday's).
- */
-export function getLatestRunWithDate(modelKey = 'sref') {
-    const model = MODELS[modelKey] || MODELS.sref;
-    const now = Date.now();
+const HOUR = 3600000;
+const isoDate = epoch => new Date(epoch).toISOString().slice(0, 10);
 
-    // Consider today's and yesterday's cycles; pick the most recent one
-    // whose ready time has passed
-    let best = null;
-    for (const dayOffset of [0, -1]) {
-        const day = new Date(now + dayOffset * 86400000);
-        const y = day.getUTCFullYear(), m = day.getUTCMonth(), d = day.getUTCDate();
-        for (const run of model.runs) {
-            const runEpoch = Date.UTC(y, m, d, Number(run));
-            const readyEpoch = runEpoch + model.readyLagHours * 3600000;
-            if (readyEpoch <= now && (!best || runEpoch > best.runEpoch)) {
-                const iso = new Date(runEpoch).toISOString();
-                best = { run, date: iso.split('T')[0], runEpoch };
-            }
-        }
-    }
-
-    if (!best) {
-        // Degenerate fallback (shouldn't happen with 4 cycles/day)
-        const iso = new Date(now).toISOString();
-        best = { run: model.runs[0], date: iso.split('T')[0] };
-    }
-
-    console.log(`[RUN] ${modelKey} → ${best.run}Z on ${best.date}`);
-    return { run: best.run, date: best.date };
+/** UTC epoch of a model cycle */
+export function cycleEpoch(date, run) {
+    return Date.parse(`${date}T${run}:00:00Z`);
 }
 
 /**
- * Check if device is mobile (matches the CSS breakpoint in styles.css)
+ * The cycle `k` steps before (date, run) for a model: its runs are evenly
+ * spaced, so stepping back is plain epoch arithmetic across day boundaries.
  */
+export function previousCycle(modelKey, date, run, k = 1) {
+    const step = 24 / MODELS[modelKey].runs.length;
+    const epoch = cycleEpoch(date, run) - k * step * HOUR;
+    return { run: new Date(epoch).toISOString().slice(11, 13), date: isoDate(epoch) };
+}
+
+/**
+ * The most recent run whose data should be out, with its UTC date: a run
+ * is "ready" readyLagHours after its cycle time. A retired model's latest
+ * run is its last one before retirement.
+ */
+export function getLatestRunWithDate(modelKey) {
+    const model = MODELS[modelKey];
+    const now = Math.min(Date.now(), (model.retiredAt || Infinity) + model.readyLagHours * HOUR);
+    const step = 24 / model.runs.length;
+    const first = Number(model.runs[0]);
+    // Latest cycle hour at or before (now - lag), on the model's cycle grid
+    const ready = now - model.readyLagHours * HOUR;
+    const epoch = Math.floor((ready - first * HOUR) / (step * HOUR)) * step * HOUR + first * HOUR;
+    return { run: new Date(epoch).toISOString().slice(11, 13), date: isoDate(epoch) };
+}
+
+/** Matches the CSS mobile breakpoint in styles.css */
 export function isMobile() {
     return window.innerWidth <= 768;
 }
 
-/**
- * Check if this is a touch-primary device (affects tooltip behavior)
- */
+/** Touch-primary device (affects tooltip behavior) */
 export function isTouchDevice() {
     return window.matchMedia('(pointer: coarse)').matches;
 }
-

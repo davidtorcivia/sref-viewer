@@ -32,11 +32,7 @@ function getResponsiveOptions() {
     };
 }
 
-/**
- * Check if light mode is active (explicitly check for light preference)
- */
 function isLightMode() {
-    if (!window.matchMedia) return false;
     return window.matchMedia('(prefers-color-scheme: light)').matches;
 }
 
@@ -394,16 +390,7 @@ export function toggleCore(param, core) {
     chart.update();
 }
 
-/**
- * Get chart instance by param
- */
-export function getChart(param) {
-    return chartInstances[param];
-}
-
-/**
- * Destroy all charts (cleanup)
- */
+/** Destroy every chart (their canvases are about to be replaced) */
 export function destroyAllCharts() {
     for (const param of Object.keys(chartInstances)) {
         chartInstances[param].destroy();
@@ -412,62 +399,46 @@ export function destroyAllCharts() {
 }
 
 /**
- * Download chart as PNG image with title and labels
+ * Download a chart as PNG with a title block, in the page's current theme
  * @param {string} param - Parameter name
- * @param {string} station - Station code
- * @param {string} run - Model run
- * @param {string} date - Forecast date
+ * @param {string} subtitle - e.g. "REFS • JFK • 12Z 2026-09-24"
+ * @param {string} filename - without extension
  */
-export function exportChartPng(param, station, run, date = '') {
+export function exportChartPng(param, subtitle, filename) {
     const chart = chartInstances[param];
     if (!chart) return;
 
     const info = CONFIG.params[param];
-    const paramName = info?.name || param;
-    const unit = info?.unit || '';
+    const unit = info.type === 'wind' ? getWindUnit() : info.unit;
+    const css = getComputedStyle(document.documentElement);
+    const color = name => css.getPropertyValue(name).trim();
+    // The canvas is in device pixels: scale the title block to match
+    const dpr = window.devicePixelRatio || 1;
+    const font = (weight, px) => `${weight} ${px * dpr}px -apple-system, BlinkMacSystemFont, sans-serif`;
 
-    // Get the original chart canvas
-    const chartCanvas = chart.canvas;
-    const chartWidth = chartCanvas.width;
-    const chartHeight = chartCanvas.height;
+    const src = chart.canvas;
+    const top = 60 * dpr, bottom = 30 * dpr;
+    const out = document.createElement('canvas');
+    out.width = src.width;
+    out.height = src.height + top + bottom;
+    const ctx = out.getContext('2d');
 
-    // Create new canvas with space for title/labels
-    const padding = { top: 60, bottom: 30, left: 0, right: 0 };
-    const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = chartWidth + padding.left + padding.right;
-    exportCanvas.height = chartHeight + padding.top + padding.bottom;
-
-    const ctx = exportCanvas.getContext('2d');
-
-    // Fill background
-    ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
-
-    // Draw title
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 20px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = color('--surface');
+    ctx.fillRect(0, 0, out.width, out.height);
     ctx.textAlign = 'center';
-    ctx.fillText(paramName, exportCanvas.width / 2, 28);
-
-    // Draw subtitle (station, run, date)
-    ctx.font = '14px -apple-system, BlinkMacSystemFont, sans-serif';
-    ctx.fillStyle = '#888888';
-    const subtitle = `${station} • ${run}Z${date ? ' • ' + date : ''} • Units: ${unit}`;
-    ctx.fillText(subtitle, exportCanvas.width / 2, 48);
-
-    // Draw the chart
-    ctx.drawImage(chartCanvas, padding.left, padding.top);
-
-    // Draw footer
-    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-    ctx.fillStyle = '#666666';
+    ctx.fillStyle = color('--text');
+    ctx.font = font('bold', 20);
+    ctx.fillText(info.name, out.width / 2, 28 * dpr);
+    ctx.fillStyle = color('--text-dim');
+    ctx.font = font('normal', 14);
+    ctx.fillText(`${subtitle} • ${unit}`, out.width / 2, 48 * dpr);
+    ctx.drawImage(src, 0, top);
+    ctx.font = font('normal', 11);
     ctx.textAlign = 'right';
-    ctx.fillText('NOAA SREF Ensemble Plumes', exportCanvas.width - 10, exportCanvas.height - 10);
+    ctx.fillText(location.host, out.width - 10 * dpr, out.height - 10 * dpr);
 
-    // Download
     const link = document.createElement('a');
-    link.download = `SREF_${station}_${run}Z_${param}${date ? '_' + date : ''}.png`;
-    link.href = exportCanvas.toDataURL('image/png');
+    link.download = `${filename}.png`;
+    link.href = out.toDataURL('image/png');
     link.click();
 }
-

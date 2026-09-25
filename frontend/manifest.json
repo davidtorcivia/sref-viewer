@@ -1,7 +1,7 @@
 {
     "name": "SREF Ensemble Plumes",
     "short_name": "SREF Viewer",
-    "description": "Interactive ensemble forecast plumes from NOAA SREF model",
+    "description": "Interactive ensemble forecast plumes from NOAA SREF and REFS models",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#0a0a0f",

@@ -4,7 +4,7 @@ const zlib = require('zlib');
 const fs = require('fs');
 const path = require('path');
 
-const OUT_DIR = '/nvme-mirror/apps/sref-viewer/frontend/icons';
+const OUT_DIR = path.join(__dirname, '../frontend/icons');
 
 function crc32(buf) {
     let table = crc32.table;
