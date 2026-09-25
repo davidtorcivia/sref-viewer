@@ -100,6 +100,7 @@ function init() {
     updateTimeDisplay();
     setInterval(() => {
         updateTimeDisplay();
+        if (elements.nextRun.textContent) renderNextRun();
         checkForNewRun();
     }, 60000);
     document.addEventListener('visibilitychange', checkForNewRun);
@@ -161,6 +162,8 @@ function syncControls() {
 
 // ============ New runs ============
 let probing = false;
+let lastProbe = 0;
+const PROBE_INTERVAL = 5 * 60000;  // REFS probes can start a server-side build
 
 /**
  * While the latest run is on screen, move to the next one once it's out.
@@ -169,11 +172,12 @@ let probing = false;
  */
 async function checkForNewRun() {
     elements.dateInput.max = new Date().toISOString().slice(0, 10);
-    if (document.hidden || !state.following || probing) return;
+    if (document.hidden || !state.following || probing || Date.now() - lastProbe < PROBE_INTERVAL) return;
     const { model, station } = state;
     const latest = getLatestRunWithDate(model);
     if (latest.run === state.run && latest.date === state.date) return;
     probing = true;
+    lastProbe = Date.now();
     try {
         const data = await fetchModelData(MODELS[model].apiBase, station, latest.run, 'Total-QPF', latest.date);
         // The user may have moved on while the probe ran
@@ -194,7 +198,8 @@ function renderNextRun() {
         elements.nextRun.textContent = `${model.label} retired`;
         return;
     }
-    const readyAt = new Date(cycle + model.readyLagHours * 3600000);
+    // Rounded to 5 min: the lag is an estimate, not a schedule
+    const readyAt = new Date(Math.round((cycle + model.readyLagHours * 3600000) / 300000) * 300000);
     elements.nextRun.textContent = `Next ${next.run}Z ~${readyAt.toLocaleTimeString('en-US', {
         hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
     })}`;
