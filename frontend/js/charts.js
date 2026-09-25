@@ -276,17 +276,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     }
                 },
                 // The floating box sat under the finger on phones: values go
-                // to the readout strip above the plot instead
-                tooltip: {
-                    enabled: false,
-                    external: ({ chart, tooltip }) => {
-                        const active = tooltip.getActiveElements();
-                        chart.$scrubX = active.length
-                            ? chart.data.datasets[active[0].datasetIndex].data[active[0].index].x
-                            : null;
-                        renderReadout(chart);
-                    }
-                }
+                // to the readout strip above the plot (crosshairPlugin)
+                tooltip: { enabled: false }
             },
             scales: {
                 x: {
@@ -331,7 +322,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
 
     // Lifting the finger returns the readout to "now"
     canvas.ontouchend = canvas.ontouchcancel = () => {
-        chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+        chart.$scrubX = null;
+        renderReadout(chart);
         chart.draw();
     };
     renderReadout(chart);
@@ -339,18 +331,21 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
 }
 
 // ============ Scrub readout ============
-const HOUR = 3600000;
 const fmtTime = x => new Date(x).toLocaleString('en-US', {
     weekday: 'short', hour: 'numeric', timeZone: 'America/New_York'
 });
 
-/** The dataset's point nearest in time to x, if within 1.6h */
-function pointAt(ds, x) {
-    let best = null;
-    for (const p of ds.data) {
-        if (!best || Math.abs(p.x - x) < Math.abs(best.x - x)) best = p;
-    }
-    return best && Math.abs(best.x - x) <= 1.6 * HOUR ? best : null;
+const STEP = 30 * 60000;  // scrub resolution
+const snap = x => Math.round(x / STEP) * STEP;
+
+/**
+ * Dataset i's value at time x, read off the drawn (smoothed) line so rings
+ * sit on the curve between model steps. Null outside the series.
+ */
+function valueAt(chart, i, x) {
+    let p = chart.getDatasetMeta(i).dataset?.interpolate({ x: chart.scales.x.getPixelForValue(x) }, 'x');
+    if (Array.isArray(p)) p = p[0];
+    return p ? { x, y: chart.scales.y.getValueForPixel(p.y) } : null;
 }
 
 /** Everything the readout and crosshair show at time x */
@@ -359,12 +354,13 @@ function valuesAt(chart, x) {
     const members = [], band = [];
     chart.data.datasets.forEach((ds, i) => {
         if (!chart.isDatasetVisible(i)) return;
-        const p = pointAt(ds, x);
+        if (ds._band && !/P(10|90)$/.test(ds.label)) return;
+        const p = valueAt(chart, i, x);
         if (!p) return;
         if (ds._overlay) out.overlays.push({ label: ds.label.replace(' Mean', ''), color: ds.borderColor, p });
         else if (ds.label === 'Mean') out.mean = p;
         else if (ds.label === 'RRFS') out.rrfs = p;
-        else if (ds._band) { if (/P(10|90)$/.test(ds.label)) band.push(p.y); }
+        else if (ds._band) band.push(p.y);
         else members.push(p.y);
     });
     // Member min/max when lines are shown, else the outer P10-P90 band
@@ -373,11 +369,20 @@ function valuesAt(chart, x) {
     return out;
 }
 
-/** Rest state shows the forecast at "now" (clamped into the run) */
-function restX(chart) {
+/** Time span of the chart's data */
+function dataRange(chart) {
     const xs = chart.data.datasets.flatMap(ds => ds.data.length ? [ds.data[0].x, ds.data[ds.data.length - 1].x] : []);
-    return Math.min(Math.max(Date.now(), Math.min(...xs)), Math.max(...xs));
+    return [Math.min(...xs), Math.max(...xs)];
 }
+
+const clampTo = (x, [lo, hi]) => Math.min(Math.max(x, lo), hi);
+
+/** Rest state shows the forecast at "now" (clamped into the run) */
+const restX = chart => clampTo(snap(Date.now()), dataRange(chart));
+
+const fmtReadoutTime = x => new Date(x).toLocaleString('en-US', {
+    weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+});
 
 function renderReadout(chart) {
     const el = document.getElementById(`readout-${chart.$param}`);
@@ -386,7 +391,7 @@ function renderReadout(chart) {
     const x = live ? chart.$scrubX : restX(chart);
     const v = valuesAt(chart, x);
     const f = y => formatValue(chart.$type, y);
-    const hours = Math.round((x - Date.now()) / HOUR);
+    const hours = Math.round((x - Date.now()) / STEP) / 2;
     const when = !live ? 'Now' : hours === 0 ? 'now' : hours > 0 ? `+${hours}h` : `\u2212${-hours}h`;
 
     const item = (label, value, color) => `<div class="ro-item">
@@ -399,13 +404,27 @@ function renderReadout(chart) {
     for (const o of v.overlays) items.push(item(o.label, f(o.p.y), o.color));
 
     el.classList.toggle('live', live);
-    el.innerHTML = `<div class="ro-time"><span class="ro-when">${when}</span><span class="ro-at">${fmtTime(x)}</span></div>
+    el.innerHTML = `<div class="ro-time"><span class="ro-when">${when}</span><span class="ro-at">${fmtReadoutTime(x)}</span></div>
         <div class="ro-items">${items.join('')}</div>`;
 }
 
-/** Vertical crosshair plus a ring on each tracked line while scrubbing */
+/** Pointer-driven scrub on a 30-min grid, with a vertical crosshair and a
+ *  ring on each tracked line */
 const crosshairPlugin = {
     id: 'crosshair',
+    afterEvent(chart, args) {
+        const e = args.event;
+        let x = chart.$scrubX;
+        // Chart.js reports touchstart/touchmove as mousedown/mousemove
+        if (e.type === 'mouseout') x = null;
+        else if (e.type === 'mousemove' || e.type === 'mousedown') {
+            x = clampTo(snap(chart.scales.x.getValueForPixel(e.x)), dataRange(chart));
+        } else return;
+        if (x === chart.$scrubX) return;
+        chart.$scrubX = x;
+        renderReadout(chart);
+        args.changed = true;
+    },
     afterDatasetsDraw(chart) {
         const x = chart.$scrubX;
         if (x == null) return;
