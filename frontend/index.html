@@ -38,7 +38,7 @@
         <div class="header-top">
             <h1 class="title" id="pageTitle">NYC SREF Ensemble Plumes</h1>
             <nav class="header-nav">
-                <a href="/radar" class="nav-link" title="Live radar map">Radar</a>
+                <a href="/radar" class="nav-link" title="Live radar map" aria-label="Radar"><span class="nav-text">Radar</span></a>
                 <button class="btn btn-ghost help-btn" id="helpBtn" title="What is this?" aria-label="Help">?</button>
             </nav>
         </div>
@@ -82,7 +82,7 @@
 
     <footer class="status-bar">
         <span id="status" role="status">Loading…</span>
-        <span id="lastUpdate"></span>
+        <span class="status-meta"><span id="lastUpdate"></span><span id="nextRun"></span></span>
     </footer>
 
     <dialog class="modal" id="helpDialog" aria-labelledby="helpTitle">

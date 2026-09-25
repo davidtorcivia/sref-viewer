@@ -36,6 +36,7 @@
     --chart-tick: #7b849a;
     --chart-mean: #ffffff;
     --chart-now: rgba(255, 255, 255, 0.45);
+    --chart-crosshair: rgba(255, 255, 255, 0.55);
     --tooltip-bg: rgba(14, 18, 27, 0.96);
     --tooltip-border: rgba(255, 255, 255, 0.1);
 
@@ -81,6 +82,7 @@
         --chart-tick: #6b7386;
         --chart-mean: #131722;
         --chart-now: rgba(15, 23, 42, 0.4);
+        --chart-crosshair: rgba(15, 23, 42, 0.5);
         --tooltip-bg: rgba(255, 255, 255, 0.97);
         --tooltip-border: rgba(15, 23, 42, 0.1);
     }
@@ -215,8 +217,11 @@ button {
 }
 
 .title .snow-alert::before {
-    content: '❄';
-    letter-spacing: 0;
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
 }
 
 @keyframes pulse {
@@ -278,11 +283,26 @@ button {
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--border)) inset;
 }
 
+/* Caret: the one directional mark used anywhere (no arrows) */
+.caret {
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 0.5em;
+    height: 0.5em;
+    margin: 0 0.35em;
+    border: solid currentColor;
+    border-width: 0 0.13em 0.13em 0;
+    transform: translateY(-0.12em) rotate(45deg);
+}
+
+.caret[data-dir="up"] { transform: translateY(0.12em) rotate(-135deg); }
+.caret[data-dir="left"] { transform: rotate(135deg); }
+.caret[data-dir="right"] { transform: rotate(-45deg); }
+
 /* Line icons drawn with masks so they follow currentColor; kept in CSS
    because JS rewrites these buttons' text (Share -> Copied!) */
 .nav-link::before,
-#shareBtn::before,
-#reloadBtn::before {
+#shareBtn::before {
     content: '';
     width: 16px;
     height: 16px;
@@ -301,9 +321,6 @@ button {
     --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1'/%3E%3Cpath d='M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1'/%3E%3C/svg%3E");
 }
 
-#reloadBtn {
-    --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 12a8 8 0 1 1-2.3-5.7'/%3E%3Cpath d='M20 4v5h-5'/%3E%3C/svg%3E");
-}
 
 .help-btn {
     width: var(--control-h);
@@ -532,6 +549,8 @@ select:disabled {
 .summary-bar .low-confidence { --c: var(--temp); }
 
 .summary-bar .trend-text {
+    display: inline-flex;
+    align-items: center;
     color: var(--text-dim);
     font-size: 0.85rem;
     font-variant-numeric: tabular-nums;
@@ -624,6 +643,12 @@ select:disabled {
 .ptype-text {
     color: var(--text-dim);
     font-size: 0.85rem;
+}
+
+.ptype-text .caret {
+    width: 0.42em;
+    height: 0.42em;
+    opacity: 0.7;
 }
 
 .ptype-bar {
@@ -799,23 +824,19 @@ select:disabled {
     font-weight: 500;
 }
 
-.unit-toggle {
+
+/* Compact segmented control inside card headers (kts | mph) */
+.seg-sm {
     align-self: center;
-    min-width: 30px;
-    min-height: 26px;
-    padding: 0 0.45rem;
-    border: none;
-    border-radius: 7px;
-    background: var(--track);
-    box-shadow: 0 0 0 1px var(--border-soft) inset;
-    color: var(--accent);
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: background-color 0.15s;
+    padding: 2px;
+    border-radius: 9px;
 }
 
-.unit-toggle:hover {
-    background: var(--accent-soft);
+.seg-sm button {
+    min-height: 24px;
+    padding: 0 0.55rem;
+    border-radius: 7px;
+    font-size: 0.75rem;
 }
 
 /* Core toggles: chips keyed by a color dot matching the lines they control */
@@ -869,10 +890,112 @@ select:disabled {
     background: var(--dot);
 }
 
+/* Scrub readout: values for the crosshair's time, above the plot so a
+   finger on the chart never covers them. Fixed height: no layout shift. */
+.chart-readout {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    height: 52px;
+    margin: 0.5rem 1.25rem 0;
+    padding: 0 0.85rem;
+    border-radius: 12px;
+    background: var(--surface2);
+    box-shadow: 0 0 0 1px var(--border-soft) inset;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    transition: background-color 0.15s, box-shadow 0.15s;
+}
+
+.chart-readout.live {
+    background: color-mix(in srgb, var(--type) 9%, var(--surface2));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--type) 30%, transparent) inset;
+}
+
+.ro-time {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    min-width: 4.6rem;
+    line-height: 1.2;
+}
+
+.ro-when {
+    color: var(--text-faint);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.chart-readout.live .ro-when {
+    color: var(--type);
+}
+
+.ro-at {
+    font-size: 0.92rem;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.ro-items {
+    display: flex;
+    gap: 1.1rem;
+    min-width: 0;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent);
+    padding-right: 20px;
+}
+
+.ro-item {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    line-height: 1.2;
+}
+
+.ro-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--text-faint);
+    font-size: 0.66rem;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.ro-label i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.ro-value {
+    font-size: 1rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+}
+
+.ro-item:first-child .ro-value {
+    color: var(--type);
+}
+
 .chart-body {
     position: relative;
     height: 320px;
     padding: 0.5rem 1rem 0.25rem 0.6rem;
+}
+
+/* Vertical pans still scroll the page; horizontal drags scrub the chart */
+.chart-body canvas {
+    touch-action: pan-y;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
 }
 
 .chart-card.featured .chart-body {
@@ -1026,9 +1149,26 @@ select:disabled {
     white-space: nowrap;
 }
 
-#lastUpdate {
+.status-meta {
+    display: flex;
     flex: 0 0 auto;
+    gap: 0.9rem;
     color: var(--text-faint);
+}
+
+#nextRun:empty {
+    display: none;
+}
+
+#nextRun::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 0.45rem;
+    border-radius: 50%;
+    background: var(--accent);
+    vertical-align: 0.1em;
 }
 
 .spinner {
@@ -1246,10 +1386,21 @@ select:disabled {
         min-height: 34px;
     }
 
-    .unit-toggle {
-        min-width: 36px;
-        min-height: 30px;
+    .chart-readout {
+        margin: 0.4rem 0.75rem 0;
+        padding: 0 0.7rem;
+        gap: 0.8rem;
     }
+
+    .ro-items {
+        gap: 0.9rem;
+    }
+
+    .seg-sm button {
+        min-height: 30px;
+        padding: 0 0.7rem;
+    }
+
 
     .summary-row {
         display: grid;
@@ -1293,6 +1444,25 @@ select:disabled {
 
     .summary-row {
         grid-template-columns: repeat(2, 1fr);
+    }
+
+    #lastUpdate {
+        display: none;
+    }
+
+    .title {
+        font-size: 0.97rem;
+        letter-spacing: -0.02em;
+    }
+
+    /* Icon-only Radar button keeps the title on one line */
+    .header-nav .nav-text {
+        display: none;
+    }
+
+    .header-nav .nav-link {
+        width: var(--control-h);
+        padding: 0;
     }
 
     .chart-actions {

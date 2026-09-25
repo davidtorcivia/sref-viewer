@@ -194,6 +194,9 @@
         }
 
         .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
             color: var(--accent);
             text-decoration: none;
         }
@@ -210,7 +213,7 @@
         <div id="loginView">
             <div class="admin-header">
                 <h1>Admin Login</h1>
-                <a href="/" class="back-link">← Back to site</a>
+                <a href="/" class="back-link"><span class="caret" data-dir="left"></span>Back to site</a>
             </div>
 
             <div id="loginError" class="alert alert-error" style="display: none;"></div>
@@ -235,7 +238,7 @@
             <div class="admin-header">
                 <h1>Site Settings</h1>
                 <div>
-                    <a href="/" class="back-link" style="margin-right: 1rem;">← Back to site</a>
+                    <a href="/" class="back-link" style="margin-right: 1rem;"><span class="caret" data-dir="left"></span>Back to site</a>
                     <button class="btn btn-secondary" id="logoutBtn">Logout</button>
                 </div>
             </div>

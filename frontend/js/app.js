@@ -4,7 +4,7 @@
 
 import {
     CONFIG, MODELS, store, isRetired, getLatestRunWithDate, previousCycle,
-    isMobile, toggleWindUnit, getWindUnit, convertWind
+    isMobile, setWindUnit, getWindUnit, convertWind, formatValue, cycleEpoch
 } from './config.js?v=__V__';
 import { fetchModelData, hasSnowForecast, getEnsembleStats } from './api.js?v=__V__';
 import { createChart, toggleCore, destroyAllCharts, exportChartPng } from './charts.js?v=__V__';
@@ -31,6 +31,7 @@ const state = {
     chartViewMode: store.get('sref-chart-view-mode') || (isMobile() ? 'bands' : 'spaghetti'),
     siteName: null,
     load: null,                    // AbortController of the load in progress
+    following: true,               // showing the latest run: auto-advance to new ones
 };
 
 const COMPARE_CYCLES = 3;
@@ -56,7 +57,7 @@ function setPressed(buttons, isOn) {
 // ============ Initialization ============
 function init() {
     for (const id of ['pageTitle', 'mainContent', 'stationBtns', 'customStation', 'dateInput', 'runSelect',
-        'timeDisplay', 'reloadBtn', 'weatherSummary', 'trendText', 'status', 'lastUpdate', 'helpDialog']) {
+        'timeDisplay', 'reloadBtn', 'weatherSummary', 'trendText', 'status', 'lastUpdate', 'nextRun', 'helpDialog']) {
         elements[id] = $(id);
     }
     elements.defaultTitle = elements.pageTitle.textContent.trim();
@@ -97,7 +98,11 @@ function init() {
     });
 
     updateTimeDisplay();
-    setInterval(updateTimeDisplay, 60000);
+    setInterval(() => {
+        updateTimeDisplay();
+        checkForNewRun();
+    }, 60000);
+    document.addEventListener('visibilitychange', checkForNewRun);
 
     // Rebuild on width changes only: mobile browsers fire resize when the
     // address bar shows/hides, and rebuilding mid-scroll causes jank
@@ -150,7 +155,49 @@ function syncControls() {
     // The address bar pins run/date only when they aren't the latest, so a
     // reload or bookmark keeps following new runs
     const latest = getLatestRunWithDate(state.model);
-    history.replaceState(null, '', shareUrl(latest.run !== state.run || latest.date !== state.date));
+    state.following = latest.run === state.run && latest.date === state.date;
+    history.replaceState(null, '', shareUrl(!state.following));
+}
+
+// ============ New runs ============
+let probing = false;
+
+/**
+ * While the latest run is on screen, move to the next one once it's out.
+ * "Ready" is an estimate, so probe one param first: never swap a good run
+ * for an empty one.
+ */
+async function checkForNewRun() {
+    elements.dateInput.max = new Date().toISOString().slice(0, 10);
+    if (document.hidden || !state.following || probing) return;
+    const { model, station } = state;
+    const latest = getLatestRunWithDate(model);
+    if (latest.run === state.run && latest.date === state.date) return;
+    probing = true;
+    try {
+        const data = await fetchModelData(MODELS[model].apiBase, station, latest.run, 'Total-QPF', latest.date);
+        // The user may have moved on while the probe ran
+        if (!data || !state.following || state.model !== model || state.station !== station) return;
+        Object.assign(state, latest);
+        loadAllCharts();
+    } catch { /* not published yet: try again next minute */ }
+    finally { probing = false; }
+}
+
+/** "Next run 21Z ~8:20 PM" from the model's cycle spacing and ready lag */
+function renderNextRun() {
+    const model = MODELS[state.model];
+    const latest = getLatestRunWithDate(state.model);
+    const next = previousCycle(state.model, latest.date, latest.run, -1);
+    const cycle = cycleEpoch(next.date, next.run);
+    if (model.retiredAt && cycle >= model.retiredAt) {
+        elements.nextRun.textContent = `${model.label} retired`;
+        return;
+    }
+    const readyAt = new Date(cycle + model.readyLagHours * 3600000);
+    elements.nextRun.textContent = `Next ${next.run}Z ~${readyAt.toLocaleTimeString('en-US', {
+        hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+    })}`;
 }
 
 function shareUrl(pinRun = true) {
@@ -261,8 +308,10 @@ function buildLayout() {
                             <div class="chart-header">
                                 <div class="chart-title-area">
                                     <h3 class="chart-title">${info.name}</h3>
-                                    <div class="chart-subtitle" id="unit-${param}">${isWind ? getWindUnit() : info.unit}</div>
-                                    ${isWind ? '<button class="unit-toggle" id="wind-unit-btn" title="Toggle kts/mph" aria-label="Toggle wind unit">↔</button>' : ''}
+                                    ${isWind ? `
+                                        <div class="seg seg-sm" id="wind-unit" role="group" aria-label="Wind unit">
+                                            ${['kts', 'mph'].map(u => `<button class="${u === getWindUnit() ? 'active' : ''}" aria-pressed="${u === getWindUnit()}" data-unit="${u}">${u}</button>`).join('')}
+                                        </div>` : `<div class="chart-subtitle">${info.unit}</div>`}
                                 </div>
                                 <div class="chart-actions">
                                     ${model.cores.map(core => `
@@ -270,6 +319,7 @@ function buildLayout() {
                                     `).join('')}
                                 </div>
                             </div>
+                            <div class="chart-readout" id="readout-${param}"></div>
                             <div class="chart-body">
                                 <div class="loading" id="loading-${param}">
                                     <div class="skeleton skeleton-chart"></div>
@@ -284,7 +334,7 @@ function buildLayout() {
                                         <span class="summary-label">${label}</span>
                                         <span class="summary-value ${info.type}" id="${key}-${param}">--</span>
                                     </div>`).join('')}
-                                <button class="download-btn" data-param="${param}" title="Download as PNG">⬇ Save</button>
+                                <button class="download-btn" data-param="${param}" title="Download as PNG"><span class="caret" data-dir="down"></span>Save</button>
                             </div>
                         </div>
                     `;
@@ -325,8 +375,11 @@ function attachEventHandlers() {
         });
     });
 
-    $('wind-unit-btn')?.addEventListener('click', () => {
-        $('unit-3h-10mWND').textContent = toggleWindUnit();
+    $('wind-unit')?.addEventListener('click', e => {
+        const unit = e.target.dataset.unit;
+        if (!unit || unit === getWindUnit()) return;
+        setWindUnit(unit);
+        setPressed($('wind-unit').querySelectorAll('button'), b => b.dataset.unit === unit);
         const data = state.data['3h-10mWND'];
         if (data) {
             drawChart('3h-10mWND', data);
@@ -419,6 +472,7 @@ async function loadAllCharts() {
         const ok = results.some(Boolean);
         setStatus(ok ? `${label} • ${station} • ${run}Z ${date}`
             : `No ${label} data for ${station} ${run}Z ${date}. The run may not be published yet.`);
+        renderNextRun();
         elements.lastUpdate.textContent = `Updated ${new Date().toLocaleTimeString('en-US', {
             hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
         })} ET`;
@@ -455,11 +509,7 @@ function updateSummary(param, data) {
     if (!stats || !summaryEl) return;
 
     const type = CONFIG.params[param].type;
-    const fmt = v => {
-        if (type === 'temp') return v.toFixed(0) + '°';
-        if (type === 'wind') return convertWind(v).toFixed(0);
-        return v.toFixed(2);
-    };
+    const fmt = v => formatValue(type, type === 'wind' ? convertWind(v) : v);
     $(`mean-${param}`).textContent = stats.mean !== null ? fmt(stats.mean) : '--';
     $(`max-${param}`).textContent = fmt(stats.max);
     $(`min-${param}`).textContent = fmt(stats.min);
@@ -573,6 +623,13 @@ async function ensureRunData({ run, date }, params, signal) {
     }));
 }
 
+function caret(dir) {
+    const el = document.createElement('span');
+    el.className = 'caret';
+    el.dataset.dir = dir;
+    return el;
+}
+
 const trendParam = () => state.hasSnow ? 'Total-SNO' : 'Total-QPF';
 
 async function fetchPreviousRuns(signal) {
@@ -607,7 +664,7 @@ function updateWeatherSummary(hasData) {
     const snow = getEnsembleStats(state.data['Total-SNO'], false);
     const rain = getEnsembleStats(state.data['Total-QPF'], false);
     let lead, stats, type, digits;
-    if (snow && snow.max > 0.5) [lead, stats, type, digits] = ['❄ Snow likely:', snow, 'snow', 1];
+    if (snow && snow.max > 0.5) [lead, stats, type, digits] = ['Snow likely:', snow, 'snow', 1];
     else if (rain && rain.max > 0.1) [lead, stats, type, digits] = ['Rain likely:', rain, 'precip', 2];
     else {
         el.textContent = 'Dry conditions expected';
@@ -628,8 +685,8 @@ function updateTrendText() {
     const delta = now.mean - before.mean;
     if (Math.abs(delta) < (state.hasSnow ? 0.1 : 0.05)) return;
     const sign = delta > 0 ? '+' : '';
-    elements.trendText.textContent =
-        `${delta > 0 ? '↑' : '↓'} trending ${delta > 0 ? 'higher' : 'lower'} vs ${prev.run}Z (${sign}${delta.toFixed(state.hasSnow ? 1 : 2)} in)`;
+    elements.trendText.replaceChildren(caret(delta > 0 ? 'up' : 'down'),
+        `Trending ${delta > 0 ? 'higher' : 'lower'} vs ${prev.run}Z (${sign}${delta.toFixed(state.hasSnow ? 1 : 2)} in)`);
 }
 
 // ============ Precip Type (REFS) ============
@@ -642,7 +699,7 @@ const PTYPE_DEFS = [
 
 /**
  * Timeline strip of the dominant precip type per hour (>=40% of members)
- * plus transition text like "Rain Tue 7 PM → snow Tue 11 PM".
+ * plus transition text like "Rain Tue 7 PM > snow Tue 11 PM" (caret-joined).
  */
 async function loadPtypeStrip(request, signal) {
     const remove = () => $('ptypeStrip')?.remove();
@@ -686,9 +743,11 @@ async function loadPtypeStrip(request, signal) {
         strip = Object.assign(document.createElement('div'), { id: 'ptypeStrip', className: 'ptype-strip' });
         elements.weatherSummary.parentElement.appendChild(strip);
     }
-    const text = Object.assign(document.createElement('div'), {
-        className: 'ptype-text', textContent: 'P-type: ' + (events.slice(0, 3).join(' → ') || 'brief/mixed')
-    });
+    const text = Object.assign(document.createElement('div'), { className: 'ptype-text' });
+    const shown = events.slice(0, 3);
+    text.append('Precip type: ', ...(shown.length
+        ? shown.flatMap((ev, i) => i ? [caret('right'), ev] : [ev])
+        : ['brief/mixed']));
     const bar = Object.assign(document.createElement('div'), { className: 'ptype-bar' });
     for (const seg of segments) {
         const el = Object.assign(document.createElement('div'), {

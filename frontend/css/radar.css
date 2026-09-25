@@ -116,6 +116,17 @@ body {
     align-items: center;
 }
 
+/* Caret: the one directional mark (matches styles.css) */
+.caret {
+    display: inline-block;
+    width: 0.5em;
+    height: 0.5em;
+    margin-right: 0.45em;
+    border: solid currentColor;
+    border-width: 0 0.14em 0.14em 0;
+    transform: rotate(135deg);
+}
+
 /* ============ Bottom Controls ============ */
 .radar-controls {
     position: fixed;
@@ -151,6 +162,22 @@ body {
     align-items: center;
     justify-content: center;
     transition: opacity 0.15s;
+}
+
+.play-btn::before {
+    content: '';
+    width: 16px;
+    height: 16px;
+    margin-left: 2px;
+    background: currentColor;
+    -webkit-mask: var(--icon) center / contain no-repeat;
+    mask: var(--icon) center / contain no-repeat;
+    --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 2.5v11a.8.8 0 0 0 1.2.7l9-5.5a.8.8 0 0 0 0-1.4l-9-5.5A.8.8 0 0 0 4 2.5z'/%3E%3C/svg%3E");
+}
+
+.play-btn.playing::before {
+    margin-left: 0;
+    --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='2' width='3.6' height='12' rx='1'/%3E%3Crect x='9.4' y='2' width='3.6' height='12' rx='1'/%3E%3C/svg%3E");
 }
 
 .play-btn:hover {
@@ -198,6 +225,7 @@ body {
 
 .scrubber-labels {
     display: flex;
+    gap: 0.6rem;
     justify-content: space-between;
     align-items: center;
     font-size: 0.8rem;
@@ -205,15 +233,18 @@ body {
 }
 
 .frame-time {
+    white-space: nowrap;
     font-variant-numeric: tabular-nums;
     color: var(--text);
     font-weight: 600;
 }
 
 .frame-badge {
+    white-space: nowrap;
+    font-size: 0.68rem;
     color: var(--text-dim);
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.02em;
 }
 
 .frame-badge.nowcast {

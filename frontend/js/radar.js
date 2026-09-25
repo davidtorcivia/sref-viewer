@@ -255,7 +255,7 @@ function frameInterval() {
 function play() {
     if (playing || frames.length === 0) return;
     playing = true;
-    els.playBtn.textContent = '❚❚';
+    els.playBtn.classList.add('playing');
     els.playBtn.setAttribute('aria-label', 'Pause animation');
     const step = () => {
         if (!playing) return;
@@ -278,7 +278,7 @@ function play() {
 function pause() {
     playing = false;
     clearTimeout(playTimer);
-    els.playBtn.textContent = '▶';
+    els.playBtn.classList.remove('playing');
     els.playBtn.setAttribute('aria-label', 'Play animation');
 }
 

@@ -2,19 +2,11 @@
  * Chart.js Configuration and Rendering
  * Handles all chart creation and updates
  */
-import { CONFIG, isMobile, isTouchDevice, convertWind, getWindUnit } from './config.js?v=__V__';
+import { CONFIG, isMobile, isTouchDevice, convertWind, getWindUnit, formatValue } from './config.js?v=__V__';
 import { getPercentileBands } from './api.js?v=__V__';
 
 // Store chart instances for cleanup
 const chartInstances = {};
-
-// Register custom tooltip positioner - offset 50px to the right of cursor
-Chart.Tooltip.positioners.rightOfCursor = function (elements, eventPosition) {
-    return {
-        x: eventPosition.x + 50,  // 50px to the right
-        y: eventPosition.y
-    };
-};
 
 /**
  * Get responsive chart options based on screen size
@@ -23,10 +15,7 @@ function getResponsiveOptions() {
     const mobile = isMobile();
     return {
         tickFontSize: mobile ? 10 : 11,
-        tooltipTitleSize: mobile ? 12 : 13,
-        tooltipBodySize: mobile ? 11 : 12,
         stepSize: mobile ? 12 : 6,
-        pointHoverRadius: mobile ? 10 : 5,
         meanLineWidth: mobile ? 5 : 4,
         memberLineWidth: mobile ? 1.8 : 1.4,
     };
@@ -45,10 +34,8 @@ function getThemeColors() {
         gridColor: token('--chart-grid'),
         tickColor: token('--chart-tick'),
         meanLineColor: token('--chart-mean'),
-        tooltipBg: token('--tooltip-bg'),
-        tooltipText: token('--text'),
-        tooltipDim: token('--text-dim'),
-        tooltipBorder: token('--tooltip-border'),
+        surface: token('--surface'),
+        crosshair: token('--chart-crosshair'),
         nowLineColor: token('--chart-now'),
         nowLabelBg: token('--surface'),
         nowLabelText: token('--text-dim'),
@@ -71,7 +58,6 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
 
     // Check if this is wind data - we may need to convert
     const isWind = info.type === 'wind';
-    const windUnit = isWind ? getWindUnit() : null;
 
     // 1. Find the time range from main data to truncate overlays
     let minTime = Infinity, maxTime = -Infinity;
@@ -104,10 +90,11 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 borderDash: [6, 4],
                 pointRadius: 0,
                 pointHitRadius: 20,
-                pointHoverRadius: 4,
+                pointHoverRadius: 0,
                 tension: 0.3,
                 fill: false,
                 order: 5,
+                _overlay: true,
             });
         }
     }
@@ -152,6 +139,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     borderWidth: 0,
                     pointRadius: 0,
                     pointHitRadius: 0,
+                    pointHoverRadius: 0,
                     tension: 0.3,
                     fill: false,
                     order: layer.order,
@@ -165,6 +153,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     borderWidth: 1,
                     pointRadius: 0,
                     pointHitRadius: 0,
+                    pointHoverRadius: 0,
                     tension: 0.3,
                     fill: {
                         target: datasets.length - 1,
@@ -193,7 +182,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     borderWidth: responsive.meanLineWidth,
                     pointRadius: 0,
                     pointHitRadius: 20,
-                    pointHoverRadius: responsive.pointHoverRadius + 2,
+                    pointHoverRadius: 0,
                     tension: 0.3,
                     fill: false,
                     order: 0,
@@ -225,7 +214,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
                 pointRadius: 0,
                 pointHitRadius: 20,
-                pointHoverRadius: isMean ? responsive.pointHoverRadius + 2 : responsive.pointHoverRadius,
+                pointHoverRadius: 0,
                 tension: 0.3,
                 fill: false,
                 order: isMean ? 0 : 1,
@@ -245,20 +234,21 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
         return null;
     }
 
-    const ctx = canvas.getContext('2d');
-    const displayUnit = isWind ? windUnit : info.unit;
-
-    chartInstances[param] = new Chart(ctx, {
+    const touch = isTouchDevice();
+    const chart = chartInstances[param] = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: { datasets },
+        plugins: [crosshairPlugin],
         options: {
             responsive: true,
             maintainAspectRatio: false,
             animation: { duration: 300 },
-            interaction: {
-                intersect: false,
-                mode: 'index',
-            },
+            // Nearest in time, not by array index: REFS mixes hourly RRFS
+            // with 3-hourly ensemble series
+            interaction: { mode: 'nearest', axis: 'x', intersect: false },
+            // Touch: no compat mouse/click events, which would re-arm the
+            // crosshair at the tap point after the finger lifts
+            events: touch ? ['touchstart', 'touchmove', 'mouseout'] : ['mousemove', 'mouseout', 'touchstart', 'touchmove'],
             plugins: {
                 legend: { display: false },
                 annotation: {
@@ -285,58 +275,16 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                         }
                     }
                 },
+                // The floating box sat under the finger on phones: values go
+                // to the readout strip above the plot instead
                 tooltip: {
-                    enabled: true,
-                    // On touch devices the +50px offset pushes the tooltip
-                    // off-screen - use the default positioner there
-                    position: isTouchDevice() ? 'nearest' : 'rightOfCursor',
-                    backgroundColor: theme.tooltipBg,
-                    titleColor: theme.tooltipDim,
-                    bodyColor: theme.tooltipText,
-                    borderColor: theme.tooltipBorder,
-                    borderWidth: 1,
-                    cornerRadius: 10,
-                    caretSize: 0,
-                    titleFont: { size: responsive.tooltipTitleSize - 1, weight: '600' },
-                    titleMarginBottom: 8,
-                    bodyFont: { size: responsive.tooltipBodySize },
-                    bodySpacing: 4,
-                    padding: 12,
-                    displayColors: true,
-                    usePointStyle: true,
-                    boxWidth: 8,
-                    boxHeight: 8,
-                    filter: (item) => {
-                        // Hide band boundary lines from tooltip
-                        if (item.dataset._band) {
-                            return false;
-                        }
-                        // On small screens a 26-member list is unreadable -
-                        // show only the Mean and comparison-run overlays
-                        if (isMobile() && item.dataset.label &&
-                            !item.dataset.label.includes('Mean')) {
-                            return false;
-                        }
-                        return true;
-                    },
-                    itemSort: (a, b) => {
-                        const aIsMean = a.dataset.label.includes('Mean');
-                        const bIsMean = b.dataset.label.includes('Mean');
-                        if (aIsMean && !bIsMean) return -1;
-                        if (!aIsMean && bIsMean) return 1;
-                        return a.dataset.label.localeCompare(b.dataset.label);
-                    },
-                    callbacks: {
-                        title: (items) => {
-                            if (items.length === 0) return '';
-                            const d = new Date(items[0].parsed.x);
-                            return d.toLocaleString('en-US', {
-                                weekday: 'short', month: 'short', day: 'numeric',
-                                hour: 'numeric', minute: '2-digit',
-                                timeZone: 'America/New_York'
-                            }) + ' ET';
-                        },
-                        label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(info.type === 'wind' ? 0 : 2)} ${displayUnit}`
+                    enabled: false,
+                    external: ({ chart, tooltip }) => {
+                        const active = tooltip.getActiveElements();
+                        chart.$scrubX = active.length
+                            ? chart.data.datasets[active[0].datasetIndex].data[active[0].index].x
+                            : null;
+                        renderReadout(chart);
                     }
                 }
             },
@@ -355,13 +303,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                         padding: 8,
                         maxRotation: 0,
                         font: { size: responsive.tickFontSize },
-                        callback: function (value) {
-                            const d = new Date(value);
-                            return d.toLocaleString('en-US', {
-                                weekday: 'short', hour: 'numeric',
-                                timeZone: 'America/New_York'
-                            });
-                        }
+                        callback: value => fmtTime(value)
                     }
                 },
                 y: {
@@ -383,9 +325,118 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             }
         }
     });
+    chart.$type = info.type;
+    chart.$param = param;
+    chart.$theme = theme;
 
-    return chartInstances[param];
+    // Lifting the finger returns the readout to "now"
+    canvas.ontouchend = canvas.ontouchcancel = () => {
+        chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+        chart.draw();
+    };
+    renderReadout(chart);
+    return chart;
 }
+
+// ============ Scrub readout ============
+const HOUR = 3600000;
+const fmtTime = x => new Date(x).toLocaleString('en-US', {
+    weekday: 'short', hour: 'numeric', timeZone: 'America/New_York'
+});
+
+/** The dataset's point nearest in time to x, if within 1.6h */
+function pointAt(ds, x) {
+    let best = null;
+    for (const p of ds.data) {
+        if (!best || Math.abs(p.x - x) < Math.abs(best.x - x)) best = p;
+    }
+    return best && Math.abs(best.x - x) <= 1.6 * HOUR ? best : null;
+}
+
+/** Everything the readout and crosshair show at time x */
+function valuesAt(chart, x) {
+    const out = { mean: null, rrfs: null, lo: null, hi: null, bands: false, overlays: [] };
+    const members = [], band = [];
+    chart.data.datasets.forEach((ds, i) => {
+        if (!chart.isDatasetVisible(i)) return;
+        const p = pointAt(ds, x);
+        if (!p) return;
+        if (ds._overlay) out.overlays.push({ label: ds.label.replace(' Mean', ''), color: ds.borderColor, p });
+        else if (ds.label === 'Mean') out.mean = p;
+        else if (ds.label === 'RRFS') out.rrfs = p;
+        else if (ds._band) { if (/P(10|90)$/.test(ds.label)) band.push(p.y); }
+        else members.push(p.y);
+    });
+    // Member min/max when lines are shown, else the outer P10-P90 band
+    const range = members.length ? members : band;
+    if (range.length) Object.assign(out, { lo: Math.min(...range), hi: Math.max(...range), bands: !members.length });
+    return out;
+}
+
+/** Rest state shows the forecast at "now" (clamped into the run) */
+function restX(chart) {
+    const xs = chart.data.datasets.flatMap(ds => ds.data.length ? [ds.data[0].x, ds.data[ds.data.length - 1].x] : []);
+    return Math.min(Math.max(Date.now(), Math.min(...xs)), Math.max(...xs));
+}
+
+function renderReadout(chart) {
+    const el = document.getElementById(`readout-${chart.$param}`);
+    if (!el) return;
+    const live = chart.$scrubX != null;
+    const x = live ? chart.$scrubX : restX(chart);
+    const v = valuesAt(chart, x);
+    const f = y => formatValue(chart.$type, y);
+    const hours = Math.round((x - Date.now()) / HOUR);
+    const when = !live ? 'Now' : hours === 0 ? 'now' : hours > 0 ? `+${hours}h` : `\u2212${-hours}h`;
+
+    const item = (label, value, color) => `<div class="ro-item">
+        <span class="ro-label">${color ? `<i style="background:${color}"></i>` : ''}${label}</span>
+        <span class="ro-value">${value}</span></div>`;
+    const items = [];
+    if (v.mean) items.push(item('Mean', f(v.mean.y)));
+    if (v.lo !== null) items.push(item(v.bands ? 'P10\u2013P90' : 'Range', `${f(v.lo)}\u2013${f(v.hi)}`));
+    if (v.rrfs) items.push(item('RRFS', f(v.rrfs.y)));
+    for (const o of v.overlays) items.push(item(o.label, f(o.p.y), o.color));
+
+    el.classList.toggle('live', live);
+    el.innerHTML = `<div class="ro-time"><span class="ro-when">${when}</span><span class="ro-at">${fmtTime(x)}</span></div>
+        <div class="ro-items">${items.join('')}</div>`;
+}
+
+/** Vertical crosshair plus a ring on each tracked line while scrubbing */
+const crosshairPlugin = {
+    id: 'crosshair',
+    afterDatasetsDraw(chart) {
+        const x = chart.$scrubX;
+        if (x == null) return;
+        const { ctx, chartArea, scales } = chart;
+        const px = scales.x.getPixelForValue(x);
+        const v = valuesAt(chart, x);
+        const t = chart.$theme;
+
+        ctx.save();
+        ctx.strokeStyle = t.crosshair;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px, chartArea.top);
+        ctx.lineTo(px, chartArea.bottom);
+        ctx.stroke();
+
+        const ring = (p, color) => {
+            ctx.beginPath();
+            ctx.arc(scales.x.getPixelForValue(p.x), scales.y.getPixelForValue(p.y), 5, 0, Math.PI * 2);
+            ctx.fillStyle = t.surface;
+            ctx.fill();
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = color;
+            ctx.stroke();
+        };
+        for (const o of v.overlays) ring(o.p, o.color);
+        if (v.rrfs) ring(v.rrfs, CONFIG.memberColors.RRFS);
+        if (v.mean) ring(v.mean, t.meanLineColor);
+        ctx.restore();
+    }
+};
 
 /**
  * Toggle visibility of ensemble core (ARW, NMB, or Mean)

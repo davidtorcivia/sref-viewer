@@ -76,10 +76,17 @@ export const preferences = {
     windUnit: store.get('sref-wind-unit') === 'mph' ? 'mph' : 'kts'
 };
 
-export function toggleWindUnit() {
-    preferences.windUnit = preferences.windUnit === 'kts' ? 'mph' : 'kts';
-    store.set('sref-wind-unit', preferences.windUnit);
-    return preferences.windUnit;
+export function setWindUnit(unit) {
+    preferences.windUnit = unit;
+    store.set('sref-wind-unit', unit);
+}
+
+/** One display format per variable (wind values already in the chosen unit) */
+export function formatValue(type, v) {
+    if (type === 'temp') return Math.round(v) + '°';
+    if (type === 'wind') return Math.round(v).toString();
+    if (type === 'snow') return v.toFixed(1);
+    return v.toFixed(2);
 }
 
 /** Knots -> the preferred wind unit */
