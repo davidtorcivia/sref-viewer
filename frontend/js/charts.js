@@ -326,7 +326,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
         renderReadout(chart);
         chart.draw();
     };
-    renderReadout(chart);
+    chart.draw();
     return chart;
 }
 
@@ -426,6 +426,7 @@ const crosshairPlugin = {
         args.changed = true;
     },
     afterDatasetsDraw(chart) {
+        renderReadout(chart);
         const x = chart.$scrubX;
         if (x == null) return;
         const { ctx, chartArea, scales } = chart;
