@@ -25,6 +25,11 @@ import { applySiteSettings } from './site.js?v=__V__';
 // pre-renders the NYC viewport for each new frame; style options live there.
 const TILE_SIZE = 256;    // Backend requests 512px tiles; declaring 256 renders them at 2x density
 const RADAR_OPACITY = 0.75;
+const SAT_OPACITY = 0.8;
+// Radar colors changed with the backend TILE_STYLE: a new value keeps browsers
+// from mixing hour-cached tiles of the old scheme into the loop
+const TILE_STYLE_V = 'twc';
+const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past this instead of fetching
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
 const REFRESH_MS = 2 * 60 * 1000;   // Re-fetch frame index
@@ -41,6 +46,11 @@ const SPEEDS = [
 const NYC = { center: [-73.95, 40.75], zoom: 8.2 };
 const POSITION_KEY = 'sref-radar-position';
 const SPEED_KEY = 'sref-radar-speed';
+const OVERLAY_KEY = 'sref-radar-overlay';
+// Overlay -> extractor field name, and how opaque each field draws
+const FIELD_OVERLAYS = { temp: 'tmp', dewpoint: 'dpt', wind: 'wind', clouds: 'cloud' };
+const FIELD_OPACITY = { tmp: 0.6, dpt: 0.6, wind: 0.75, cloud: 0.9 };
+const OVERLAYS = ['radar', 'satellite', 'both', ...Object.keys(FIELD_OVERLAYS)];
 
 function savedPosition() {
     try {
@@ -64,10 +74,19 @@ const els = {
     frameTime: document.getElementById('frameTime'),
     frameBadge: document.getElementById('frameBadge'),
     updated: document.getElementById('radarUpdated'),
+    fieldUnit: document.getElementById('fieldUnit'),
+    fieldBar: document.getElementById('fieldBar'),
+    fieldAxis: document.getElementById('fieldAxis'),
+    fieldCaption: document.getElementById('fieldCaption'),
+    legend: document.getElementById('legend'),
+    overlay: document.getElementById('overlaySelect'),
 };
 
 let map = null;
-let frames = [];          // [{ time, path, nowcast }]
+let overlay = OVERLAYS.includes(store.get(OVERLAY_KEY)) ? store.get(OVERLAY_KEY) : 'radar';
+let frames = [];          // [{ time, path, nowcast, sat, field }]
+let mapReady = false;
+let backdropId = null;    // latest satellite frame under the radar in 'both'
 let currentFrame = 0;
 let playing = false;
 let playTimer = null;
@@ -76,6 +95,7 @@ let readyIds = new Set();         // layers whose tiles have arrived
 let pending = [];                 // frames waiting for a load slot
 let staleTwins = new Map();       // replacement layer id -> superseded layer id kept until ready
 let inFlight = 0;
+const loadWaiters = new Map();    // layer id -> releases its load slot
 let speedIdx = (() => {
     const saved = store.get(SPEED_KEY);
     const idx = SPEEDS.findIndex(s => String(s.mult) === saved);
@@ -83,27 +103,85 @@ let speedIdx = (() => {
 })();
 
 function tileUrl(frame) {
-    const url = `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png`;
+    if (frame.field) return `/api/radar/field/${frame.field}.png`;
+    if (frame.sat) return `/api/radar/sat/${frame.time}/{z}/{x}/{y}.png`;
+    const url = `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png?v=${TILE_STYLE_V}`;
     // A nowcast frame shares its time with the observed frame it later
     // becomes; a distinct URL keeps caches from serving the forecast as
     // the observation.
-    return frame.nowcast ? `${url}?fc=${frame.basis}` : url;
+    return frame.nowcast ? `${url}&fc=${frame.basis}` : url;
 }
 
 // Nowcast frames are regenerated from each new observation, so their
 // identity includes the observation they were derived from.
 function layerId(frame) {
+    if (frame.sat) return `sat-${frame.time}`;
+    if (frame.field) return `${frame.name}-${frame.time}-c${frame.basis}`;
     return frame.nowcast ? `radar-${frame.time}-fc${frame.basis}` : `radar-${frame.time}`;
 }
 
-async function fetchFrames() {
+// Animated frames for the chosen overlay, plus the static satellite
+// backdrop shown under the radar in 'both'
+async function fetchFrames(which) {
+    if (FIELD_OVERLAYS[which]) return { frames: await fetchFieldFrames(FIELD_OVERLAYS[which]), backdrop: null };
     const res = await fetch('/api/radar/frames');
     if (!res.ok) throw new Error(`Frame index HTTP ${res.status}`);
     const data = await res.json();
+    const sat = (data.satellite?.infrared || []).map(f => ({ ...f, nowcast: false, sat: true }));
+    if (which === 'satellite') return { frames: sat, backdrop: null };
     const past = (data.radar?.past || []).map(f => ({ ...f, nowcast: false }));
     const basis = past.length ? past[past.length - 1].time : 0;
     const nowcast = (data.radar?.nowcast || []).map(f => ({ ...f, nowcast: true, basis }));
-    return past.concat(nowcast);
+    return { frames: past.concat(nowcast), backdrop: which === 'both' ? sat[sat.length - 1] || null : null };
+}
+
+// Hourly RRFS field, one extractor-rendered Web Mercator image per forecast hour
+async function fetchFieldFrames(name) {
+    const res = await fetch('/api/radar/field');
+    if (!res.ok) throw new Error(`Field index HTTP ${res.status}`);
+    const d = await res.json();
+    renderFieldLegend(d.fields[name]);
+    const run = Date.UTC(+d.date.slice(0, 4), +d.date.slice(4, 6) - 1, +d.date.slice(6, 8), +d.cycle) / 1000;
+    const now = Date.now() / 1000;
+    return d.hours.map(h => ({
+        time: run + h * 3600, basis: run, fh: h, cycle: d.cycle, bounds: d.bounds,
+        name, field: `${name}/${d.date}/${d.cycle}/${h}`, nowcast: run + h * 3600 > now,
+    }));
+}
+
+// Legend bar and ticks from the same stops the extractor paints with
+function renderFieldLegend({ stops, unit, label, ticks }) {
+    const lo = stops[0][0];
+    const pct = v => `${((v - lo) / (stops[stops.length - 1][0] - lo) * 100).toFixed(2)}%`;
+    els.fieldBar.style.background = 'linear-gradient(to right, ' + stops.map(([v, [r, g, b, a]]) =>
+        `rgba(${r},${g},${b},${(a / 255).toFixed(2)}) ${pct(v)}`).join(', ') + ')';
+    // Match the map's light-mode cloud dimming
+    els.fieldBar.style.filter = unit === '%' && isLight ? 'brightness(0.6)' : '';
+    els.fieldAxis.replaceChildren(...ticks.map(t => {
+        const span = document.createElement('span');
+        span.style.left = pct(t);
+        span.textContent = t;
+        return span;
+    }));
+    els.fieldUnit.textContent = unit;
+    els.fieldCaption.textContent = `${label}, RRFS 3 km model`;
+}
+
+function sourceFor(frame) {
+    if (frame.field) {
+        const [w, s, e, n] = frame.bounds;
+        return { type: 'image', url: tileUrl(frame), coordinates: [[w, n], [e, n], [e, s], [w, s]] };
+    }
+    return frame.sat
+        ? { type: 'raster', tiles: [tileUrl(frame)], tileSize: TILE_SIZE, maxzoom: SAT_MAXZOOM,
+            attribution: 'Satellite &copy; NOAA GMGSI via <a href="https://librewxr.net/">LibreWXR</a>' }
+        : { type: 'raster', tiles: [tileUrl(frame)], tileSize: TILE_SIZE,
+            attribution: 'Radar &copy; <a href="https://librewxr.net/">LibreWXR</a> (CC-BY-4.0)' };
+}
+
+function opacityFor(id) {
+    const kind = id.split('-')[0];
+    return FIELD_OPACITY[kind] ?? (kind === 'sat' ? SAT_OPACITY : RADAR_OPACITY);
 }
 
 function labelLayerId() {
@@ -117,20 +195,17 @@ function addFrameLayer(frame) {
     // Insert below warning polygons (and labels) so alert outlines stay
     // visible on top of the radar.
     const beforeId = map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId();
-    map.addSource(id, {
-        type: 'raster',
-        tiles: [tileUrl(frame)],
-        tileSize: TILE_SIZE,
-        attribution: 'Radar &copy; <a href="https://librewxr.net/">LibreWXR</a> (CC-BY-4.0)'
-    });
+    map.addSource(id, sourceFor(frame));
     map.addLayer({
         id,
         type: 'raster',
         source: id,
         paint: {
-            'raster-opacity': frames[currentFrame] === frame ? RADAR_OPACITY : 0,
+            'raster-opacity': frames[currentFrame] === frame ? opacityFor(id) : 0,
             'raster-opacity-transition': { duration: 0 },
-            'raster-fade-duration': 0
+            'raster-fade-duration': 0,
+            // White clouds vanish on the light basemap: dim them to gray
+            ...(frame.name === 'cloud' && isLight ? { 'raster-brightness-max': 0.6 } : {})
         }
     }, beforeId);
     loadedLayerIds.add(id);
@@ -145,8 +220,9 @@ function waitForSource(id) {
         function onData(e) {
             if (e.sourceId === id && e.sourceDataType !== 'metadata' && map.isSourceLoaded(id)) done();
         }
-        function done() { clearTimeout(timer); map.off('sourcedata', onData); resolve(); }
+        function done() { clearTimeout(timer); map.off('sourcedata', onData); loadWaiters.delete(id); resolve(); }
         map.on('sourcedata', onData);
+        loadWaiters.set(id, done);
     });
 }
 
@@ -195,6 +271,7 @@ function syncLayers() {
 }
 
 function removeLayer(id) {
+    loadWaiters.get(id)?.();
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
     loadedLayerIds.delete(id);
@@ -224,7 +301,7 @@ function showFrame(index) {
     if (stale && isReady(currentFrame)) { removeLayer(stale); staleTwins.delete(curId); }
     for (const id of loadedLayerIds) {
         const show = (stale && !readyIds.has(curId)) ? id === stale : id === curId;
-        map.setPaintProperty(id, 'raster-opacity', show ? RADAR_OPACITY : 0);
+        map.setPaintProperty(id, 'raster-opacity', show ? opacityFor(id) : 0);
     }
     els.scrubber.value = String(currentFrame);
     updateFrameLabel();
@@ -235,10 +312,15 @@ function updateFrameLabel() {
     if (!frame) return;
     const d = new Date(frame.time * 1000);
     els.frameTime.textContent = d.toLocaleTimeString('en-US', {
+        // Model frames span two days
+        weekday: frame.field ? 'short' : undefined,
         hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
     }) + ' ET';
 
-    if (frame.nowcast) {
+    if (frame.field) {
+        els.frameBadge.textContent = `RRFS ${frame.cycle}Z +${frame.fh}h`;
+        els.frameBadge.classList.toggle('nowcast', frame.nowcast);
+    } else if (frame.nowcast) {
         const minsAhead = Math.round((frame.time * 1000 - Date.now()) / 60000);
         els.frameBadge.textContent = `FORECAST +${Math.max(minsAhead, 0)} min`;
         els.frameBadge.classList.add('nowcast');
@@ -361,10 +443,41 @@ async function loadAlerts() {
     }
 }
 
+// Static satellite frame kept beneath every radar layer
+function syncBackdrop(frame) {
+    const id = frame ? `backdrop-${frame.time}` : null;
+    if (id === backdropId) return;
+    // ponytail: old backdrop drops before the new one loads (a blink once an hour)
+    if (backdropId) { map.removeLayer(backdropId); map.removeSource(backdropId); }
+    backdropId = id;
+    if (!frame) return;
+    const firstRadar = map.getStyle().layers.find(l => loadedLayerIds.has(l.id));
+    map.addSource(id, sourceFor(frame));
+    map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': SAT_OPACITY, 'raster-fade-duration': 0 } },
+        firstRadar?.id ?? (map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId()));
+}
+
+function setOverlay(which) {
+    overlay = which;
+    store.set(OVERLAY_KEY, which);
+    els.overlay.value = which;
+    els.legend.dataset.overlay = FIELD_OVERLAYS[which] ? 'field' : which;
+    if (!mapReady) return;   // map 'load' picks it up
+    pause();
+    for (const id of [...loadedLayerIds]) removeLayer(id);
+    staleTwins.clear();
+    pending = [];
+    frames = [];
+    refreshFrames({ initial: true }).then(play);
+}
+
 async function refreshFrames({ initial = false } = {}) {
     try {
-        const newFrames = await fetchFrames();
-        if (!newFrames.length) throw new Error('No radar frames available');
+        const which = overlay;
+        const { frames: newFrames, backdrop } = await fetchFrames(which);
+        if (which !== overlay) return;   // overlay switched mid-fetch
+        syncBackdrop(backdrop);
+        if (!newFrames.length) throw new Error('No frames available');
 
         const latestPastIdx = (() => {
             const idx = newFrames.map(f => f.nowcast).indexOf(true);
@@ -382,7 +495,9 @@ async function refreshFrames({ initial = false } = {}) {
         showFrame(currentFrame);
 
         const latest = frames[latestPastIdx];
-        if (latest) {
+        if (frames[0].field) {
+            els.updated.textContent = `RRFS ${frames[0].cycle}Z run`;
+        } else if (latest) {
             const d = new Date(latest.time * 1000);
             els.updated.textContent = 'Updated ' + d.toLocaleTimeString('en-US', {
                 hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
@@ -391,7 +506,7 @@ async function refreshFrames({ initial = false } = {}) {
     } catch (err) {
         console.error('[RADAR]', err);
         if (initial) {
-            els.frameTime.textContent = 'Radar unavailable';
+            els.frameTime.textContent = `${els.overlay.selectedOptions[0].text} unavailable`;
             els.frameBadge.textContent = '';
         }
     }
@@ -444,6 +559,7 @@ function init() {
     });
 
     map.on('load', async () => {
+        mapReady = true;
         loadAlerts();
         setInterval(() => !document.hidden && loadAlerts(), ALERTS_REFRESH_MS);
         await refreshFrames({ initial: true });
@@ -463,6 +579,9 @@ function init() {
     });
 
     els.playBtn.addEventListener('click', () => playing ? pause() : play());
+
+    setOverlay(overlay);
+    els.overlay.addEventListener('change', () => setOverlay(els.overlay.value));
 
     els.speedBtn.textContent = SPEEDS[speedIdx].label;
     els.speedBtn.addEventListener('click', () => {

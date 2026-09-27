@@ -710,7 +710,8 @@ app.get('/api/radar/frames', async (req, res) => {
 // the default NYC viewport is pre-rendered for every new frame as soon as
 // the index shows it, so the page normally never waits on upstream.
 const TILE_OPTS = '512';            // 512px tiles, declared 256 client-side for 2x density
-const TILE_STYLE = '2/1_1';         // Universal Blue, smoothed, rain/snow classified
+// Legend colors in radar.html/css mirror this scheme; bump the client's TILE_STYLE_V with it
+const TILE_STYLE = '4/1_1';         // The Weather Channel (green rain, blue snow), smoothed, rain/snow classified
 const TILE_TTL_MS = 3 * HOUR;
 const TILE_CACHE_MAX = 12000;       // 1-20KB each; ~2900 warm tiles live at once plus browsing
 const tileCache = new Map();        // key -> { body, type, at }
@@ -728,8 +729,12 @@ const freshTile = key => {
     return hit && Date.now() - hit.at < TILE_TTL_MS ? hit : null;
 };
 
-async function fetchTile(time, z, x, y) {
-    const res = await fetch(`${LIBRE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`, {
+// fc 'sat' marks a satellite tile; otherwise it is the radar nowcast basis
+async function fetchTile(time, z, x, y, fc) {
+    const url = fc === 'sat'
+        ? `${LIBRE_HOST}/v2/satellite/${time}/${TILE_OPTS}/${z}/${x}/${y}/0/0_0.png`
+        : `${LIBRE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`;
+    const res = await fetch(url, {
         headers: { 'User-Agent': USER_AGENT },
         signal: AbortSignal.timeout(120000)
     });
@@ -742,7 +747,7 @@ function getTile(time, z, x, y, fc) {
     const hit = freshTile(key);
     if (hit) return Promise.resolve(hit);
     if (!tileInFlight.has(key)) {
-        tileInFlight.set(key, fetchTile(time, z, x, y).then(t => {
+        tileInFlight.set(key, fetchTile(time, z, x, y, fc).then(t => {
             if (t.status === 200) {
                 if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
                 tileCache.set(key, { ...t, at: Date.now() });
@@ -753,11 +758,15 @@ function getTile(time, z, x, y, fc) {
     return tileInFlight.get(key);
 }
 
-app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
+app.get('/api/radar/tile/:time/:z/:x/:y.png', (req, res) => serveTile(req, res, false));
+// Satellite (NOAA GMGSI via LibreWXR): hourly frames, no nowcast
+app.get('/api/radar/sat/:time/:z/:x/:y.png', (req, res) => serveTile(req, res, true));
+
+async function serveTile(req, res, sat) {
     const [time, z, x, y] = [req.params.time, req.params.z, req.params.x, req.params.y].map(Number);
-    const fc = req.query.fc ? String(req.query.fc) : '';
+    const fc = sat ? 'sat' : req.query.fc ? String(req.query.fc) : '';
     if (![time, z, x, y].every(Number.isInteger) || z < 3 || z > 12
-        || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z || !/^\d*$/.test(fc)) {
+        || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z || (!sat && !/^\d*$/.test(fc))) {
         return res.status(400).end();
     }
     try {
@@ -771,9 +780,13 @@ app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
             const { data } = await getRadarFrames();
             const pastTimes = (data.radar?.past || []).map(f => f.time);
             const isNowcast = (data.radar?.nowcast || []).some(f => f.time === time);
-            if (!pastTimes.includes(time) && !isNowcast) return res.status(404).end();
-            if (isNowcast && !fc) return res.status(404).end();
-            if (fc && !pastTimes.includes(Number(fc))) return res.status(400).end();
+            if (sat) {
+                if (!(data.satellite?.infrared || []).some(f => f.time === time)) return res.status(404).end();
+            } else {
+                if (!pastTimes.includes(time) && !isNowcast) return res.status(404).end();
+                if (isNowcast && !fc) return res.status(404).end();
+                if (fc && !pastTimes.includes(Number(fc))) return res.status(400).end();
+            }
             // One zoom action re-requests every visible tile for all 18 frames (~430 misses)
             if (!takeToken(req.ip, tileBuckets, 500, 20)) return res.status(429).end();
         }
@@ -785,7 +798,7 @@ app.get('/api/radar/tile/:time/:z/:x/:y.png', async (req, res) => {
     } catch {
         res.status(502).end();
     }
-});
+}
 
 const lonToX = (lon, z) => Math.floor((lon + 180) / 360 * 2 ** z);
 function latToY(lat, z) {
@@ -835,6 +848,32 @@ async function warmRadarTilesOnce() {
     }));
     console.log(`[RADAR WARM] ${jobs.length} tiles in ${Math.round((Date.now() - t0) / 1000)}s`);
 }
+
+// ============ Model fields (RRFS temp/dew point/wind/cloud, rendered by the extractor) ============
+app.get('/api/radar/field', async (req, res) => {
+    try {
+        res.set('Cache-Control', 'public, max-age=300');
+        res.json(await getJson(`${EXTRACTOR_URL}/fields`, 30000));
+    } catch (err) {
+        res.status(502).json({ error: 'Model fields unavailable', details: err.message });
+    }
+});
+
+app.get('/api/radar/field/:name/:date/:cycle/:fh.png', async (req, res) => {
+    const { name, date, cycle, fh } = req.params;
+    if (!/^[a-z]{1,10}$/.test(name) || !/^\d{8}$/.test(date) || !/^\d{2}$/.test(cycle) || !/^\d{1,2}$/.test(fh)) return res.status(400).end();
+    try {
+        const up = await fetch(`${EXTRACTOR_URL}/fields/${name}.png?date=${date}&cycle=${cycle}&fh=${fh}`,
+            { signal: AbortSignal.timeout(60000) });
+        if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).end();
+        res.set('Content-Type', 'image/png');
+        // A cycle's frame never changes
+        res.set('Cache-Control', 'public, max-age=86400, immutable');
+        res.send(Buffer.from(await up.arrayBuffer()));
+    } catch {
+        res.status(502).end();
+    }
+});
 
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
 // Cached per rounded location so all viewers of an area share one

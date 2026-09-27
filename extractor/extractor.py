@@ -585,6 +585,190 @@ def maybe_start_index_build():
     threading.Thread(target=build_station_index, daemon=True).start()
 
 
+# ============ Map fields (RRFS 2D grids -> Web Mercator PNGs) ============
+# Deterministic RRFS fields per forecast hour, fetched by byte range from
+# the hourly 2dfld file (~1.7MB per message), reprojected from the Lambert
+# conformal grid onto a Web Mercator raster and written as an indexed PNG
+# (palette alpha included) that the radar page lays over the map as an
+# image source. The page draws its legends from the same FIELDS stops.
+
+FIELD_URL = os.environ.get(
+    'RRFS_FIELD_URL',
+    'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.3km.f{fh}.conus.grib2')
+# ponytail: hourly to 36h is ~37 x 320KB per view; go 3-hourly or WebP if mobile data matters
+FIELD_HOURS = list(range(0, 37))
+FIELD_BBOX = (-134.0, 21.0, -61.0, 53.0)   # west, south, east, north: covers the CONUS grid
+FIELD_WIDTH = 2048                           # ~3km/px at 40N, the grid's own spacing
+FIELD_CYCLE_TTL_S = 600
+FIELD_DIR = os.path.join(CACHE_DIR, 'fields')
+CLOUD_LEVEL = 'entire atmosphere (considered as a single layer)'
+K_TO_F = lambda k: (k - 273.15) * 9 / 5 + 32
+# name -> GRIB (name, level) messages, value(*arrays), palette stops
+# (value, RGBA) interpolated into `band`-wide steps, legend unit/label/ticks
+FIELDS = {
+    'tmp': {'grib': [('TMP', '2 m above ground')], 'value': K_TO_F, 'band': 2,
+            'unit': '°F', 'label': '2 m temperature', 'ticks': [0, 32, 50, 70, 90],
+            'stops': [(-40, (255, 255, 255, 255)), (-20, (227, 198, 247, 255)), (0, (123, 91, 214, 255)),
+                      (10, (62, 70, 201, 255)), (20, (47, 127, 224, 255)), (32, (94, 198, 242, 255)),
+                      (40, (111, 211, 168, 255)), (50, (127, 211, 90, 255)), (60, (216, 224, 74, 255)),
+                      (70, (245, 197, 66, 255)), (80, (242, 139, 48, 255)), (90, (226, 74, 42, 255)),
+                      (100, (179, 31, 54, 255)), (120, (122, 16, 48, 255))]},
+    'dpt': {'grib': [('DPT', '2 m above ground')], 'value': K_TO_F, 'band': 2,
+            'unit': '°F', 'label': '2 m dew point', 'ticks': [10, 30, 50, 60, 70],
+            'stops': [(-10, (120, 85, 55, 255)), (20, (160, 125, 85, 255)), (35, (195, 170, 120, 255)),
+                      (45, (170, 200, 120, 255)), (55, (90, 190, 90, 255)), (60, (40, 160, 80, 255)),
+                      (65, (30, 150, 150, 255)), (70, (40, 110, 200, 255)), (75, (100, 60, 190, 255)),
+                      (80, (170, 50, 170, 255))]},
+    'wind': {'grib': [('UGRD', '10 m above ground'), ('VGRD', '10 m above ground')],
+             'value': lambda u, v: np.hypot(u, v) * 2.23694, 'band': 2,
+             'unit': 'mph', 'label': '10 m wind speed', 'ticks': [10, 20, 30, 40, 50],
+             'stops': [(0, (70, 110, 170, 0)), (5, (70, 110, 170, 70)), (10, (40, 150, 160, 150)),
+                       (20, (80, 190, 90, 220)), (30, (230, 210, 50, 235)), (40, (240, 140, 40, 245)),
+                       (50, (220, 50, 50, 255)), (70, (170, 30, 160, 255))]},
+    'cloud': {'grib': [('TCDC', CLOUD_LEVEL)], 'value': lambda c: c, 'band': 5,
+              'unit': '%', 'label': 'Total cloud cover', 'ticks': [25, 50, 75, 100],
+              'stops': [(0, (255, 255, 255, 0)), (10, (255, 255, 255, 0)), (20, (236, 240, 247, 60)),
+                        (50, (242, 245, 250, 150)), (100, (255, 255, 255, 235))]},
+}
+
+_field_cycle = {'at': 0, 'value': (None, None)}
+_remap_cache = {}
+
+
+def field_palette(spec):
+    """RGBA per band from the first stop up."""
+    vs = [v for v, _ in spec['stops']]
+    bands = np.arange(vs[0], vs[-1], spec['band']) + spec['band'] / 2
+    return np.stack([np.interp(bands, vs, [c[k] for _, c in spec['stops']]) for k in range(4)], 1).astype(np.uint8)
+
+
+def fetch_idx_fields(url, wanted, step):
+    """GRIB messages for [(name, level)] by .idx byte range; None if the file is not published."""
+    try:
+        rows = [l.split(':') for l in http_get(url + '.idx').decode().splitlines()]
+    except urllib.error.HTTPError as err:
+        if err.code in (403, 404):
+            return None
+        raise
+    out = []
+    for name, level in wanted:
+        i = next((i for i, r in enumerate(rows) if r[3] == name and r[4] == level and r[5] == step), None)
+        if i is None:
+            raise RuntimeError(f'{name}:{level}:{step} not in {url}.idx')
+        end = str(int(rows[i + 1][1]) - 1) if i + 1 < len(rows) else ''
+        out.append(http_get(url, headers={'Range': f'bytes={rows[i][1]}-{end}'}, timeout=120))
+    return out
+
+
+def mercator_remap(g):
+    """Flat grid index for every output pixel (-1 off the grid), for a
+    tangent Lambert conformal grid on a sphere (what RRFS CONUS uses)."""
+    keys = ('Nx', 'Ny', 'LoVInDegrees', 'LaDInDegrees', 'latitudeOfFirstGridPointInDegrees',
+            'longitudeOfFirstGridPointInDegrees', 'DxInMetres', 'DyInMetres', 'radius')
+    nx, ny, lov, lad, la1, lo1, dx, dy, r = sig = tuple(ec.codes_get(g, k) for k in keys)
+    if sig in _remap_cache:
+        return _remap_cache[sig]
+    if ec.codes_get(g, 'gridType') != 'lambert' or ec.codes_get(g, 'Latin1InDegrees') != ec.codes_get(g, 'Latin2InDegrees') \
+            or ec.codes_get(g, 'iScansNegatively') or not ec.codes_get(g, 'jScansPositively'):
+        raise RuntimeError('Unsupported grid for map rendering')
+    phi0, lam0 = math.radians(lad), math.radians(lov)
+    n = math.sin(phi0)
+    F = math.cos(phi0) * math.tan(math.pi / 4 + phi0 / 2) ** n / n
+
+    def project(lat, lon):
+        rho = r * F / np.tan(np.pi / 4 + np.radians(lat) / 2) ** n
+        theta = n * (((np.radians(lon) - lam0 + np.pi) % (2 * np.pi)) - np.pi)
+        return rho * np.sin(theta), -rho * np.cos(theta)
+
+    west, south, east, north = FIELD_BBOX
+    merc = lambda lat: np.log(np.tan(np.pi / 4 + np.radians(lat) / 2))
+    height = round(FIELD_WIDTH * (merc(north) - merc(south)) / math.radians(east - west))
+    lon = west + (np.arange(FIELD_WIDTH) + 0.5) / FIELD_WIDTH * (east - west)
+    my = merc(north) - (np.arange(height) + 0.5) / height * (merc(north) - merc(south))
+    lat = np.degrees(2 * np.arctan(np.exp(my)) - np.pi / 2)
+    x, y = project(lat[:, None], lon[None, :])
+    x1, y1 = project(la1, lo1)
+    i = np.rint((x - x1) / dx).astype(np.int64)
+    j = np.rint((y - y1) / dy).astype(np.int64)
+    idx = np.where((i >= 0) & (i < nx) & (j >= 0) & (j < ny), j * nx + i, -1)
+    _remap_cache[sig] = idx
+    return idx
+
+
+def indexed_png(pixels, palette):
+    """8-bit palette PNG from RGBA palette rows; index 255 is transparent."""
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+    h, w = pixels.shape
+    raw = np.hstack([np.zeros((h, 1), np.uint8), pixels]).tobytes()   # filter byte 0 per row
+    plte = np.zeros((256, 4), np.uint8)
+    plte[:len(palette)] = palette
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 3, 0, 0, 0))
+            + chunk(b'PLTE', plte[:, :3].tobytes()) + chunk(b'tRNS', plte[:, 3].tobytes())
+            + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
+
+
+def render_field(name, raws):
+    spec = FIELDS[name]
+    arrays = []
+    for raw in raws:
+        g = ec.codes_new_from_message(raw)
+        try:
+            idx = mercator_remap(g)
+            arrays.append(ec.codes_get_values(g))
+        finally:
+            ec.codes_release(g)
+    palette = field_palette(spec)
+    band = np.clip((spec['value'](*arrays) - spec['stops'][0][0]) // spec['band'], 0, len(palette) - 1).astype(np.uint8)
+    return indexed_png(np.where(idx >= 0, band[np.maximum(idx, 0)], 255).astype(np.uint8), palette)
+
+
+def field_cycle():
+    """Newest cycle with the whole FIELD_HOURS range published (cached)."""
+    if time.time() - _field_cycle['at'] < FIELD_CYCLE_TTL_S:
+        return _field_cycle['value']
+    now = time.time()
+    value = (None, None)
+    # RRFS runs hourly but only some cycles reach 36h: walk back hour by hour
+    for back in range(1, 13):
+        t = time.gmtime(now - back * 3600)
+        date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
+        if http_exists(FIELD_URL.format(date=date, cycle=cycle, fh=f'{FIELD_HOURS[-1]:03d}') + '.idx'):
+            value = (date, cycle)
+            break
+    _field_cycle.update(at=time.time(), value=value)
+    return value
+
+
+def field_png(name, date, cycle, fh):
+    """Rendered PNG bytes for one field and forecast hour, cached on disk.
+    ponytail: rendered on first request; pre-warm like the backend's warmRadarTiles if cold starts bite."""
+    path = os.path.join(FIELD_DIR, f'{date}{cycle}', f'{name}_f{fh:03d}.png')
+    with file_lock(path):
+        try:
+            with open(path, 'rb') as fp:
+                return fp.read()
+        except OSError:
+            pass
+        raws = fetch_idx_fields(FIELD_URL.format(date=date, cycle=cycle, fh=f'{fh:03d}'),
+                                FIELDS[name]['grib'], 'anl' if fh == 0 else f'{fh} hour fcst')
+        if raws is None:
+            return None
+        png = render_field(name, raws)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Only the current cycle is kept (a render racing a cycle rollover can lose its dir: one 502, retry heals)
+        for old in os.listdir(FIELD_DIR):
+            if old != f'{date}{cycle}':
+                shutil.rmtree(os.path.join(FIELD_DIR, old), ignore_errors=True)
+        with open(path + '.tmp', 'wb') as fp:
+            fp.write(png)
+        os.replace(path + '.tmp', path)
+        return png
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if not self.path.startswith(('/health', '/status')):  # polled constantly
@@ -620,6 +804,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, idx, cached=True)
             return self.send_json(503, {'error': 'Station index not built yet',
                                         'status': stations_state['status']})
+        if url.path == '/fields':
+            date, cycle = field_cycle()
+            if not date:
+                return self.send_json(503, {'error': 'No RRFS cycle available'})
+            legends = {k: {'stops': v['stops'], 'unit': v['unit'], 'label': v['label'], 'ticks': v['ticks']}
+                       for k, v in FIELDS.items()}
+            return self.send_json(200, {'date': date, 'cycle': cycle, 'hours': FIELD_HOURS,
+                                        'bounds': FIELD_BBOX, 'fields': legends})
+        m = re.fullmatch(r'/fields/([a-z]+)\.png', url.path)
+        if m and m.group(1) in FIELDS:
+            name = m.group(1)
+            q = parse_qs(url.query)
+            date, cycle, fh = (q.get(k, [''])[0] for k in ('date', 'cycle', 'fh'))
+            if not re.fullmatch(r'\d{8}', date) or not re.fullmatch(r'\d{2}', cycle) \
+                    or not fh.isdigit() or int(fh) not in FIELD_HOURS:
+                return self.send_json(400, {'error': 'Invalid date/cycle/fh'})
+            # Current cycle only: a render prunes every other cycle's cache
+            if (date, cycle) != field_cycle():
+                return self.send_json(404, {'error': 'Not the current cycle'})
+            try:
+                png = field_png(name, date, cycle, int(fh))
+            except Exception as err:  # noqa: BLE001 - report any failure upstream
+                print(f'[FIELD] {name} {date}{cycle} f{fh}: {err}', flush=True)
+                return self.send_json(502, {'error': str(err)})
+            if png is None:
+                return self.send_json(404, {'error': 'Not published'})
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(png)))
+            self.end_headers()
+            return self.wfile.write(png)
         if url.path != '/plume':
             return self.send_json(404, {'error': 'Not found'})
 

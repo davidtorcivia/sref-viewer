@@ -251,6 +251,92 @@ body {
     color: var(--nowcast);
 }
 
+/* ============ Legend + overlay picker ============ */
+.radar-legend {
+    position: fixed;
+    top: calc(max(0.6rem, env(safe-area-inset-top)) + 40px + 0.6rem);
+    left: max(0.75rem, env(safe-area-inset-left));
+    z-index: 10;
+    width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.55rem 0.7rem 0.6rem;
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    background: var(--surface);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+}
+
+.overlay-select {
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.3rem 0.4rem;
+    min-height: 32px;
+    cursor: pointer;
+}
+
+.overlay-select option {
+    background: var(--bg);
+    color: var(--text);
+}
+
+.legend-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 0.3rem 0.5rem;
+}
+
+.legend-bar {
+    height: 8px;
+    border-radius: 2px;
+}
+
+.legend-bar.rain {
+    background: linear-gradient(to right, transparent 0% 6.67%, #01b714 6.67% 13.33%, #088915 13.33% 20%, #11651a 20% 26.67%, #064307 26.67% 33.33%, #ffee07 33.33% 40%, #f8bb08 40% 46.67%, #f38b08 46.67% 53.33%, #f07108 53.33% 60%, #ea5e09 60% 66.67%, #df370a 66.67% 73.33%, #d3100c 73.33% 80%, #c00d09 80% 86.67%, #b80c08 86.67% 100%);
+}
+
+.legend-bar.snow {
+    background: linear-gradient(to right, #9fffff 0% 6.67%, #8fffff 6.67% 13.33%, #7fefff 13.33% 20%, #6fdfff 20% 26.67%, #5fcfff 26.67% 33.33%, #4fafff 33.33% 40%, #3f9fff 40% 46.67%, #2f8fff 46.67% 53.33%, #1f7fff 53.33% 60%, #0f6fff 60% 66.67%, #005fff 66.67% 73.33%, #004fff 73.33% 80%, #003fff 80% 86.67%, #002fff 86.67% 93.33%, #001fff 93.33% 100%);
+}
+
+.legend-axis {
+    position: relative;
+    height: 0.9em;
+    font-variant-numeric: tabular-nums;
+}
+
+.legend-axis span {
+    position: absolute;
+    transform: translateX(-50%);
+}
+
+.legend-grid .legend-axis {
+    margin-top: -0.15rem;
+}
+
+.radar-legend[data-overlay="satellite"] .legend-precip,
+.radar-legend[data-overlay="field"] .legend-precip,
+.radar-legend:not([data-overlay="satellite"]):not([data-overlay="both"]) .legend-sat,
+.radar-legend:not([data-overlay="field"]) .legend-field {
+    display: none;
+}
+
+/* Zoom/locate controls start below the floating header */
+.maplibregl-ctrl-top-right {
+    top: calc(max(0.6rem, env(safe-area-inset-top)) + 40px);
+}
+
 /* MapLibre control tweaks for dark mode */
 @media (prefers-color-scheme: dark) {
 
