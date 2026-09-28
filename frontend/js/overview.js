@@ -100,7 +100,10 @@ function shape(d, place) {
 
 function forecastFor(place) {
     if (!forecasts.has(place.id)) {
-        forecasts.set(place.id, fetchForecast(place).catch(err => { forecasts.delete(place.id); throw err; }));
+        forecasts.set(place.id, fetchForecast(place).then(f => {
+            if (f.raw.building) forecasts.delete(place.id);   // observations only: ask again next time
+            return f;
+        }, err => { forecasts.delete(place.id); throw err; }));
     }
     return forecasts.get(place.id);
 }
@@ -464,9 +467,10 @@ async function search() {
     if (!rows.length) searchResults.append(el('li', 'wx-empty', 'No places found'));
 }
 
-// Enter searches now instead of submitting (and closing) the dialog
+// Enter searches now instead of submitting (and closing) the dialog; the
+// form has no submit button, so Cancel closes it explicitly
+document.getElementById('searchCancel').addEventListener('click', () => dialog.close());
 dialog.querySelector('form').addEventListener('submit', e => {
-    if (e.submitter?.value === 'cancel') return;
     e.preventDefault();
     clearTimeout(searchTimer);
     search();

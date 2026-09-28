@@ -1134,8 +1134,15 @@ def preload_fields():
                 if 'layers' not in FIELDS[name]:
                     warm_field(name, sorted({f for mode in FIELD_MODES for f in mode_frames(mode, name)}))
             (date, cycle), prev = forecast_runs()
-            if date and ensure_crops(date, cycle, recent_tiles()) and prev:
-                _forecast_run['prev'] = None   # the new run's crops are cut; the old run can go
+            if date:
+                tiles = recent_tiles()
+                ensure_crops(date, cycle, tiles)
+                # Release the old run only once every place's new crop exists
+                # (a request may still be cutting some of them)
+                if prev and crops_ready(date, cycle, tiles):
+                    with _forecast_run_lock:
+                        if _forecast_run['prev'] == prev:
+                            _forecast_run['prev'] = None
         except Exception as err:  # noqa: BLE001 - keep the loop alive
             print(f'[PRELOAD] {err}', flush=True)
         time.sleep(FIELD_CYCLE_TTL_S)
@@ -1160,6 +1167,7 @@ NOW_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud')
 _crop_pool = ThreadPoolExecutor(max_workers=4)   # decodes run ~2.4x faster on 4 threads
 _crop_building = set()                           # (date, cycle, tile) being cut
 _forecast_run = {'cur': None, 'prev': None}
+_forecast_run_lock = threading.Lock()
 _crop_lock = threading.Lock()
 _tiles_lock = threading.Lock()
 
@@ -1169,9 +1177,19 @@ def forecast_runs():
     previous one stays until preload has cut the new run's crops, so saved
     places keep a forecast through the switch."""
     cur = field_cycle(FORECAST_MODE)
-    if cur[0] and cur != _forecast_run['cur']:
-        _forecast_run['prev'], _forecast_run['cur'] = _forecast_run['cur'], cur
-    return (_forecast_run['cur'] or (None, None)), _forecast_run['prev']
+    with _forecast_run_lock:
+        if cur[0] and cur != _forecast_run['cur']:
+            _forecast_run['prev'], _forecast_run['cur'] = _forecast_run['cur'], cur
+        return (_forecast_run['cur'] or (None, None)), _forecast_run['prev']
+
+
+def crops_ready(date, cycle, tiles):
+    """Whether every tile the grid reaches has its crop cut for this run."""
+    path0 = fetch_msg('rrfs', date, cycle, 0, 'TMP')
+    if path0 is None:
+        return False
+    p = decoded(path0)[1]
+    return all(os.path.exists(crop_path(date, cycle, t)) for t in tiles if crop_box(p, t))
 
 
 def forecast_tile(lat, lon):
