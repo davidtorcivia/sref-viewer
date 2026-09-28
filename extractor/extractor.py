@@ -61,8 +61,10 @@ import urllib.request
 import urllib.error
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+from zoneinfo import ZoneInfo
 
 import eccodes as ec
 import numpy as np
@@ -610,6 +612,10 @@ FIELD_URL = os.environ.get(
 RTMA_URL = os.environ.get(
     'RTMA_RU_URL',
     'https://noaa-rtma-pds.s3.amazonaws.com/rtma2p5_ru.{date}/rtma2p5_ru.t{cycle}z.2dvaranl_ndfd.grb2')
+# National Blend of Models, CONUS 2.5km (the RTMA grid): hourly to 36h, 3-hourly to 192h, 6-hourly to 264h
+NBM_URL = os.environ.get(
+    'NBM_URL',
+    'https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.{date}/{cycle}/core/blend.t{cycle}z.core.f{fh}.co.grib2')
 # 2dfld exists for 3-hourly cycles only: 00/06/12/18Z reach 84h, 03/09/15/21Z 18h.
 # RRFS mode -> forecast hour whose publication makes a cycle usable ('now' is RTMA)
 FIELD_MODES = {'hourly': 36, 'extended': 84}
@@ -634,7 +640,21 @@ def rrfs_step(msg, fh):
     if msg in ACCUMULATED:
         return f'0-{fh // 24} day acc fcst' if fh % 24 == 0 else f'0-{fh} hour acc fcst'
     return 'anl' if fh == 0 else f'{fh} hour fcst'
-# source -> URL template, GRIB level per message name, idx step for a message and hour
+
+
+def nbm_step(msg, fh):
+    """The NBM .idx step text, in hours throughout (no whole-day form): 12 h
+    max/min temperature and PoP (probability of more than 0.254 mm, the
+    descriptor that follows the step), 6 h amounts, the rest instantaneous."""
+    if msg in ('TMAX', 'TMIN'):
+        return f'{fh - 12}-{fh} hour {msg[1:].lower()} fcst'
+    if msg == 'POP12':
+        return f'{fh - 12}-{fh} hour acc fcst:prob >0.254'
+    if msg in ('APCP', 'ASNOW', 'FICEAC'):
+        return f'{fh - 6}-{fh} hour acc fcst'
+    return f'{fh} hour fcst'
+# source -> URL template, GRIB level per message name, idx step for a message
+# and hour, and the .idx name where a message is not named after it
 SOURCES = {
     'rrfs': {'url': FIELD_URL,
              'levels': {'TMP': '2 m above ground', 'DPT': '2 m above ground', 'UGRD': '10 m above ground',
@@ -646,6 +666,12 @@ SOURCES = {
              'levels': {'TMP': '2 m above ground', 'DPT': '2 m above ground', 'UGRD': '10 m above ground',
                         'VGRD': '10 m above ground', 'GUST': '10 m above ground', 'TCDC': CLOUD_LEVEL},
              'step': lambda m, fh: 'anl'},
+    'nbm': {'url': NBM_URL,
+            'levels': {'TMAX': '2 m above ground', 'TMIN': '2 m above ground', 'POP12': 'surface',
+                       'APCP': 'surface', 'ASNOW': 'surface', 'FICEAC': 'surface', 'TCDC': 'surface',
+                       'WIND': '10 m above ground', 'GUST': '10 m above ground'},
+            'names': {'POP12': 'APCP'},
+            'step': nbm_step},
 }
 K_TO_F = lambda k: (k - 273.15) * 9 / 5 + 32
 
@@ -742,7 +768,9 @@ def field_palette(spec):
 
 
 def fetch_idx_fields(url, wanted, step):
-    """GRIB messages for [(name, level)] by .idx byte range; None if the file is not published."""
+    """GRIB messages for [(name, level)] by .idx byte range; None if the file
+    is not published. The step matches the .idx step plus any descriptor after
+    it ('prob >0.254', 'ens std dev'), so '6 hour fcst' is the plain value."""
     try:
         rows = [l.split(':') for l in http_get(url + '.idx').decode().splitlines()]
     except urllib.error.HTTPError as err:
@@ -751,7 +779,8 @@ def fetch_idx_fields(url, wanted, step):
         raise
     out = []
     for name, level in wanted:
-        i = next((i for i, r in enumerate(rows) if r[3] == name and r[4] == level and r[5] == step), None)
+        i = next((i for i, r in enumerate(rows) if r[3] == name and r[4] == level
+                  and ':'.join(r[5:7]).rstrip(':') == step), None)
         if i is None:
             raise RuntimeError(f'{name}:{level}:{step} not in {url}.idx')
         end = str(int(rows[i + 1][1]) - 1) if i + 1 < len(rows) else ''
@@ -932,13 +961,15 @@ def purge_fields():
     # between cannot mark a new cycle known without keeping it
     cycles, rtma = [field_cycle(m) for m in FIELD_MODES], rtma_frames()
     live = {('rrfs', d, c) for d, c in cycles if d} | {('rtma', d, c) for d, c in rtma}
-    prev = forecast_runs()[1]   # the last run's forecast crops serve until the new run's are cut
-    if prev:
-        live.add(('rrfs', *prev))
+    # The last run's forecast crops serve until the new run's are cut
+    nbm, nbm_prev = forecast_runs('nbm')
+    live |= {(src, *run) for src, run in (('rrfs', forecast_runs('rrfs')[1]), ('nbm', nbm), ('nbm', nbm_prev))
+             if run and run[0]}
     keep = {os.path.basename(frame_dir(*f)) for f in live}
-    known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set())
+    known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set()) \
+        | ({'nbm'} if nbm[0] else set())
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
-        src = old[:4]   # dirs are <src><date><cycle>; anything else is an older cache format
+        src = re.match('[a-z]*', old).group()   # dirs are <src><date><cycle>; anything else is an older cache format
         if old not in keep and (src not in SOURCES or src in known):
             shutil.rmtree(os.path.join(FIELD_DIR, old), ignore_errors=True)
             continue
@@ -964,7 +995,7 @@ def fetch_msg(src, date, cycle, fh, msg):
         if not os.path.exists(path):
             s = SOURCES[src]
             raws = fetch_idx_fields(s['url'].format(date=date, cycle=cycle, fh=f'{fh:03d}'),
-                                    [(msg, s['levels'][msg])], s['step'](msg, fh))
+                                    [(s.get('names', {}).get(msg, msg), s['levels'][msg])], s['step'](msg, fh))
             if raws is None:
                 return None
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1133,16 +1164,19 @@ def preload_fields():
             for name in FIELDS:
                 if 'layers' not in FIELDS[name]:
                     warm_field(name, sorted({f for mode in FIELD_MODES for f in mode_frames(mode, name)}))
-            (date, cycle), prev = forecast_runs()
-            if date:
-                tiles = recent_tiles()
-                ensure_crops(date, cycle, tiles)
+            # Only the tiles places asked for: an NBM run is ~400MB, fetched once any place needs it
+            tiles = recent_tiles()
+            for src in CROPS:
+                (date, cycle), prev = forecast_runs(src)
+                if not date:
+                    continue
+                ensure_crops(src, date, cycle, tiles)
                 # Release the old run only once every place's new crop exists
                 # (a request may still be cutting some of them)
-                if prev and crops_ready(date, cycle, tiles):
+                if prev and crops_ready(src, date, cycle, tiles):
                     with _forecast_run_lock:
-                        if _forecast_run['prev'] == prev:
-                            _forecast_run['prev'] = None
+                        if _forecast_run[src]['prev'] == prev:
+                            _forecast_run[src]['prev'] = None
         except Exception as err:  # noqa: BLE001 - keep the loop alive
             print(f'[PRELOAD] {err}', flush=True)
         time.sleep(FIELD_CYCLE_TTL_S)
@@ -1155,7 +1189,8 @@ def preload_fields():
 # GRIB messages; a place then reads its series in milliseconds. Tiles that
 # were asked for recently are re-cut after every preload pass, so saved
 # places never wait; a new tile builds in the background (~7 s) while the
-# page shows the observed conditions.
+# page shows the observed conditions. The 10-day daily forecast comes the
+# same way from NBM runs (6-hourly messages, see daily_rows).
 
 FORECAST_MSGS = ('TMP', 'DPT', 'UGRD', 'VGRD', 'GUST', 'TCDC', 'APCP', 'ASNOW', 'CSNOW', 'REFC')
 FORECAST_MODE = 'extended'                  # one run for all 85 hours
@@ -1165,31 +1200,67 @@ FORECAST_TILES_MAX = 64                     # most recently requested tiles kept
 FORECAST_BATCH = 16                         # tiles cut per pass: bounds memory at ~100 MB
 NOW_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud')
 _crop_pool = ThreadPoolExecutor(max_workers=4)   # decodes run ~2.4x faster on 4 threads
-_crop_building = set()                           # (date, cycle, tile) being cut
-_forecast_run = {'cur': None, 'prev': None}
+_crop_building = set()                           # (src, date, cycle, tile) being cut
+_forecast_run = {'rrfs': {'cur': None, 'prev': None}, 'nbm': {'cur': None, 'prev': None}}
 _forecast_run_lock = threading.Lock()
 _crop_lock = threading.Lock()
 _tiles_lock = threading.Lock()
 
 
-def forecast_runs():
-    """(current, previous or None) forecast runs. When the run changes, the
-    previous one stays until preload has cut the new run's crops, so saved
-    places keep a forecast through the switch."""
-    cur = field_cycle(FORECAST_MODE)
+# NBM messages for the daily forecast, every 6 hours to the last. 12 h
+# windows (TMAX, TMIN, POP12) end at 00z and 12z only; amounts are 6 h.
+DAILY_MSGS = ('TCDC', 'WIND', 'GUST', 'APCP', 'ASNOW', 'FICEAC', 'TMAX', 'TMIN', 'POP12')
+DAILY_LAST = 264
+
+
+def nbm_has(cycle, msg, fh):
+    """Whether an NBM run publishes this message at this hour."""
+    end = (int(cycle) + fh) % 24
+    if msg in ('TMAX', 'TMIN', 'POP12'):
+        return fh >= 12 and end in {'TMAX': (0,), 'TMIN': (12,), 'POP12': (0, 12)}[msg]
+    return True
+
+
+# source -> messages, forecast hours, whether (cycle, msg, fh) exists; the first message at the first hour gives the grid
+CROPS = {'rrfs': (FORECAST_MSGS, range(FIELD_MODES[FORECAST_MODE] + 1), lambda c, m, fh: fh > 0 or m not in ACCUMULATED),
+         'nbm': (DAILY_MSGS, range(6, DAILY_LAST + 1, 6), nbm_has)}
+
+
+def daily_cycle():
+    """Newest NBM 00z/12z run with its last hour published."""
+    now = time.time()
+    cands = []
+    for back in range(0, 48):
+        t = time.gmtime(now - back * 3600)
+        if t.tm_hour % 12 == 0:
+            date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
+            cands.append((date, cycle, NBM_URL.format(date=date, cycle=cycle, fh=f'{DAILY_LAST:03d}') + '.idx'))
+    return newest_published('nbm', cands, FIELD_CYCLE_TTL_S)
+
+
+def forecast_runs(src):
+    """(current, previous or None) runs of a crop source. When the run
+    changes, the previous one stays until preload has cut the new run's
+    crops, so saved places keep a forecast through the switch."""
+    cur = field_cycle(FORECAST_MODE) if src == 'rrfs' else daily_cycle()
     with _forecast_run_lock:
-        if cur[0] and cur != _forecast_run['cur']:
-            _forecast_run['prev'], _forecast_run['cur'] = _forecast_run['cur'], cur
-        return (_forecast_run['cur'] or (None, None)), _forecast_run['prev']
+        run = _forecast_run[src]
+        if cur[0] and cur != run['cur']:
+            run['prev'], run['cur'] = run['cur'], cur
+        return (run['cur'] or (None, None)), run['prev']
 
 
-def crops_ready(date, cycle, tiles):
+def run_grid(src, date, cycle):
+    """Grid parameters of a run, None if it is not published."""
+    msgs, hours, _ = CROPS[src]
+    path = fetch_msg(src, date, cycle, hours[0], msgs[0])
+    return path and decoded(path)[1]
+
+
+def crops_ready(src, date, cycle, tiles):
     """Whether every tile the grid reaches has its crop cut for this run."""
-    path0 = fetch_msg('rrfs', date, cycle, 0, 'TMP')
-    if path0 is None:
-        return False
-    p = decoded(path0)[1]
-    return all(os.path.exists(crop_path(date, cycle, t)) for t in tiles if crop_box(p, t))
+    p = run_grid(src, date, cycle)
+    return bool(p) and all(os.path.exists(crop_path(src, date, cycle, t)) for t in tiles if crop_box(p, t))
 
 
 def forecast_tile(lat, lon):
@@ -1207,29 +1278,29 @@ def crop_box(p, tile):
     return (j0, j1, i0, i1) if i1 - i0 > 1 and j1 - j0 > 1 else None
 
 
-def crop_path(date, cycle, tile):
-    return os.path.join(frame_dir('rrfs', date, cycle), f'fc_{tile[0]}_{tile[1]}.npz')
+def crop_path(src, date, cycle, tile):
+    return os.path.join(frame_dir(src, date, cycle), f'fc_{tile[0]}_{tile[1]}.npz')
 
 
-def build_crops(date, cycle, tiles):
-    """Cut every tile's crop from one pass over the run's messages."""
-    path0 = fetch_msg('rrfs', date, cycle, 0, 'TMP')
-    if path0 is None:
+def build_crops(src, date, cycle, tiles):
+    """Cut every tile's crop from one pass over the run's messages:
+    (messages, hours, rows, columns), NaN where a message does not exist."""
+    p = run_grid(src, date, cycle)
+    if not p:
         return
-    p = decoded(path0)[1]
     boxes = {t: b for t in tiles if (b := crop_box(p, t))}
     if not boxes:   # tiles off the grid: nothing to cut
         return
-    hours = range(FIELD_MODES[FORECAST_MODE] + 1)
-    out = {t: np.full((len(FORECAST_MSGS), len(hours), j1 - j0, i1 - i0), np.nan, np.float32)
+    msgs, hours, has = CROPS[src]
+    out = {t: np.full((len(msgs), len(hours), j1 - j0, i1 - i0), np.nan, np.float32)
            for t, (j0, j1, i0, i1) in boxes.items()}
 
     def cut(job):
-        k, fh = job
-        msg = FORECAST_MSGS[k]
-        if msg in ACCUMULATED and fh == 0:
+        k, n = job
+        msg, fh = msgs[k], hours[n]
+        if not has(cycle, msg, fh):
             return
-        path = fetch_msg('rrfs', date, cycle, fh, msg)
+        path = fetch_msg(src, date, cycle, fh, msg)
         if path is None:
             return
         with open(path, 'rb') as fp:   # plain decode: bulk work stays out of the tile LRU
@@ -1239,35 +1310,35 @@ def build_crops(date, cycle, tiles):
         finally:
             ec.codes_release(g)
         for t, (j0, j1, i0, i1) in boxes.items():
-            out[t][k, fh] = arr[j0:j1, i0:i1]
+            out[t][k, n] = arr[j0:j1, i0:i1]
 
-    list(_crop_pool.map(cut, [(k, fh) for fh in hours for k in range(len(FORECAST_MSGS))]))
+    list(_crop_pool.map(cut, [(k, n) for n in range(len(hours)) for k in range(len(msgs))]))
     for t, (j0, j1, i0, i1) in boxes.items():
-        path = crop_path(date, cycle, t)
+        path = crop_path(src, date, cycle, t)
         with open(path + '.tmp', 'wb') as fp:
             np.savez_compressed(fp, data=out[t], i0=i0, j0=j0, grid=json.dumps(p))
         os.replace(path + '.tmp', path)
 
 
-def ensure_crops(date, cycle, tiles):
+def ensure_crops(src, date, cycle, tiles):
     """Cut the tiles that have no crop yet for this run, unless already under
     way. True when nothing failed."""
     with _crop_lock:
-        todo = [t for t in tiles if (date, cycle, t) not in _crop_building
-                and not os.path.exists(crop_path(date, cycle, t))]
-        _crop_building.update((date, cycle, t) for t in todo)
+        todo = [t for t in tiles if (src, date, cycle, t) not in _crop_building
+                and not os.path.exists(crop_path(src, date, cycle, t))]
+        _crop_building.update((src, date, cycle, t) for t in todo)
     if not todo:
         return True
     try:
         for k in range(0, len(todo), FORECAST_BATCH):
-            build_crops(date, cycle, todo[k:k + FORECAST_BATCH])
+            build_crops(src, date, cycle, todo[k:k + FORECAST_BATCH])
         return True
     except Exception as err:  # noqa: BLE001 - a later request or preload pass retries
-        print(f'[FORECAST] crops {date}{cycle} {todo}: {err}', flush=True)
+        print(f'[FORECAST] crops {src}{date}{cycle} {todo}: {err}', flush=True)
         return False
     finally:
         with _crop_lock:
-            _crop_building.difference_update((date, cycle, t) for t in todo)
+            _crop_building.difference_update((src, date, cycle, t) for t in todo)
 
 
 @functools.lru_cache(maxsize=16)
@@ -1292,11 +1363,12 @@ def crop_series(crop, lat, lon):
 
 def hourly_series(date, cycle, lat, lon):
     """Columnar hourly forecast for the overview, or None outside the grid."""
-    s = crop_series(load_crop(crop_path(date, cycle, forecast_tile(lat, lon))), lat, lon)
+    crop = load_crop(crop_path('rrfs', date, cycle, forecast_tile(lat, lon)))
+    s = crop_series(crop, lat, lon)
     if s is None:
         return None
     v = dict(zip(FORECAST_MSGS, s))
-    p = load_crop(crop_path(date, cycle, forecast_tile(lat, lon)))[3]
+    p = crop[3]
     u, w = earth_winds(p, v['UGRD'], v['VGRD'], lon)
     # Run totals -> per-hour amounts (hour 0 has no total)
     per_hour = lambda acc: np.diff(np.nan_to_num(acc, nan=0.0), prepend=0.0).clip(0)
@@ -1309,6 +1381,58 @@ def hourly_series(date, cycle, lat, lon):
         'qpf': r(per_hour(v['APCP'] / 25.4), 2), 'snow': r(per_hour(v['ASNOW'] * 39.37), 2),
         'snowflag': [bool(x >= 0.5) for x in np.nan_to_num(v['CSNOW'])], 'dbz': r(v['REFC'], 0),
     }
+
+
+# ponytail: one zone for every place; each place's own zone once the page serves the West
+DAILY_TZ = ZoneInfo('America/New_York')
+DAILY_SPAN = {'TMAX': 12, 'TMIN': 12, 'POP12': 12, 'APCP': 6, 'ASNOW': 6, 'FICEAC': 6}   # hours before fh a value covers
+
+
+def daily_rows(start, hours, v):
+    """Daily summary per New York calendar date from NBM point series
+    v {msg: value per forecast hour, NaN where absent}, start = run time
+    (epoch). Every value goes to the date at the middle of the window it
+    covers (instantaneous ones at their valid time), so a date gets:
+      hi        TMAX 12z-00z (8am-8pm EDT, 7am-7pm EST), deg F
+      lo        TMIN 00z-12z (the evening before to 8am EDT), deg F
+      pop_day   12 h PoP (>0.254 mm) 12z-00z, %
+      pop_night 12 h PoP 00z-12z, the same night as lo, %
+      qpf/snow  6 h amounts summed 06z-06z (2am-2am EDT), in
+      wind/gust max of the 6-hourly 10 m speeds, mph; cloud their mean cover, %
+      ptype     on days with 0.01 in or more: 'rain', 'snow' or 'ice' (freezing
+                rain), whichever has the largest liquid share, snow at 10:1
+    Days run from the first with a hi or lo to the last with a hi."""
+    days = {}
+    for msg, vals in v.items():
+        for fh, x in zip(hours, vals):
+            if np.isnan(x):
+                continue
+            key = msg if msg != 'POP12' else 'pop_day' if time.gmtime(start + fh * 3600).tm_hour == 0 else 'pop_night'
+            mid = start + (fh - DAILY_SPAN.get(msg, 0) / 2) * 3600
+            days.setdefault(datetime.fromtimestamp(mid, DAILY_TZ).strftime('%Y-%m-%d'), {}).setdefault(key, []).append(float(x))
+    rows = []
+    for date, d in sorted(days.items()):
+        pick = lambda k, f, n=0: None if k not in d else round(f(d[k]), n) if n else round(f(d[k]))
+        qpf, snow, ice = pick('APCP', sum, 2), pick('ASNOW', sum, 4), pick('FICEAC', sum, 2)   # mm, m, mm
+        ptype = None
+        if qpf is not None and qpf >= 0.254:
+            shares = {'snow': (snow or 0) * 100, 'ice': ice or 0}   # 1 m of snow ~ 100 mm of water
+            shares['rain'] = qpf - sum(shares.values())
+            ptype = max(shares, key=shares.get)
+        rows.append({'date': date, 'hi': pick('TMAX', lambda a: K_TO_F(max(a))), 'lo': pick('TMIN', lambda a: K_TO_F(min(a))),
+                     'pop_day': pick('pop_day', max), 'pop_night': pick('pop_night', max),
+                     'qpf': None if qpf is None else round(qpf / 25.4, 2), 'snow': None if snow is None else round(snow * 39.37, 1),
+                     'wind': pick('WIND', lambda a: max(a) * 2.23694), 'gust': pick('GUST', lambda a: max(a) * 2.23694),
+                     'cloud': pick('TCDC', lambda a: sum(a) / len(a)), 'ptype': ptype})
+    first = next((i for i, r in enumerate(rows) if r['hi'] is not None or r['lo'] is not None), len(rows))
+    last = max((i for i, r in enumerate(rows) if r['hi'] is not None), default=-1)
+    return rows[first:last + 1]
+
+
+def daily_series(date, cycle, lat, lon):
+    """NBM daily rows at a point, or None outside the grid."""
+    s = crop_series(load_crop(crop_path('nbm', date, cycle, forecast_tile(lat, lon))), lat, lon)
+    return None if s is None else daily_rows(frame_time('nbm', date, cycle, 0), CROPS['nbm'][1], dict(zip(DAILY_MSGS, s)))
 
 
 def nearest_station(lat, lon):
@@ -1338,8 +1462,26 @@ def recent_tiles():
             if now - t < FORECAST_TILE_KEEP_S]
 
 
+def serving_run(src, tile):
+    """(run, building) for a tile: the current run when its crop is cut,
+    else the previous run's while this one's is cut in the background
+    (building when there is none). (None, False) where the grid does not reach."""
+    (date, cycle), prev = forecast_runs(src)
+    p = date and run_grid(src, date, cycle)
+    if not p or not crop_box(p, tile):
+        return None, False
+    if os.path.exists(crop_path(src, date, cycle, tile)):
+        return (date, cycle), False
+    # Own thread: the warm pool may hold a whole run's preload queue
+    threading.Thread(target=ensure_crops, args=(src, date, cycle, [tile]), daemon=True).start()
+    if prev and os.path.exists(crop_path(src, *prev, tile)):
+        return prev, False
+    return None, True
+
+
 def forecast(lat, lon):
-    """Overview payload: observed now (RTMA), hourly RRFS series, nearest plume station."""
+    """Overview payload: observed now (RTMA), hourly RRFS series, daily NBM
+    rows from today (New York), nearest plume station."""
     rtma = rtma_frames()
     now = None
     if rtma:
@@ -1347,22 +1489,16 @@ def forecast(lat, lon):
         vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
         now = {**vals, 'time': frame_time(*frame)} if vals else None
     tile = forecast_tile(lat, lon)
-    (date, cycle), prev = forecast_runs()
-    hourly, building = None, False
-    path0 = date and fetch_msg('rrfs', date, cycle, 0, 'TMP')
-    # Tiles the model grid does not reach get observations only, and are not kept
-    if path0 and crop_box(decoded(path0)[1], tile):
+    (hrun, building), (drun, daily_building) = serving_run('rrfs', tile), serving_run('nbm', tile)
+    # Tiles the model grids do not reach get observations only, and are not kept
+    if hrun or building or drun or daily_building:
         note_tile(tile)
-        if os.path.exists(crop_path(date, cycle, tile)):
-            hourly = hourly_series(date, cycle, lat, lon)
-        else:
-            # Own thread: the warm pool may hold a whole run's preload queue
-            threading.Thread(target=ensure_crops, args=(date, cycle, [tile]), daemon=True).start()
-            if prev and os.path.exists(crop_path(*prev, tile)):
-                hourly = hourly_series(*prev, lat, lon)   # last run's, until this one's is cut
-            else:
-                building = True
-    return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hourly, 'building': building,
+    daily = drun and daily_series(*drun, lat, lon)
+    if daily:
+        today = datetime.now(DAILY_TZ).strftime('%Y-%m-%d')
+        daily = [d for d in daily if d['date'] >= today]
+    return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hrun and hourly_series(*hrun, lat, lon), 'building': building,
+            'daily': daily or None, 'daily_run': ''.join(drun) if daily else None, 'daily_building': daily_building,
             'station': nearest_station(lat, lon)}
 
 

@@ -103,23 +103,98 @@ assert X.crop_box(p, X.forecast_tile(10.5, 40.5)) is None, 'a tile off the grid 
 
 # Purge: stale cycles and old formats go, live ones stay, and a source whose
 # newest cycle is unknown (S3 not answering yet) keeps its cache
-def purge_with(cycles, rtma):
-    X.field_cycle, X.rtma_frames = (lambda m: cycles[m]), (lambda: rtma)
-    for d in ('rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615', '2026092812'):
+def purge_with(cycles, rtma, nbm=('20260928', '00')):
+    X.field_cycle, X.rtma_frames, X.daily_cycle = (lambda m: cycles[m]), (lambda: rtma), (lambda: nbm)
+    for d in ('rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615', '2026092812',
+              'nbm2026092712', 'nbm2026092800'):
         os.makedirs(os.path.join(X.FIELD_DIR, d), exist_ok=True)
     open(os.path.join(X.FIELD_DIR, 'rrfs2026092812', 'old.npy'), 'w').close()
     open(os.path.join(X.FIELD_DIR, 'rrfs2026092812', 'fc_40_-74.npz'), 'w').close()
     X.purge_fields()
     return sorted(os.listdir(X.FIELD_DIR))
 live = {'hourly': ('20260928', '12'), 'extended': ('20260928', '12')}
-assert purge_with(live, [('20260928', '1615')]) == ['rrfs2026092812', 'rtma202609281615']
+assert purge_with(live, [('20260928', '1615')]) == ['nbm2026092800', 'rrfs2026092812', 'rtma202609281615']
 assert os.listdir(os.path.join(X.FIELD_DIR, 'rrfs2026092812')) == ['fc_40_-74.npz'], 'crops kept, other files swept'
 # Run switch: the previous run stays (its forecast crops serve) until preload releases it
 switched = {'hourly': ('20260928', '18'), 'extended': ('20260928', '18')}
 assert 'rrfs2026092812' in purge_with(switched, [('20260928', '1615')]), 'previous run kept through the switch'
-X._forecast_run['prev'] = None
+X._forecast_run['rrfs']['prev'] = None
 assert 'rrfs2026092812' not in purge_with(switched, [('20260928', '1615')]), 'released run purged'
+# The NBM run switches the same way
+assert 'nbm2026092800' in purge_with(switched, [('20260928', '1615')], ('20260928', '12')), 'previous NBM run kept'
+X._forecast_run['nbm']['prev'] = None
+assert 'nbm2026092800' not in purge_with(switched, [('20260928', '1615')], ('20260928', '12')), 'released NBM run purged'
 cold = {'hourly': (None, None), 'extended': ('20260928', '12')}
-assert purge_with(cold, []) == ['rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615']
+X._forecast_run['nbm'] = {'cur': None, 'prev': None}
+assert purge_with(cold, [], (None, None)) == ['nbm2026092712', 'nbm2026092800', 'rrfs2026092806',
+                                              'rrfs2026092812', 'rtma202609281600', 'rtma202609281615']
+
+# NBM .idx step text, as published: hours throughout, the probability descriptor after the step
+assert [X.nbm_step(m, 24) for m in X.DAILY_MSGS] == \
+    ['24 hour fcst', '24 hour fcst', '24 hour fcst', '18-24 hour acc fcst', '18-24 hour acc fcst',
+     '18-24 hour acc fcst', '12-24 hour max fcst', '12-24 hour min fcst', '12-24 hour acc fcst:prob >0.254']
+assert X.nbm_step('APCP', 6) == '0-6 hour acc fcst' and X.nbm_step('TMAX', 264) == '252-264 hour max fcst'
+# 12 h windows end at 00z (TMAX, day PoP) and 12z (TMIN, night PoP), never before the run
+has = lambda c, m: [fh for fh in range(6, 49, 6) if X.nbm_has(c, m, fh)]
+assert has('00', 'TMAX') == [24, 48] and has('00', 'TMIN') == [12, 36] and has('00', 'POP12') == [12, 24, 36, 48]
+assert has('12', 'TMAX') == [12, 36] and has('12', 'TMIN') == [24, 48] and has('06', 'TMAX') == [18, 42]
+assert has('00', 'APCP') == list(range(6, 49, 6))
+
+# .idx matching: a probability row listed before the plain one, percentile
+# and std dev rows beside them; each wanted message gets its own byte range
+idx = '\n'.join(f'{n}:{n * 100}:d=2026092800:{t}' for n, t in enumerate([
+    'APCP:surface:18-24 hour acc fcst:prob >0.254:prob fcst 255/255',
+    'APCP:surface:12-24 hour acc fcst:prob >0.254:prob fcst 255/255',
+    'APCP:surface:18-24 hour acc@(fcst,dt=6 hour),missing=0:50% level',
+    'APCP:surface:18-24 hour acc fcst:',
+    'TMP:2 m above ground:24 hour fcst:ens std dev',
+    'TMP:2 m above ground:24 hour fcst:',
+    'WIND:10 m above ground:24 hour fcst:'], 1))
+ranges = []
+
+
+def fake_get(url, headers=None, timeout=None):
+    if url.endswith('.idx'):
+        return idx.encode()
+    ranges.append(headers['Range'])
+    return b''
+
+
+real_get, X.http_get = X.http_get, fake_get
+X.fetch_idx_fields('u', [('APCP', 'surface')], X.nbm_step('APCP', 24))
+X.fetch_idx_fields('u', [('APCP', 'surface')], X.nbm_step('POP12', 24))
+X.fetch_idx_fields('u', [('TMP', '2 m above ground'), ('WIND', '10 m above ground')], '24 hour fcst')
+X.http_get = real_get
+assert ranges == ['bytes=400-499', 'bytes=200-299', 'bytes=600-699', 'bytes=700-'], ranges
+
+# Daily rows from a 00z run on 2026-09-28 (EDT, UTC-4), every message every 6 h where published
+hours = list(X.CROPS['nbm'][1])
+value = {'TMAX': lambda fh: 300 + fh / 12, 'TMIN': lambda fh: 280 + fh / 12, 'POP12': lambda fh: fh,
+         'APCP': lambda fh: 2.54, 'ASNOW': lambda fh: 0.3 if fh == 42 else 0, 'FICEAC': lambda fh: 0,
+         'TCDC': lambda fh: fh % 24 * 4, 'WIND': lambda fh: fh / 6, 'GUST': lambda fh: fh / 3}
+series = lambda cycle, msgs: {m: np.array([value[m](fh) if X.nbm_has(cycle, m, fh) else np.nan for fh in hours])
+                              for m in msgs}
+rows = X.daily_rows(X.frame_time('nbm', '20260928', '00', 0), hours, series('00', X.DAILY_MSGS))
+by = {r['date']: r for r in rows}
+assert [r['date'] for r in rows] == [f'2026-09-{d}' for d in (28, 29, 30)] + [f'2026-10-{d:02d}' for d in range(1, 9)]
+d = by['2026-09-28']
+# TMAX 12z-00z ends at f024, TMIN 00z-12z at f012; day PoP ends at f024, night PoP at f012
+assert (d['hi'], d['lo'], d['pop_day'], d['pop_night']) == (round(X.K_TO_F(302)), round(X.K_TO_F(281)), 24, 12), d
+# 6 h amounts 06z-06z: f012..f030. The 00z-06z bucket (f006, middle 11pm on the 27th)
+# makes a 27th with no hi or lo, which is left out
+assert d['qpf'] == 0.4 and d['snow'] == 0 and d['ptype'] == 'rain', d
+# Instantaneous values at valid time: 06z, 12z, 18z and 00z (8pm): f006..f024
+assert (d['wind'], d['gust'], d['cloud']) == (round(4 * 2.23694), round(8 * 2.23694), 36), d
+# 30 cm of snow (12z-18z on the 29th) outweighs 4 x 2.54 mm of rain as liquid
+assert by['2026-09-29']['snow'] == 11.8 and by['2026-09-29']['ptype'] == 'snow', by['2026-09-29']
+# The last day with a hi ends the list (f264 = 8pm Oct 8)
+assert by['2026-10-08']['hi'] == round(X.K_TO_F(322))
+# A 12z run has no TMIN for its own morning: today is listed with lo None; the last TMAX is f252
+rows12 = X.daily_rows(X.frame_time('nbm', '20260928', '12', 0), hours, series('12', ('TMAX', 'TMIN')))
+assert rows12[0]['date'] == '2026-09-28' and rows12[0]['lo'] is None and rows12[0]['hi'] == round(X.K_TO_F(301))
+assert rows12[-1]['date'] == '2026-10-08', rows12[-1]
+# Winter (EST, UTC-5): the same windows land on the same dates
+w = X.daily_rows(X.frame_time('nbm', '20260115', '00', 0), hours, series('00', ('TMAX', 'TMIN')))
+assert w[0]['date'] == '2026-01-15' and w[0]['lo'] == round(X.K_TO_F(281)) and w[0]['hi'] == round(X.K_TO_F(302))
 
 print(f'fields: ok (grid round trip within {err:.4f} cells)')
