@@ -35,7 +35,11 @@ export const wind = (mph, u) => `${Math.round(toWind(mph, u))} ${windUnit(u)}`;
 
 /** Precipitation: inches to 2 decimals ("0.25\"") or whole millimetres ("6 mm"), snow to 1 decimal / cm */
 export function precip(inches, u, snow = false) {
-    if (u.precip === 'mm') return snow ? `${(inches * 2.54).toFixed(1)} cm` : `${Math.round(inches * 25.4)} mm`;
+    if (u.precip === 'mm') {
+        if (snow) return `${(inches * 2.54).toFixed(1)} cm`;
+        const mm = inches * 25.4;
+        return mm > 0 && mm < 0.5 ? '<1 mm' : `${Math.round(mm)} mm`;
+    }
     return `${inches.toFixed(snow ? 1 : 2)}"`;
 }
 
@@ -46,4 +50,19 @@ export function clock(ms, u, minutes = true, timeZone) {
         : { hour: 'numeric', ...(minutes ? { minute: '2-digit' } : {}) }) };
     const s = new Date(ms).toLocaleTimeString('en-US', opts);
     return u.clock === '24' && !minutes ? s.slice(0, 2) : s.replace(' ', minutes ? ' ' : '');
+}
+
+/** An hour for sentences and hovers: "3 PM" or "15:00" (clock(..., false) is the compact "3PM" of axes) */
+export function hourText(ms, u, timeZone) {
+    if (u.clock === '24') return `${clock(ms, u, false, timeZone)}:00`;
+    return new Date(ms).toLocaleTimeString('en-US', { timeZone, hour: 'numeric' });
+}
+
+/** A range of two formatted values sharing a unit: "57–59°", "5–8 mph"; one value when they match */
+export function span(a, b) {
+    if (a === b) return b;
+    const unit = b.match(/[^\d.]*$/)[0];
+    const lo = unit && a.endsWith(unit) ? a.slice(0, -unit.length) : a;
+    // a minus sign beside an en dash is hard to read: "-5 to -3°"
+    return /^-/.test(lo) || /^-/.test(b) ? `${lo} to ${b}` : `${lo}–${b}`;
 }

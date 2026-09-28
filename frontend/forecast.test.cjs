@@ -11,7 +11,11 @@ const assert = require('node:assert/strict');
     // Conditions
     assert.equal(f.condition(row(0), false).key, 'clear');
     assert.equal(f.condition(row(0), true).label, 'Clear');
-    assert.equal(f.condition(row(0, { cloud: 95 }), false).label, 'Cloudy');
+    assert.equal(f.condition(row(0, { cloud: 95 }), false).label, 'Overcast');
+    assert.equal(f.condition(row(0, { cloud: 75 }), true).label, 'Mostly cloudy');
+    assert.equal(f.sky(95, false), f.condition(row(0, { cloud: 95 }), false).label, 'the Sky card and the headline agree');
+    assert.equal(f.sky(10, true), 'Clear');
+    assert.equal(f.sky(10, false), 'Sunny');
     assert.equal(f.condition(row(0, { qpf: 0.15 }), false).label, 'Rain');
     assert.equal(f.condition(row(0, { qpf: 0.05, snowy: true }), false).label, 'Snow');
     assert.equal(f.condition(row(0, { dbz: 55, qpf: 0.4 }), false).key, 'storm');
@@ -23,6 +27,18 @@ const assert = require('node:assert/strict');
     assert.match(f.nowcast(later, start), /^Rain starting around 3 AM$/);
     const now = dry.map((r, i) => (i < 2 ? { ...r, qpf: 0.05, snowy: true } : r));
     assert.match(f.nowcast(now, start + 30 * 60000), /^Snow ending around 2 AM$/);
+    assert.equal(f.nowcast(later, start, () => '03:00'), 'Rain starting around 03:00', 'the clock comes from the caller');
+
+    // The days ahead in one sentence
+    const od = (pops, snow = 0) => pops.map((pop, i) => ({ key: `d${i}`, t: i, pop, snow }));
+    const nm = d => ['Today', 'Friday', 'Saturday', 'Sunday', 'Oct 8'][d.t];
+    assert.equal(f.outlook(od([90, 10, 65, 30, 5]), 'd0', nm), 'Rain likely Saturday (65%)', 'today is left out');
+    assert.equal(f.outlook(od([0, 10, 37, 5, 5]), 'd0', nm), 'Chance of rain Saturday, 37%');
+    assert.equal(f.outlook(od([0, 22, 5, 5, 5]), 'd0', nm), 'Slight chance of rain Friday, 22%');
+    assert.equal(f.outlook(od([0, 10, 5, 15, 5]), 'd0', nm), 'No rain expected through Oct 8');
+    assert.equal(f.outlook(od([0, 10, 5, 15, 5]), 'd0', nm, true), 'Dry after that through Oct 8');
+    assert.equal(f.outlook(od([0, 70, 5, 15, 5], 2), 'd0', nm), 'Snow likely Friday (70%)');
+    assert.equal(f.outlook(od([0, 10]), 'd0', nm), '', 'too few days to call it dry');
 
     // Days: local days, most severe daytime condition, short trailing day dropped
     const rows = Array.from({ length: 30 }, (_, i) => row(i, { tmp: 50 + i, qpf: i === 14 ? 0.2 : 0 }));
@@ -56,6 +72,7 @@ const assert = require('node:assert/strict');
 
     // Comfort
     assert.equal(f.comfort(68), 'Muggy');
+    assert.equal(f.comfort(58), 'A little humid');
     assert.ok(Math.abs(f.feelsLike(20, 5, 20) - 4) < 1.5, 'wind chill 20°F at 20 mph ~4°F');
     assert.ok(Math.abs(f.feelsLike(95, 75, 5) - 108) < 2, 'heat index 95°F at ~52% humidity ~108°F (NWS table)');
     assert.ok(Math.abs(f.humidity(70, 70) - 100) < 0.1);
@@ -124,6 +141,13 @@ const assert = require('node:assert/strict');
     assert.equal(u.precip(0.254, u.DEFAULT_UNITS), '0.25"');
     assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), C), '15:05');
     assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), u.DEFAULT_UNITS, false), '3PM');
+    assert.equal(u.hourText(Date.parse('2026-09-28T19:05:00Z'), u.DEFAULT_UNITS), '3 PM');
+    assert.equal(u.hourText(Date.parse('2026-09-28T19:05:00Z'), C), '15:00');
+    assert.equal(u.hourText(Date.parse('2026-09-28T19:05:00Z'), u.DEFAULT_UNITS, 'America/Los_Angeles'), '12 PM');
+    assert.equal(u.span('57°', '59°'), '57–59°');
+    assert.equal(u.span('5 mph', '8 mph'), '5–8 mph');
+    assert.equal(u.span('0.10"', '0.25"'), '0.10–0.25"');
+    assert.equal(u.span('58°', '58°'), '58°');
     // Signal layout: ramp, quantiles, the spiral
     const sg = await import('./js/signal.js');
     assert.match(sg.rampColor(63), /^oklch\(/);
@@ -147,6 +171,7 @@ const assert = require('node:assert/strict');
         assert.equal(sp.segs.length, 192);
         assert.ok(sp.segs[0].observed && !sp.segs[96].observed);
         assert.equal(sp.segs[96].tmp, 63);                       // the join shows the analysis value
+        assert.equal(sp.segs[0].tmp, 60);                        // the lap's first minutes take the first observation
         assert.equal(sp.now.x, '260.0');                         // now sits at the top
         assert.equal(sp.rain.length, 2);                         // one drop per wet hour
         assert.ok(sp.rain[0].t < now && sp.rain[1].t > now);
@@ -196,5 +221,10 @@ const assert = require('node:assert/strict');
     assert.equal(z.day(sc.up, LA), '2026-09-28');
     assert.equal(z.hour(sc.down, LA), 18);                    // sunset 6:4x PM PDT
     assert.equal(z.day(f.sunTimes(z.noon(t0, LA), la.lat, la.lon, LA).set, LA), '2026-09-28');
+    const MM = { ...u.DEFAULT_UNITS, precip: 'mm' };
+    assert.equal(u.precip(0.01, MM), '<1 mm');
+    assert.equal(u.precip(0.1, MM), '3 mm');
+    assert.equal(u.span('-5°', '-3°'), '-5 to -3°');
+    assert.equal(u.span('57°', '59°'), '57–59°');
     console.log('Forecast checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -226,7 +226,7 @@ body { -webkit-tap-highlight-color: transparent; }
 :root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
 .spiral .sp-drop { fill: var(--c-rain); }
 .spiral .sp-missing { fill: var(--missing); stroke: var(--missing); stroke-width: 0.6; }
-.spiral .sp-night { fill: #141312; opacity: 0.34; }
+.spiral .sp-night { fill: #141312; opacity: 0.2; }
 :root[data-theme="dark"] .spiral .sp-night { fill: #000; opacity: 0.62; }
 .spiral .sp-sweep { stroke-dasharray: 1; animation: sp-draw 2.2s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
 .spiral .sp-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
@@ -534,13 +534,11 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .wx-result-text { display: flex; flex-direction: column; min-width: 0; }
 .wx-result-name { font-size: 18px; font-weight: 700; }
 .wx-result-detail { font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.wx-empty, .wx-sheet-note { padding: 12px 4px; color: var(--ink-2); font-size: 14px; }
-.wx-sheet-note { margin-top: auto; text-align: center; font-size: 12px; }
+.wx-empty { padding: 12px 4px; color: var(--ink-2); font-size: 14px; }
 
 .settings-card { background: var(--card); border-radius: 10px; padding: 20px; max-height: 100%; overflow-y: auto; }
 .settings-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .settings-head h2 { font-size: 30px; font-weight: 800; font-variation-settings: 'wdth' 58; }
-.settings-note { margin-top: 14px; font-size: 12px; color: var(--ink-2); }
 .setting { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; flex-wrap: wrap; }
 .setting-label { font-weight: 600; }
 .setting-h { margin-top: 22px; font-size: 20px; font-weight: 800; font-variation-settings: 'wdth' 64; }

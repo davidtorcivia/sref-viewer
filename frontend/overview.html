@@ -53,12 +53,12 @@
             <label class="wx-field">
                 <svg class="ic ic-sm"><use href="#i-search" /></svg>
                 <input id="searchInput" type="search" placeholder="City, ZIP code or street address" autocomplete="off"
-                    aria-label="Search places" enterkeyhint="search">
+                    aria-label="Search places" enterkeyhint="search"
+                    title="Forecasts resolve to about 2.5 km: an address picks the neighborhood.">
             </label>
             <button type="button" class="wx-cancel" id="searchCancel">Cancel</button>
         </form>
         <ul id="searchResults" class="wx-results"></ul>
-        <p class="wx-sheet-note">Forecasts resolve to about 2.5 km: an address picks the neighborhood.</p>
     </dialog>
 
     <dialog id="settingsDialog" class="wx-sheet wx-settings" aria-label="Settings">
@@ -68,7 +68,6 @@
                 <button type="button" class="wx-cancel settings-done">Done</button>
             </div>
             <div class="settings-body"></div>
-            <p class="settings-note">Saved on this device.</p>
         </div>
     </dialog>
 

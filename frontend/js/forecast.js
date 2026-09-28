@@ -50,9 +50,15 @@ export function condition(r, night) {
         return { key: 'rain', label: r.qpf >= 0.3 ? 'Heavy rain' : r.qpf >= 0.1 ? 'Rain' : 'Light rain' };
     }
     const c = r.cloud ?? 0;
-    if (c < 20) return { key: night ? 'clear-night' : 'clear', label: night ? 'Clear' : 'Sunny' };
-    if (c < 60) return { key: night ? 'partly-night' : 'partly', label: 'Partly cloudy' };
-    return { key: 'cloudy', label: c < 90 ? 'Mostly cloudy' : 'Cloudy' };
+    const label = sky(c, night);
+    if (c < 20) return { key: night ? 'clear-night' : 'clear', label };
+    if (c < 60) return { key: night ? 'partly-night' : 'partly', label };
+    return { key: 'cloudy', label };
+}
+
+/** The sky in words from cloud cover (%): the same words as condition() */
+export function sky(cloud, night) {
+    return cloud < 20 ? (night ? 'Clear' : 'Sunny') : cloud < 60 ? 'Partly cloudy' : cloud < 90 ? 'Mostly cloudy' : 'Overcast';
 }
 
 const SEVERITY = { storm: 5, snow: 4, rain: 3, cloudy: 2, partly: 1, 'partly-night': 1, clear: 0, 'clear-night': 0 };
@@ -109,6 +115,23 @@ export function nowcast(rows, now, clock = clock12) {
     }
     const start = ahead.find(isWet);
     return start ? `${kind(start)} starting around ${clock(start.t)}` : 'Dry for the next 12 hours';
+}
+
+/**
+ * The days ahead in one sentence: the wettest day after today when its chance
+ * is 20% or more, else how long it stays dry. `name` words a day ("Sunday",
+ * "Oct 8"); `wetSoon` when rain is already in the next hours' sentence.
+ */
+export function outlook(days, todayKey, name, wetSoon = false) {
+    const ahead = days.filter(d => d.key !== todayKey);
+    if (!ahead.length) return '';
+    const top = ahead.reduce((a, d) => ((d.pop ?? 0) > (a.pop ?? 0) ? d : a));
+    const pop = top.pop ?? 0, kind = top.snow >= 0.1 ? 'snow' : 'rain';
+    if (pop >= 60) return `${kind === 'snow' ? 'Snow' : 'Rain'} likely ${name(top)} (${pop}%)`;
+    if (pop >= 30) return `Chance of ${kind} ${name(top)}, ${pop}%`;
+    if (pop >= 20) return `Slight chance of ${kind} ${name(top)}, ${pop}%`;
+    if (ahead.length < 3) return '';
+    return `${wetSoon ? 'Dry after that' : 'No rain expected'} through ${name(ahead[ahead.length - 1])}`;
 }
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];

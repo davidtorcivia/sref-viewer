@@ -102,6 +102,8 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
         if (lastObs && t > lastObs.t && nowTemp != null && now - lastObs.t <= 3 * HOUR) {
             return lastObs.v + (nowTemp - lastObs.v) * (t - lastObs.t) / (now - lastObs.t);
         }
+        // before the first observation (the lap starts mid-hour) the first one stands in, up to two hours back
+        if (pastPts.length && t < pastPts[0].t && pastPts[0].t - t <= 2 * HOUR) return pastPts[0].v;
         return valueAt(pastPts, t);
     };
 
