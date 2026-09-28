@@ -89,4 +89,19 @@ flat = np.array([-128, -128, 127, -127, 0, 5, 6, -128], np.int8)
 d = np.frombuffer(X.gzip.decompress(X.pack_grid(flat)), np.int8)
 assert np.array_equal(np.cumsum(d, dtype=np.int8), flat), 'pack_grid round trip'
 
+# Purge: stale cycles and old formats go, live ones stay, and a source whose
+# newest cycle is unknown (S3 not answering yet) keeps its cache
+def purge_with(cycles, rtma):
+    X.field_cycle, X.rtma_frames = (lambda m: cycles[m]), (lambda: rtma)
+    for d in ('rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615', '2026092812'):
+        os.makedirs(os.path.join(X.FIELD_DIR, d), exist_ok=True)
+    open(os.path.join(X.FIELD_DIR, 'rrfs2026092812', 'old.npy'), 'w').close()
+    X.purge_fields()
+    return sorted(os.listdir(X.FIELD_DIR))
+live = {'hourly': ('20260928', '12'), 'extended': ('20260928', '12')}
+assert purge_with(live, [('20260928', '1615')]) == ['rrfs2026092812', 'rtma202609281615']
+assert os.listdir(os.path.join(X.FIELD_DIR, 'rrfs2026092812')) == [], 'non-GRIB files swept'
+cold = {'hourly': (None, None), 'extended': ('20260928', '12')}
+assert purge_with(cold, []) == ['rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615']
+
 print(f'fields: ok (grid round trip within {err:.4f} cells)')

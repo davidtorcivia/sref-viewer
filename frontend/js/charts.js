@@ -320,6 +320,16 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
     chart.$param = param;
     chart.$theme = theme;
 
+    // A mouse that went from the chart into the readout (for its map link)
+    // resets it on leaving, unless it heads back to the chart
+    const readout = document.getElementById(`readout-${param}`);
+    if (readout) readout.onmouseleave = (e) => {
+        if (e.relatedTarget === canvas || chart.$scrubX == null) return;
+        chart.$scrubX = null;
+        renderReadout(chart);
+        chart.draw();
+    };
+
     // Lifting the finger returns the readout to "now" after a short hold
     canvas.ontouchstart = () => clearTimeout(chart.$hold);
     canvas.ontouchend = canvas.ontouchcancel = () => {

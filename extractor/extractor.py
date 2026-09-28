@@ -921,6 +921,13 @@ def live_frames():
     return live | {('rtma', d, c) for d, c in rtma_frames()}
 
 
+def known_sources():
+    """Sources whose live frames are all known; purging the others could drop
+    a cache just because S3 has not answered yet (cold start)."""
+    known = {'rtma'} if rtma_frames() else set()
+    return known | ({'rrfs'} if all(field_cycle(m)[0] for m in FIELD_MODES) else set())
+
+
 def frame_dir(src, date, cycle):
     return os.path.join(FIELD_DIR, f'{src}{date}{cycle}')
 
@@ -931,11 +938,13 @@ def purge_fields():
     global _warming
     live = live_frames()
     keep = {os.path.basename(frame_dir(*f)) for f in live}
+    known = known_sources()
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
-        if old not in keep:
+        src = old[:4]   # dirs are <src><date><cycle>; anything else is an older cache format
+        if old not in keep and (src not in SOURCES or src in known):
             shutil.rmtree(os.path.join(FIELD_DIR, old), ignore_errors=True)
             continue
-        # Inside a live cycle: only GRIB messages, plus writes still in progress
+        # Kept dirs hold only GRIB messages, plus writes still in progress
         for f in os.scandir(os.path.join(FIELD_DIR, old)):
             try:
                 if not f.name.endswith(('.grib2', '.tmp')) or f.name.endswith('.tmp') and time.time() - f.stat().st_mtime > 600:
@@ -1091,7 +1100,19 @@ def warm_field(name, frames):
         for m in field_msgs(name):
             if frame + (m,) not in _warming:
                 _warming.add(frame + (m,))
-                _warm_pool.submit(fetch_msg, *frame, m)
+                _warm_pool.submit(warm_one, frame + (m,))
+
+
+def warm_one(key):
+    """Background fetch; a failure leaves the key out of _warming so the
+    next preload pass or index request retries it."""
+    try:
+        ok = fetch_msg(*key) is not None
+    except Exception as err:  # noqa: BLE001 - logged, retried later
+        print(f'[WARM] {key}: {err}', flush=True)
+        ok = False
+    if not ok:
+        _warming.discard(key)
 
 
 def preload_fields():
@@ -1172,6 +1193,8 @@ class Handler(BaseHTTPRequestHandler):
                     or int(x) >= 2 ** int(z) or int(y) >= 2 ** int(z) or (kind == 'grid' and not FIELDS[name].get('grid')):
                 return self.send_json(400, {'error': 'Invalid request'})
             frame = (src, date, cycle, int(fh))
+            if src == 'rtma' and frame[3]:   # analyses have no forecast hours; each fh would cache a copy
+                return self.send_json(400, {'error': 'RTMA frames are fh 0'})
             # Live frames only: purge_fields drops the rest
             if frame[:3] not in live_frames():
                 return self.send_json(404, {'error': 'Not a live frame'})
