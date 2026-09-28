@@ -317,3 +317,22 @@ export function moonPath(cx, cy, r, phase) {
     const term = waxing ? (k > 0 ? 0 : 1) : (k > 0 ? 1 : 0);
     return `M${cx},${cy - r}A${r},${r} 0 0 ${limb} ${cx},${cy + r}A${rx},${r} 0 0 ${term} ${cx},${cy - r}Z`;
 }
+
+/**
+ * Daily rows from the NBM `daily` list ({date 'YYYY-MM-DD', hi, lo,
+ * pop_day, qpf, snow, ptype, cloud, ...}), shaped like dailyRows' output:
+ * {key, t (local noon), hi, lo, pop, qpf, snow, gust, cond}. The condition
+ * shows precipitation only when it is both likely (30% or more) and
+ * measurable; otherwise the day's mean cloud cover.
+ */
+export function nbmDays(daily) {
+    return daily.map(d => {
+        const [y, m, day] = d.date.split('-').map(Number);
+        const t = new Date(y, m - 1, day, 12).getTime();
+        const wet = (d.pop_day ?? 0) >= 30 && (d.qpf ?? 0) >= 0.01;
+        const c = d.cloud ?? 50;
+        const cond = wet ? (d.ptype === 'snow' ? { key: 'snow', label: 'Snow' } : { key: 'rain', label: d.ptype === 'ice' ? 'Freezing rain' : 'Rain' })
+            : c < 25 ? { key: 'clear', label: 'Sunny' } : c < 60 ? { key: 'partly', label: 'Partly cloudy' } : { key: 'cloudy', label: 'Cloudy' };
+        return { key: dayKey(t), t, hi: d.hi, lo: d.lo, pop: d.pop_day, qpf: d.qpf ?? 0, snow: d.snow ?? 0, gust: d.gust, cond };
+    });
+}

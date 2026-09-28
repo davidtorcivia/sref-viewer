@@ -27,6 +27,7 @@ const PRECACHE_URLS = [
     '/js/overview.js?v=__V__',
     '/js/forecast.js?v=__V__',
     '/js/sky.js?v=__V__',
+    '/js/units.js?v=__V__',
     '/js/site.js?v=__V__',
     '/vendor/chart.umd.min.js',
     '/vendor/chartjs-adapter-date-fns.bundle.min.js',

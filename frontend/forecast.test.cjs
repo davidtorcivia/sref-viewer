@@ -67,5 +67,28 @@ const assert = require('node:assert/strict');
     const m = f.moments(hrows, hw - 86400000);
     assert.equal(m.length, 1);
     assert.equal(m[0].text, '55–57°, clear');
+    // NBM days: local noon, likely-and-measurable precipitation sets the condition
+    const nd = f.nbmDays([{ date: '2026-10-04', hi: 71, lo: 62, pop_day: 37, qpf: 0.65, ptype: 'rain', cloud: 77 },
+        { date: '2026-10-05', hi: 69, lo: null, pop_day: 20, qpf: 0.25, ptype: 'rain', cloud: 54 }]);
+    assert.equal(new Date(nd[0].t).getHours(), 12);
+    assert.equal(nd[0].key, '2026-10-4');
+    assert.equal(nd[0].cond.key, 'rain');
+    assert.equal(nd[1].cond.key, 'partly', 'a 20% chance does not make a rain day');
+
+    // Units
+    const u = await import('./js/units.js');
+    const C = u.parseUnits('{"temp":"C","wind":"kmh","precip":"mm","clock":"24","bogus":1}');
+    assert.deepEqual(C, { temp: 'C', wind: 'kmh', precip: 'mm', clock: '24' });
+    assert.deepEqual(u.parseUnits('{"temp":"K"}'), u.DEFAULT_UNITS, 'unknown values fall back');
+    assert.deepEqual(u.parseUnits('not json'), u.DEFAULT_UNITS);
+    assert.equal(u.deg(212, C), '100°');
+    assert.equal(u.deg(null, C), '--');
+    assert.equal(u.wind(10, C), '16 km/h');
+    assert.equal(u.wind(10, { ...C, wind: 'kts' }), '9 kt');
+    assert.equal(u.precip(1, C), '25 mm');
+    assert.equal(u.precip(2, C, true), '5.1 cm');
+    assert.equal(u.precip(0.254, u.DEFAULT_UNITS), '0.25"');
+    assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), C), '15:05');
+    assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), u.DEFAULT_UNITS, false), '3PM');
     console.log('Forecast checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

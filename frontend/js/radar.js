@@ -29,10 +29,16 @@ if (EMBED) {
     // The overview drives the embed: mini/full view, and pausing while scrolled away
     window.addEventListener('message', e => {
         if (e.origin !== location.origin || e.data?.type !== 'wx-radar') return;
-        document.body.classList.toggle('embed-mini', e.data.view === 'mini');
-        if (map) map.resize();
+        if ('view' in e.data) {
+            document.body.classList.toggle('embed-mini', e.data.view === 'mini');
+            if (map) map.resize();
+        }
         if (e.data.play === false) pause();
         else if (e.data.play === true && frames.length) play();
+    });
+    // Focus inside the iframe keeps Escape from the overview: pass it up
+    window.addEventListener('keydown', e => {
+        if (e.key === 'Escape') parent.postMessage({ type: 'wx-radar-close' }, location.origin);
     });
 }
 import { applySiteSettings } from './site.js?v=__V__';

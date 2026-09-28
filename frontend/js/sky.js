@@ -1,8 +1,8 @@
 /**
  * Living sky behind the overview: one canvas over the CSS gradient, drawing
  * the sun glow (placed by solar azimuth and altitude), the moon in its
- * phase, stars, drifting clouds (count by cloud cover, speed by wind), rain
- * streaks or snowflakes, and lightning in storms.
+ * phase, stars (fewer as cloud cover grows), rain streaks or snowflakes,
+ * and lightning in storms. Cloud cover itself shows as the sky's color.
  *
  * Budget: at most 30 fps, device pixel ratio capped at 1.5, nothing drawn
  * while the tab is hidden, and a single still frame for reduced motion.
@@ -15,33 +15,9 @@ const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').ma
 
 let canvas, ctx, w = 0, h = 0, dpr = 1;
 let scene = null;
-let clouds = [], stars = [], drops = [];
+let stars = [], drops = [];
 let raf = 0, last = 0, flash = 0, nextFlash = 0;
-let cloudSprite = null;
 
-// One soft cloud drawn once, then stamped scaled and faded
-function makeCloudSprite() {
-    const c = document.createElement('canvas');
-    c.width = 320;
-    c.height = 140;
-    const g = c.getContext('2d');
-    const puff = (x, y, r) => {
-        const grd = g.createRadialGradient(x, y, 0, x, y, r);
-        grd.addColorStop(0, 'rgba(255,255,255,0.85)');
-        grd.addColorStop(0.6, 'rgba(255,255,255,0.35)');
-        grd.addColorStop(1, 'rgba(255,255,255,0)');
-        g.fillStyle = grd;
-        g.beginPath();
-        g.arc(x, y, r, 0, Math.PI * 2);
-        g.fill();
-    };
-    [[90, 85, 60], [150, 65, 70], [210, 80, 58], [250, 95, 42], [60, 100, 40], [160, 100, 55]].forEach(p => puff(...p));
-    return c;
-}
-
-// Backing store follows the canvas's CSS box. Mobile browsers resize the
-// viewport as the URL bar slides during scrolling; only a width change (or a
-// new scene) re-places the clouds and stars, so the sky does not jump.
 function resize(force) {
     dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const nw = canvas.clientWidth, nh = canvas.clientHeight;
@@ -58,11 +34,6 @@ const rand = (a, b) => a + Math.random() * (b - a);
 
 function populate() {
     if (!scene) return;
-    const n = Math.round((scene.cloud / 100) * 11);
-    clouds = Array.from({ length: n }, (_, i) => ({
-        x: rand(-0.3, 1.1) * w, y: rand(0.02, 0.55) * h * (i % 3 === 0 ? 0.6 : 1),
-        s: rand(0.7, 1.9) * (w < 600 ? 0.7 : 1), a: rand(0.18, 0.42), v: rand(0.6, 1.4),
-    }));
     stars = Array.from({ length: Math.round(w * h / 9000) }, () => ({
         x: Math.random() * w, y: Math.random() * h * 0.7, r: rand(0.4, 1.3), p: Math.random() * Math.PI * 2,
     }));
@@ -103,19 +74,6 @@ function draw(t) {
         }
         drawMoon(w * 0.8, h * 0.14, Math.min(w, h) * 0.045, s.moon, vis);
     }
-
-    // Clouds drift with the wind (east is right; flow direction simplified to left-to-right)
-    const drift = (4 + s.wind * 0.8) / 1000;
-    for (const c of clouds) {
-        // Frame step capped so a tab coming back from hidden does not jump the clouds
-        if (!reducedMotion) c.x += drift * c.v * Math.min(t - (c.t || t), 100);
-        c.t = t;
-        const cw = cloudSprite.width * c.s, ch = cloudSprite.height * c.s;
-        if (c.x > w + 40) c.x = -cw - rand(0, 120);
-        ctx.globalAlpha = c.a * (night ? 0.45 : 1) * (s.precip ? 0.8 : 1);
-        ctx.drawImage(cloudSprite, c.x, c.y, cw, ch);
-    }
-    ctx.globalAlpha = 1;
 
     // Rain streaks or snowflakes
     if (drops.length) {
@@ -189,7 +147,6 @@ export function setScene(next) {
         canvas = document.getElementById('skyCanvas');
         if (!canvas) return;
         ctx = canvas.getContext('2d');
-        cloudSprite = makeCloudSprite();
         window.addEventListener('resize', () => { resize(); if (reducedMotion) draw(0); });
         document.addEventListener('visibilitychange', () => {
             cancelAnimationFrame(raf);

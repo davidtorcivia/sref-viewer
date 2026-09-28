@@ -28,11 +28,14 @@
     --radius: 26px;
     --radius-sm: 18px;
     --text: #f6f8ff;
-    --text-dim: rgba(236, 242, 255, 0.74);
-    --text-faint: rgba(236, 242, 255, 0.52);
-    --rim: rgba(255, 255, 255, 0.2);
-    --glass: linear-gradient(155deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05) 50%, rgba(255, 255, 255, 0.08));
-    --glass-strong: linear-gradient(155deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.09) 50%, rgba(255, 255, 255, 0.13));
+    --text-dim: rgba(240, 245, 255, 0.84);
+    --text-faint: rgba(236, 242, 255, 0.66);
+    --rim: rgba(255, 255, 255, 0.18);
+    /* Glass is a dark tint with a light sheen: white text keeps its contrast over any sky */
+    --glass: linear-gradient(155deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.02) 50%, rgba(255, 255, 255, 0.05)),
+        linear-gradient(rgba(10, 15, 28, 0.34), rgba(10, 15, 28, 0.34));
+    --glass-strong: linear-gradient(155deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05) 50%, rgba(255, 255, 255, 0.09)),
+        linear-gradient(rgba(10, 15, 28, 0.46), rgba(10, 15, 28, 0.46));
     --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34), inset 0 -1px 0 rgba(255, 255, 255, 0.05),
         0 20px 44px -26px rgba(0, 0, 0, 0.65);
     --sun: #ffcf5a;
@@ -277,7 +280,7 @@ button {
     padding: var(--s4) var(--s5);
     background:
         var(--glass),
-        linear-gradient(160deg, color-mix(in srgb, var(--tint-a, #3b4a66) 70%, transparent), color-mix(in srgb, var(--tint-b, #6b7a93) 45%, transparent));
+        linear-gradient(160deg, color-mix(in srgb, var(--tint-a, #3b4a66) 75%, transparent), color-mix(in srgb, var(--tint-b, #6b7a93) 55%, transparent));
     transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
 }
 
@@ -337,7 +340,7 @@ button {
 
 .pc-line {
     grid-area: line;
-    color: var(--text-faint);
+    color: var(--text-dim);
     font-size: 0.84rem;
 }
 
@@ -395,10 +398,13 @@ button {
     padding: var(--s2) 0 var(--s4);
 }
 
+.hero {
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 2px 18px rgba(0, 0, 0, 0.25);
+}
+
 .hero-name {
     font-size: 1.4rem;
     font-weight: 600;
-    text-shadow: 0 2px 16px rgba(0, 0, 0, 0.2);
 }
 
 .hero-temp {
@@ -419,7 +425,8 @@ button {
 }
 
 .hero-hilo {
-    color: var(--text-dim);
+    color: var(--text);
+    font-weight: 500;
     white-space: pre;
 }
 
@@ -427,7 +434,8 @@ button {
     margin-top: var(--s3);
     padding: var(--s2) var(--s4);
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.1);
+    text-shadow: none;
+    background: rgba(10, 15, 28, 0.32);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
     font-size: 0.92rem;
 }
@@ -596,8 +604,16 @@ button {
 }
 
 .day-precip {
-    font-size: 0.8rem;
+    display: flex;
+    flex-direction: column;
+    font-size: 0.76rem;
+    line-height: 1.15;
     color: var(--drop);
+}
+
+.day-precip b {
+    font-size: 0.82rem;
+    font-weight: 700;
 }
 
 .day-lo {
@@ -656,17 +672,6 @@ button {
     color: var(--text-dim);
 }
 
-.panel-chip.live::before {
-    content: '';
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    margin-right: 6px;
-    border-radius: 50%;
-    background: #6bf29a;
-    box-shadow: 0 0 8px #6bf29a;
-    vertical-align: 1px;
-}
 
 .panel-note {
     padding: var(--s2) var(--s5) 0;
@@ -813,56 +818,69 @@ body.no-scroll {
 }
 
 .compass {
-    width: 112px;
-    height: 112px;
+    width: 128px;
+    height: 128px;
     align-self: center;
 }
 
 .compass .dial {
-    fill: rgba(0, 0, 0, 0.12);
-    stroke: rgba(255, 255, 255, 0.18);
+    fill: rgba(0, 0, 0, 0.16);
 }
 
 .compass .tick {
-    stroke: rgba(255, 255, 255, 0.28);
-    stroke-width: 1;
+    stroke: rgba(255, 255, 255, 0.3);
+    stroke-width: 0.9;
 }
 
 .compass .tick-major {
-    stroke: rgba(255, 255, 255, 0.7);
+    stroke: rgba(255, 255, 255, 0.85);
     stroke-width: 1.6;
 }
 
 .compass .cardinal {
-    fill: var(--text-faint);
+    fill: var(--text-dim);
     font-size: 9px;
     font-weight: 700;
     text-anchor: middle;
 }
 
-.compass .wind-arrow {
+.compass .cardinal.north {
+    fill: #fff;
+}
+
+.compass .needle,
+.compass .needle-tail {
     fill: none;
-    stroke: #fff;
-    stroke-width: 2.4;
     stroke-linecap: round;
     stroke-linejoin: round;
 }
 
+.compass .needle {
+    stroke: #fff;
+    stroke-width: 2.6;
+}
+
+.compass .needle-tail {
+    stroke: rgba(255, 255, 255, 0.45);
+    stroke-width: 2.6;
+}
+
 .compass .hub {
-    fill: rgba(20, 30, 55, 0.85);
-    stroke: rgba(255, 255, 255, 0.25);
+    fill: rgba(12, 18, 34, 0.9);
+    stroke: rgba(255, 255, 255, 0.22);
 }
 
 .compass .hub-speed {
     fill: #fff;
-    font-size: 15px;
+    font-size: 17px;
     font-weight: 650;
     text-anchor: middle;
 }
 
 .compass .hub-unit {
-    fill: var(--text-faint);
-    font-size: 7px;
+    fill: var(--text-dim);
+    font-size: 7.5px;
+    font-weight: 600;
     text-anchor: middle;
 }
 
@@ -873,30 +891,39 @@ body.no-scroll {
 
 .sun-arc {
     width: 100%;
-    height: 64px;
+    height: auto;
+    aspect-ratio: 160 / 74;
+    overflow: visible;
 }
 
 .sun-arc .arc {
     fill: none;
-    stroke: rgba(255, 255, 255, 0.22);
-    stroke-width: 1.5;
-    stroke-dasharray: 3 4;
+    stroke: rgba(255, 255, 255, 0.28);
+    stroke-width: 1.4;
+    stroke-dasharray: 2 4;
+    stroke-linecap: round;
 }
 
 .sun-arc .arc-done {
     fill: none;
     stroke: var(--sun);
-    stroke-width: 2;
-    opacity: 0.85;
+    stroke-width: 2.4;
+    stroke-linecap: round;
 }
 
 .sun-arc .horizon {
-    stroke: rgba(255, 255, 255, 0.25);
+    stroke: rgba(255, 255, 255, 0.35);
+    stroke-width: 1;
+}
+
+.sun-arc .sun-halo {
+    fill: rgba(255, 207, 90, 0.25);
 }
 
 .sun-arc .sun-dot {
-    fill: var(--sun);
-    filter: drop-shadow(0 0 6px rgba(255, 207, 90, 0.9));
+    fill: #ffe08a;
+    stroke: #fff;
+    stroke-width: 1;
 }
 
 .sun-times {
@@ -1135,4 +1162,181 @@ body.no-scroll {
     .wx-sheet[open] {
         animation: none;
     }
+}
+
+/* ============ Segmented control ============ */
+.seg {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.22);
+}
+
+.seg-btn {
+    padding: 5px 11px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-dim);
+}
+
+.seg-btn[aria-pressed="true"] {
+    background: rgba(255, 255, 255, 0.9);
+    color: #0e1628;
+}
+
+.seg-btn[hidden] {
+    display: none;
+}
+
+/* ============ Plumes ============ */
+.plume-panel .panel-head {
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.plume-readout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1) var(--s4);
+    padding: 0 var(--s5) var(--s2);
+    font-size: 0.84rem;
+    color: var(--text-dim);
+    min-height: 1.4em;
+}
+
+.plume-readout b {
+    color: var(--text);
+}
+
+.plume-readout .det {
+    color: var(--drop);
+}
+
+.plume-chart {
+    padding: 0 var(--s3);
+    touch-action: pan-y;
+}
+
+.plume-svg {
+    display: block;
+}
+
+.plume-svg .grid {
+    stroke: rgba(255, 255, 255, 0.1);
+}
+
+.plume-svg .grid-day {
+    stroke-dasharray: 2 4;
+    stroke: rgba(255, 255, 255, 0.18);
+}
+
+.plume-svg .axis {
+    fill: var(--text-faint);
+    font-size: 10.5px;
+    font-family: inherit;
+}
+
+.plume-svg .axis-y {
+    text-anchor: end;
+}
+
+.plume-outer {
+    fill: rgba(170, 205, 255, 0.16);
+}
+
+.plume-inner {
+    fill: rgba(170, 205, 255, 0.24);
+}
+
+.plume-mean {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 2.4;
+    stroke-linecap: round;
+}
+
+.plume-det {
+    fill: none;
+    stroke: var(--drop);
+    stroke-width: 1.6;
+    stroke-dasharray: 5 4;
+}
+
+.plume-cursor {
+    stroke: rgba(255, 255, 255, 0.45);
+}
+
+.plume-dot {
+    fill: #fff;
+    stroke: rgba(0, 0, 0, 0.35);
+}
+
+.panel-foot {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: var(--s2);
+    padding: var(--s2) var(--s5) 0;
+    font-size: 0.74rem;
+    color: var(--text-faint);
+}
+
+.text-link {
+    font-weight: 650;
+    color: var(--text);
+}
+
+.text-link::after {
+    content: '';
+    display: inline-block;
+    width: 0.42em;
+    height: 0.42em;
+    margin-left: 0.4em;
+    border: solid currentColor;
+    border-width: 0 0.14em 0.14em 0;
+    transform: rotate(-45deg) translateY(-0.08em);
+}
+
+/* ============ Settings ============ */
+.wx-settings[open] {
+    justify-content: flex-start;
+}
+
+.settings-card {
+    margin-top: 8vh;
+    padding: var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    background: var(--glass-strong);
+}
+
+.settings-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.settings-head h2 {
+    font-size: 1.3rem;
+}
+
+.setting {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--s3);
+    flex-wrap: wrap;
+}
+
+.setting-label {
+    font-weight: 600;
+}
+
+.settings-note {
+    font-size: 0.76rem;
+    color: var(--text-faint);
 }
