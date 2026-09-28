@@ -899,6 +899,67 @@ async function proxyField(req, res, kind, extra, immutable) {
     }
 }
 
+// ============ Overview: point forecast and place search ============
+// Observed now (RTMA) plus the hourly RRFS series for one place. A place in
+// a region the extractor has not cut yet comes back with building: true and
+// no hourly; the page asks again a few seconds later.
+app.get('/api/forecast', async (req, res) => {
+    const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+    if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).json({ error: 'Invalid lat/lon' });
+    if (rateLimited(req, res)) return;
+    try {
+        const up = await fetch(`${EXTRACTOR_URL}/forecast?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`,
+            { signal: AbortSignal.timeout(60000) });
+        const body = await up.json();
+        if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).json(body);
+        // Observations turn over every 15 minutes; a building answer must not stick
+        res.set('Cache-Control', body.building ? 'no-store' : 'public, max-age=120');
+        res.json(body);
+    } catch (err) {
+        res.status(502).json({ error: 'Forecast unavailable', details: err.message });
+    }
+});
+
+// OpenStreetMap Nominatim: identifying User-Agent, at most one request a
+// second across all users (its usage policy), answers cached for a day.
+const GEOCODE_TTL_MS = DAY;
+const geocodeCache = new Map();
+let geocodeChain = Promise.resolve();
+function nominatim(path) {
+    const hit = geocodeCache.get(path);
+    if (hit && Date.now() - hit.at < GEOCODE_TTL_MS) return Promise.resolve(hit.data);
+    const run = geocodeChain.then(async () => {
+        const data = await getJson(`https://nominatim.openstreetmap.org/${path}`, 10000);
+        if (geocodeCache.size >= 300) geocodeCache.delete(geocodeCache.keys().next().value);
+        geocodeCache.set(path, { data, at: Date.now() });
+        return data;
+    });
+    geocodeChain = run.catch(() => {}).then(() => new Promise(r => setTimeout(r, 1100)));
+    return run;
+}
+
+const placeName = a => [a.city || a.town || a.village || a.hamlet || a.suburb || a.county, a.state]
+    .filter(Boolean).join(', ');
+
+app.get('/api/geocode', async (req, res) => {
+    if (rateLimited(req, res)) return;
+    try {
+        if (req.query.lat !== undefined) {
+            const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+            if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).json({ error: 'Invalid lat/lon' });
+            const r = await nominatim(`reverse?format=jsonv2&zoom=14&addressdetails=1&lat=${lat.toFixed(3)}&lon=${lon.toFixed(3)}`);
+            return res.json({ name: r.address ? placeName(r.address) : '' });
+        }
+        const q = String(req.query.q || '').trim().slice(0, 100);
+        if (q.length < 2) return res.json([]);
+        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6&q=${encodeURIComponent(q.toLowerCase())}`);
+        res.json(rows.map(r => ({ name: placeName(r.address || {}) || r.display_name, detail: r.display_name,
+            lat: Number(r.lat), lon: Number(r.lon) })));
+    } catch (err) {
+        res.status(502).json({ error: 'Place search unavailable', details: err.message });
+    }
+});
+
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
 // Cached per rounded location so all viewers of an area share one
 // upstream request every 2 minutes.

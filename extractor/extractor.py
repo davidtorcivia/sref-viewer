@@ -939,10 +939,10 @@ def purge_fields():
         if old not in keep and (src not in SOURCES or src in known):
             shutil.rmtree(os.path.join(FIELD_DIR, old), ignore_errors=True)
             continue
-        # Kept dirs hold only GRIB messages, plus writes still in progress
+        # Kept dirs hold only GRIB messages and forecast crops, plus writes still in progress
         for f in os.scandir(os.path.join(FIELD_DIR, old)):
             try:
-                if not f.name.endswith(('.grib2', '.tmp')) or f.name.endswith('.tmp') and time.time() - f.stat().st_mtime > 600:
+                if not f.name.endswith(('.grib2', '.npz', '.tmp')) or f.name.endswith('.tmp') and time.time() - f.stat().st_mtime > 600:
                     os.remove(f.path)
             except FileNotFoundError:
                 pass   # renamed into place or removed by a concurrent purge
@@ -1072,7 +1072,7 @@ POINT_BASE = ('tmp', 'dpt', 'wind')
 POINT_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud', 'refc', 'qpf', 'snowtot')
 
 
-def point_values(frame, lat, lon, overlay):
+def point_values(frame, lat, lon, overlay, always=POINT_BASE):
     """Every inspectable field's value at one point, for the popup."""
     out = {}
     for name in POINT_FIELDS:
@@ -1080,7 +1080,7 @@ def point_values(frame, lat, lon, overlay):
                 or FIELDS[name].get('acc') and frame[3] == 0:
             continue
         try:
-            arrays, p = field_arrays(name, frame, cached_only=name not in POINT_BASE and name != overlay)
+            arrays, p = field_arrays(name, frame, cached_only=name not in always and name != overlay)
         except NotPublished:
             continue
         vals, inside = sample(arrays, p, np.array([lat]), np.array([lon]))
@@ -1130,9 +1130,200 @@ def preload_fields():
             for name in FIELDS:
                 if 'layers' not in FIELDS[name]:
                     warm_field(name, sorted({f for mode in FIELD_MODES for f in mode_frames(mode, name)}))
+            date, cycle = field_cycle(FORECAST_MODE)
+            if date:
+                ensure_crops(date, cycle, recent_tiles())
         except Exception as err:  # noqa: BLE001 - keep the loop alive
             print(f'[PRELOAD] {err}', flush=True)
         time.sleep(FIELD_CYCLE_TTL_S)
+
+
+# ============ Point forecasts (overview page) ============
+# A place's hourly RRFS series means one value from every message of every
+# hour: ~850 full-grid decodes. So each run is cut once into small regional
+# crops (1 degree tiles, all hours, all FORECAST_MSGS) stored next to the
+# GRIB messages; a place then reads its series in milliseconds. Tiles that
+# were asked for recently are re-cut after every preload pass, so saved
+# places never wait; a new tile builds in the background (~7 s) while the
+# page shows the observed conditions.
+
+FORECAST_MSGS = ('TMP', 'DPT', 'UGRD', 'VGRD', 'GUST', 'TCDC', 'APCP', 'ASNOW', 'CSNOW', 'REFC')
+FORECAST_MODE = 'extended'                  # one run for all 85 hours
+FORECAST_TILES_FILE = os.path.join(CACHE_DIR, 'forecast-tiles.json')   # tile -> last requested (epoch)
+FORECAST_TILE_KEEP_S = 14 * 86400
+FORECAST_TILES_MAX = 64                     # most recently requested tiles kept current
+FORECAST_BATCH = 16                         # tiles cut per pass: bounds memory at ~100 MB
+NOW_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud')
+_crop_pool = ThreadPoolExecutor(max_workers=4)   # decodes run ~2.4x faster on 4 threads
+_crop_building = set()                           # (date, cycle, tile) being cut
+_crop_lock = threading.Lock()
+_tiles_lock = threading.Lock()
+
+
+def forecast_tile(lat, lon):
+    return math.floor(lat), math.floor(lon)
+
+
+def crop_box(p, tile):
+    """Grid index window (j0, j1, i0, i1) covering a 1-degree tile plus a cell of margin."""
+    t = np.linspace(0, 1, 9)
+    lat = np.concatenate([tile[0] + t, tile[0] + t, np.full(9, tile[0]), np.full(9, tile[0] + 1)])
+    lon = np.concatenate([np.full(9, tile[1]), np.full(9, tile[1] + 1), tile[1] + t, tile[1] + t])
+    fi, fj = lambert_ij(p, lat, lon)
+    i0, i1 = max(0, int(np.floor(fi.min())) - 1), min(p['Nx'], int(np.ceil(fi.max())) + 2)
+    j0, j1 = max(0, int(np.floor(fj.min())) - 1), min(p['Ny'], int(np.ceil(fj.max())) + 2)
+    return (j0, j1, i0, i1) if i1 - i0 > 1 and j1 - j0 > 1 else None
+
+
+def crop_path(date, cycle, tile):
+    return os.path.join(frame_dir('rrfs', date, cycle), f'fc_{tile[0]}_{tile[1]}.npz')
+
+
+def build_crops(date, cycle, tiles):
+    """Cut every tile's crop from one pass over the run's messages."""
+    path0 = fetch_msg('rrfs', date, cycle, 0, 'TMP')
+    if path0 is None:
+        return
+    p = decoded(path0)[1]
+    boxes = {t: b for t in tiles if (b := crop_box(p, t))}
+    hours = range(FIELD_MODES[FORECAST_MODE] + 1)
+    out = {t: np.full((len(FORECAST_MSGS), len(hours), j1 - j0, i1 - i0), np.nan, np.float32)
+           for t, (j0, j1, i0, i1) in boxes.items()}
+
+    def cut(job):
+        k, fh = job
+        msg = FORECAST_MSGS[k]
+        if msg in ACCUMULATED and fh == 0:
+            return
+        path = fetch_msg('rrfs', date, cycle, fh, msg)
+        if path is None:
+            return
+        with open(path, 'rb') as fp:   # plain decode: bulk work stays out of the tile LRU
+            g = ec.codes_new_from_message(fp.read())
+        try:
+            arr = ec.codes_get_values(g).reshape(p['Ny'], p['Nx'])
+        finally:
+            ec.codes_release(g)
+        for t, (j0, j1, i0, i1) in boxes.items():
+            out[t][k, fh] = arr[j0:j1, i0:i1]
+
+    list(_crop_pool.map(cut, [(k, fh) for fh in hours for k in range(len(FORECAST_MSGS))]))
+    for t, (j0, j1, i0, i1) in boxes.items():
+        path = crop_path(date, cycle, t)
+        with open(path + '.tmp', 'wb') as fp:
+            np.savez_compressed(fp, data=out[t], i0=i0, j0=j0, grid=json.dumps(p))
+        os.replace(path + '.tmp', path)
+
+
+def ensure_crops(date, cycle, tiles):
+    """Cut the tiles that have no crop yet for this run, unless already under way."""
+    with _crop_lock:
+        todo = [t for t in tiles if (date, cycle, t) not in _crop_building
+                and not os.path.exists(crop_path(date, cycle, t))]
+        _crop_building.update((date, cycle, t) for t in todo)
+    if not todo:
+        return
+    try:
+        for k in range(0, len(todo), FORECAST_BATCH):
+            build_crops(date, cycle, todo[k:k + FORECAST_BATCH])
+    except Exception as err:  # noqa: BLE001 - a later request or preload pass retries
+        print(f'[FORECAST] crops {date}{cycle} {todo}: {err}', flush=True)
+    finally:
+        with _crop_lock:
+            _crop_building.difference_update((date, cycle, t) for t in todo)
+
+
+@functools.lru_cache(maxsize=16)
+def load_crop(path):
+    with np.load(path) as z:
+        return z['data'], int(z['i0']), int(z['j0']), json.loads(str(z['grid']))
+
+
+def crop_series(crop, lat, lon):
+    """Bilinear value of every message at every hour at one point: (msgs, hours)."""
+    data, i0, j0, p = crop
+    fi, fj = lambert_ij(p, lat, lon)
+    fi, fj = fi - i0, fj - j0
+    ny, nx = data.shape[2:]
+    if not (0 <= fi <= nx - 1 and 0 <= fj <= ny - 1):
+        return None
+    i, j = min(int(fi), nx - 2), min(int(fj), ny - 2)
+    wi, wj = fi - i, fj - j
+    d = data[:, :, j:j + 2, i:i + 2]
+    return (d[..., 0, 0] * (1 - wi) + d[..., 0, 1] * wi) * (1 - wj) + (d[..., 1, 0] * (1 - wi) + d[..., 1, 1] * wi) * wj
+
+
+def hourly_series(date, cycle, lat, lon):
+    """Columnar hourly forecast for the overview, or None outside the grid."""
+    s = crop_series(load_crop(crop_path(date, cycle, forecast_tile(lat, lon))), lat, lon)
+    if s is None:
+        return None
+    v = dict(zip(FORECAST_MSGS, s))
+    p = load_crop(crop_path(date, cycle, forecast_tile(lat, lon)))[3]
+    u, w = earth_winds(p, v['UGRD'], v['VGRD'], lon)
+    # Run totals -> per-hour amounts (hour 0 has no total)
+    per_hour = lambda acc: np.diff(np.nan_to_num(acc, nan=0.0), prepend=0.0).clip(0)
+    r = lambda a, n=1: [None if np.isnan(x) else round(float(x), n) for x in a]
+    return {
+        'run': f'{date}{cycle}', 'start': frame_time('rrfs', date, cycle, 0), 'step': 3600,
+        'tmp': r(K_TO_F(v['TMP'])), 'dpt': r(K_TO_F(v['DPT'])),
+        'wind': r(np.hypot(u, w) * 2.23694), 'dir': r(np.degrees(np.arctan2(-u, -w)) % 360, 0),
+        'gust': r(v['GUST'] * 2.23694), 'cloud': r(v['TCDC'], 0),
+        'qpf': r(per_hour(v['APCP'] / 25.4), 2), 'snow': r(per_hour(v['ASNOW'] * 39.37), 2),
+        'snowflag': [bool(x >= 0.5) for x in np.nan_to_num(v['CSNOW'])], 'dbz': r(v['REFC'], 0),
+    }
+
+
+def nearest_station(lat, lon):
+    """REFS/SREF station key nearest a point, for the plume page link."""
+    best, key = None, None
+    for k, st in ((read_json(STATIONS_FILE) or {}).get('stations') or {}).items():
+        d = (st['lat'] - lat) ** 2 + ((st['lon'] - lon) * math.cos(math.radians(lat))) ** 2
+        if best is None or d < best:
+            best, key = d, k
+    return None if key is None else {'id': key, 'km': round(math.sqrt(best) * 111.2)}
+
+
+def note_tile(tile):
+    """Remember a requested tile so preload keeps its crop current."""
+    with _tiles_lock:
+        tiles = read_json(FORECAST_TILES_FILE) or {}
+        key, now = f'{tile[0]},{tile[1]}', int(time.time())
+        if now - tiles.get(key, 0) > 3600:   # write at most hourly per tile
+            tiles[key] = now
+            # Only the most recent tiles: anyone's request adds one
+            write_json(FORECAST_TILES_FILE, dict(sorted(tiles.items(), key=lambda kv: -kv[1])[:FORECAST_TILES_MAX]))
+
+
+def recent_tiles():
+    now = time.time()
+    return [tuple(map(int, k.split(','))) for k, t in (read_json(FORECAST_TILES_FILE) or {}).items()
+            if now - t < FORECAST_TILE_KEEP_S]
+
+
+def forecast(lat, lon):
+    """Overview payload: observed now (RTMA), hourly RRFS series, nearest plume station."""
+    rtma = rtma_frames()
+    now = None
+    if rtma:
+        frame = ('rtma', *rtma[-1], 0)
+        vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
+        now = {**vals, 'time': frame_time(*frame)} if vals else None
+    tile = forecast_tile(lat, lon)
+    date, cycle = field_cycle(FORECAST_MODE)
+    hourly, building = None, False
+    path0 = date and fetch_msg('rrfs', date, cycle, 0, 'TMP')
+    # Tiles the model grid does not reach get observations only, and are not kept
+    if path0 and crop_box(decoded(path0)[1], tile):
+        note_tile(tile)
+        if os.path.exists(crop_path(date, cycle, tile)):
+            hourly = hourly_series(date, cycle, lat, lon)
+        else:
+            building = True
+            # Own thread: the warm pool may hold a whole run's preload queue
+            threading.Thread(target=ensure_crops, args=(date, cycle, [tile]), daemon=True).start()
+    return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hourly, 'building': building,
+            'station': nearest_station(lat, lon)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1170,6 +1361,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, idx, cached=True)
             return self.send_json(503, {'error': 'Station index not built yet',
                                         'status': stations_state['status']})
+        if url.path == '/forecast':
+            q = parse_qs(url.query)
+            try:
+                lat, lon = float(q.get('lat', ['nan'])[0]), float(q.get('lon', ['nan'])[0])
+            except ValueError:
+                lat = lon = math.nan
+            if not (FIELD_BBOX[1] <= lat <= FIELD_BBOX[3] and FIELD_BBOX[0] <= lon <= FIELD_BBOX[2]):
+                return self.send_json(400, {'error': 'lat/lon outside the forecast area'})
+            try:
+                return self.send_json(200, forecast(round(lat, 4), round(lon, 4)))
+            except Exception as err:  # noqa: BLE001 - report any failure upstream
+                print(f'[FORECAST] {lat},{lon}: {err}', flush=True)
+                return self.send_json(502, {'error': str(err)})
         if url.path == '/fields':
             q = parse_qs(url.query)
             mode, field = q.get('mode', ['hourly'])[0], q.get('field', [''])[0]

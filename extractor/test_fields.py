@@ -90,6 +90,17 @@ flat = np.array([-128, -128, 127, -127, 0, 5, 6, -128], np.int8)
 d = np.frombuffer(X.gzip.decompress(X.pack_grid(flat)), np.int8)
 assert np.array_equal(np.cumsum(d, dtype=np.int8), flat), 'pack_grid round trip'
 
+# Forecast crops: a point read from a tile crop matches sampling the full grid
+full = np.random.default_rng(1).normal(280, 5, (265, 450)).astype(np.float32)
+lat0, lon0 = 41.3, -95.6
+box = X.crop_box(p, X.forecast_tile(lat0, lon0))
+j0, j1, i0, i1 = box
+crop = (full[None, None, j0:j1, i0:i1], i0, j0, p)
+want = X.sample([full], p, np.array([lat0]), np.array([lon0]))[0][0][0]
+assert abs(X.crop_series(crop, lat0, lon0)[0, 0] - want) < 1e-3, 'crop sample differs from full grid'
+assert X.crop_series(crop, lat0 + 3, lon0) is None, 'point outside the crop'
+assert X.crop_box(p, X.forecast_tile(10.5, 40.5)) is None, 'a tile off the grid has no crop'
+
 # Purge: stale cycles and old formats go, live ones stay, and a source whose
 # newest cycle is unknown (S3 not answering yet) keeps its cache
 def purge_with(cycles, rtma):
@@ -97,11 +108,12 @@ def purge_with(cycles, rtma):
     for d in ('rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615', '2026092812'):
         os.makedirs(os.path.join(X.FIELD_DIR, d), exist_ok=True)
     open(os.path.join(X.FIELD_DIR, 'rrfs2026092812', 'old.npy'), 'w').close()
+    open(os.path.join(X.FIELD_DIR, 'rrfs2026092812', 'fc_40_-74.npz'), 'w').close()
     X.purge_fields()
     return sorted(os.listdir(X.FIELD_DIR))
 live = {'hourly': ('20260928', '12'), 'extended': ('20260928', '12')}
 assert purge_with(live, [('20260928', '1615')]) == ['rrfs2026092812', 'rtma202609281615']
-assert os.listdir(os.path.join(X.FIELD_DIR, 'rrfs2026092812')) == [], 'non-GRIB files swept'
+assert os.listdir(os.path.join(X.FIELD_DIR, 'rrfs2026092812')) == ['fc_40_-74.npz'], 'crops kept, other files swept'
 cold = {'hourly': (None, None), 'extended': ('20260928', '12')}
 assert purge_with(cold, []) == ['rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615']
 
