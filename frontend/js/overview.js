@@ -6,7 +6,7 @@
  * /api/geocode, /api/radar/alerts. Routes: #  (places)  and  #p=<id>.
  */
 
-import { store } from './config.js?v=__V__';
+import { store, getLatestRunWithDate } from './config.js?v=__V__';
 import { applySiteSettings } from './site.js?v=__V__';
 import {
     hourlyRows, dailyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, nextMoon,
@@ -21,6 +21,7 @@ const DEFAULT_PLACES = [{ id: 'nyc', name: 'New York, NY', lat: 40.7128, lon: -7
 const POLL_MS = 4000;                  // a new region's hourly series is cut in ~7 s
 const POLL_TRIES = 10;
 const HOURS_SHOWN = 48;
+const ENSEMBLE_MAX_KM = 40;            // farther than this, the station's spread says little about the place
 const NS = 'http://www.w3.org/2000/svg';
 
 const view = document.getElementById('view');
@@ -141,6 +142,41 @@ async function alertsFor(place) {
     }
 }
 
+// REFS ensemble temperature spread at the nearest plume station:
+// [{x (ms), y (mean), p10, p25, p75, p90}] every 3 hours to 60 h, or null
+const ensembles = new Map();   // station -> Promise
+function ensembleFor(f) {
+    const st = f.raw.station;
+    if (!st || st.km > ENSEMBLE_MAX_KM) return Promise.resolve(null);
+    if (!ensembles.has(st.id)) {
+        const { run, date } = getLatestRunWithDate('refs');
+        ensembles.set(st.id, fetch(`/api/refs/${encodeURIComponent(st.id)}/${run}/3hrly-TMP?date=${date}`)
+            .then(r => (r.ok ? r.json() : null))
+            .then(d => (d?.Mean?.length ? d.Mean.filter(m => m.p10 != null && m.p90 != null) : null))
+            .catch(() => null)
+            .then(m => { if (!m) ensembles.delete(st.id); return m; }));
+    }
+    return ensembles.get(st.id);
+}
+
+// Spread below and above the mean at time t, linear between the 3-hourly points
+function spreadAt(ens, t) {
+    const k = ens.findIndex(m => m.x >= t);
+    if (k < 0 || (k === 0 && ens[0].x > t)) return null;
+    const a = ens[Math.max(0, k - 1)], b = ens[k];
+    const w = b.x === a.x ? 0 : (t - a.x) / (b.x - a.x);
+    const lerp = key => a[key] + (b[key] - a[key]) * w;
+    const y = lerp('y');
+    return { lo90: y - lerp('p10'), hi90: lerp('p90') - y, lo75: y - lerp('p25'), hi75: lerp('p75') - y };
+}
+
+function confidence(ens, t) {
+    const s = spreadAt(ens, t);
+    if (!s) return null;
+    const width = s.lo90 + s.hi90;
+    return width <= 4 ? 'High confidence' : width <= 8 ? 'Moderate confidence' : 'Low confidence';
+}
+
 // Point in (Multi)Polygon by ray casting; holes count as outside
 function contains(geom, { lat, lon }) {
     const inRing = ring => {
@@ -186,9 +222,19 @@ function showSky(f) {
 // ============ Navigation ============
 
 // Same-document view transitions where supported: a card's temperature
-// morphs into the place page's large one
+// morphs into the place page's large one. Opening a place from home pushes
+// an entry marked fromHome, so "back" (the header arrow or the system back)
+// pops it instead of stacking another home entry; going home otherwise
+// replaces the current entry.
 function navigate(hash) {
-    const go = () => { history.pushState(null, '', hash || location.pathname); route(); };
+    const home = !hash || hash === '#';
+    const url = home ? location.pathname + location.search : hash;
+    const go = () => {
+        if (home && history.state?.fromHome) { history.back(); return; }   // popstate routes
+        if (home) history.replaceState(null, '', url);
+        else history.pushState({ fromHome: !location.hash.startsWith('#p=') }, '', url);
+        route();
+    };
     if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
         document.startViewTransition(go);
     } else go();
@@ -336,8 +382,17 @@ async function renderPlace(id) {
     showSky(f);
     hero.replaceChildren(...heroContent(place, f));
     headerTitle.textContent = `${place.name}  ${deg(f.temp)}`;
-    view.append(...[hourlySection(place, f), dailySection(place, f), tiles(place, f), actions(place, f), sources(f)].filter(Boolean));
+    let hourly = hourlySection(place, f, null), daily = dailySection(place, f, null);
+    view.append(...[hourly, radarPanel(place), daily, tiles(place, f), actions(place, f), sources(f)].filter(Boolean));
     alertsFor(place).then(al => { if (seq === renderSeq) al.forEach(a => hero.append(alertRow(a))); });
+    // The ensemble arrives later: redraw the strip and days with its spread
+    ensembleFor(f).then(ens => {
+        if (!ens || seq !== renderSeq) return;
+        const keep = hourly?.querySelector('.hourly-scroll')?.scrollLeft || 0;
+        const h2 = hourlySection(place, f, ens), d2 = dailySection(place, f, ens);
+        if (hourly && h2) { hourly.replaceWith(h2); h2.querySelector('.hourly-scroll').scrollLeft = keep; hourly = h2; }
+        if (daily && d2) { daily.replaceWith(d2); daily = d2; }
+    });
 }
 
 function heroContent(place, f) {
@@ -372,14 +427,21 @@ function alertRow(feature) {
 
 // Next 48 hours: temperature curve colored by temperature, night shaded,
 // precipitation bars, wind; each hour opens the radar page at that time
-function hourlySection(place, f) {
+function hourlySection(place, f, ens) {
     const rows = f.upcoming.slice(0, HOURS_SHOWN);
     if (rows.length < 2) return null;
     const sec = el('section', 'glass panel');
-    sec.append(el('h2', 'panel-title', `Next ${rows.length} hours`));
+    const head = el('div', 'panel-head');
+    head.append(el('h2', 'panel-title', `Next ${rows.length} hours`));
+    const conf = ens && confidence(ens, rows[0].t + 24 * 3600000);
+    if (conf) head.append(el('span', 'panel-chip', conf));
+    sec.append(head);
     const scroller = el('div', 'hourly-scroll');
     const W = 56, H = 218, n = rows.length;
-    const temps = rows.map(r => r.tmp);
+    // Ensemble spread placed around this place's curve: its width says how far
+    // the forecast could swing (the station ensemble's own level can differ)
+    const spreads = rows.map(r => (ens ? spreadAt(ens, r.t) : null));
+    const temps = rows.flatMap((r, i) => (spreads[i] ? [r.tmp - spreads[i].lo90, r.tmp + spreads[i].hi90] : [r.tmp]));
     const tmin = Math.min(...temps), tmax = Math.max(...temps);
     const span = Math.max(tmax - tmin, 6);
     const yT = t => 128 - (t - tmin) / span * 58;        // curve band y 70..128
@@ -406,6 +468,18 @@ function hourlySection(place, f) {
     };
     grad('tline', 1, 1);
     grad('tfill', 0.32, 0.04);
+
+    // Ensemble bands: 10-90% outer, 25-75% inner, over the hours the ensemble covers
+    const covered = rows.map((r, i) => [r, spreads[i], i]).filter(([, s]) => s);
+    if (covered.length > 1) {
+        const band = (lo, hi, cls) => {
+            const top = covered.map(([r, s, i]) => [i * W + W / 2, yT(r.tmp + s[hi])]);
+            const bot = covered.map(([r, s, i]) => [i * W + W / 2, yT(r.tmp - s[lo])]).reverse();
+            svgEl('path', { d: `${monotonePath(top)}L${bot.map(p => p.join(',')).join('L')}Z`, class: cls }, svg);
+        };
+        band('lo90', 'hi90', 'band-outer');
+        band('lo75', 'hi75', 'band-inner');
+    }
 
     const pts = rows.map((r, i) => [i * W + W / 2, yT(r.tmp)]);
     const path = monotonePath(pts);
@@ -441,6 +515,9 @@ function hourlySection(place, f) {
     scroller.append(svg);
     dragScroll(scroller);
     sec.append(scroller);
+    if (covered.length > 1) {
+        sec.append(el('div', 'panel-note', `Shaded: the range the REFS ensemble spans at ${f.raw.station.id} (10-90% and 25-75%)`));
+    }
     return sec;
 }
 
@@ -485,7 +562,7 @@ function dragScroll(box) {
 }
 
 // Daily rows with low-high bars on one shared scale (Apple Weather style)
-function dailySection(place, f) {
+function dailySection(place, f, ens) {
     if (!f.days.length) return null;
     const sec = el('section', 'glass panel');
     sec.append(el('h2', 'panel-title', `Next ${f.days.length} days`));
@@ -509,11 +586,58 @@ function dailySection(place, f) {
             dot.style.left = pct(Math.min(Math.max(f.temp, d.lo), d.hi));
             bar.append(dot);
         }
+        const hiCell = el('span', 'day-hi', deg(d.hi));
+        // Ensemble half-width over the day's hours, where the ensemble reaches
+        const hrs = f.rows.filter(r => dayKey(r.t) === d.key).map(r => ens && spreadAt(ens, r.t)).filter(Boolean);
+        if (hrs.length >= 6) hiCell.append(el('small', 'day-spread', `±${Math.round(Math.max(...hrs.map(s => (s.lo90 + s.hi90) / 2)))}`));
         row.append(el('span', 'day-name', weekday(d.t)), icon(d.cond.key), precip,
-            el('span', 'day-lo', deg(d.lo)), bar, el('span', 'day-hi', deg(d.hi)));
+            el('span', 'day-lo', deg(d.lo)), bar, hiCell);
         list.append(row);
     }
     sec.append(list);
+    return sec;
+}
+
+// ============ Radar panel ============
+// The radar page embedded (radar.html?embed=1): loaded once scrolled near,
+// paused while out of view, a tap expands it to full screen in place
+function radarPanel(place) {
+    const sec = el('section', 'glass panel radar-panel');
+    const head = el('div', 'panel-head');
+    head.append(el('h2', 'panel-title', 'Radar'), el('span', 'panel-chip live', 'Live'));
+    const frame = el('div', 'radar-frame');
+    const open = el('button', 'radar-open');
+    open.setAttribute('aria-label', 'Open the radar full screen');
+    const close = el('button', 'wx-icon-btn radar-close');
+    close.setAttribute('aria-label', 'Close the radar');
+    close.append(icon('close'));
+    frame.append(open, close);
+    sec.append(head, frame);
+
+    let iframe = null;
+    const post = msg => iframe?.contentWindow?.postMessage({ type: 'wx-radar', ...msg }, location.origin);
+    const load = () => {
+        if (iframe) return;
+        iframe = el('iframe');
+        iframe.title = 'Radar map';
+        iframe.loading = 'lazy';
+        iframe.src = `/radar?embed=1#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
+        frame.prepend(iframe);
+    };
+    new IntersectionObserver(([e]) => {
+        if (e.isIntersecting) load();
+        if (!sec.classList.contains('full')) post({ play: e.isIntersecting });
+    }, { rootMargin: '300px 0px' }).observe(sec);
+
+    const setFull = full => {
+        sec.classList.toggle('full', full);
+        document.body.classList.toggle('no-scroll', full);
+        post({ view: full ? 'full' : 'mini', play: true });
+        if (full) close.focus();
+    };
+    open.addEventListener('click', () => { load(); setFull(true); });
+    close.addEventListener('click', () => setFull(false));
+    sec.addEventListener('keydown', e => { if (e.key === 'Escape' && sec.classList.contains('full')) setFull(false); });
     return sec;
 }
 
@@ -585,11 +709,11 @@ function sunTile(place) {
         svgEl('path', { d: `M8 62 Q${8 + (80 - 8) * frac} ${62 + (-18 - 62) * frac} ${x} ${y}`, class: 'arc-done' }, s);
         svgEl('circle', { cx: x, cy: y, r: 6, class: 'sun-dot' }, s);
     }
-    const len = set - rise;
+    const mins = Math.round((set - rise) / 60000);
     const times = el('div', 'sun-times');
     times.append(el('span', null, `Rise ${timeOf(rise)}`), el('span', null, `Set ${timeOf(set)}`));
     t.append(s, times,
-        el('div', 'tile-note', `${Math.floor(len / 3600000)}h ${Math.round(len % 3600000 / 60000)}m of daylight`));
+        el('div', 'tile-note', `${Math.floor(mins / 60)}h ${mins % 60}m of daylight`));
     return t;
 }
 

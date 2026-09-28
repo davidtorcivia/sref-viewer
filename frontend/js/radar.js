@@ -18,7 +18,23 @@
  * actually arrived.
  */
 
-import { store } from './config.js?v=__V__';
+import { store as savedStore } from './config.js?v=__V__';
+
+// Embedded in the overview page (radar.html?embed=1 in an iframe): start
+// from the defaults and leave the user's saved radar settings alone
+const EMBED = new URLSearchParams(location.search).has('embed');
+const store = EMBED ? { get: () => null, set() {} } : savedStore;
+if (EMBED) {
+    document.body.classList.add('embed', 'embed-mini');
+    // The overview drives the embed: mini/full view, and pausing while scrolled away
+    window.addEventListener('message', e => {
+        if (e.origin !== location.origin || e.data?.type !== 'wx-radar') return;
+        document.body.classList.toggle('embed-mini', e.data.view === 'mini');
+        if (map) map.resize();
+        if (e.data.play === false) pause();
+        else if (e.data.play === true && frames.length) play();
+    });
+}
 import { applySiteSettings } from './site.js?v=__V__';
 
 // Tiles come through our backend (/api/radar/tile), which caches them and
@@ -998,7 +1014,11 @@ function init() {
         const ahead = (linkTime - Date.now() / 1000) / 3600;
         rangeIdx = RANGES.findIndex(r => r.mode === (ahead <= 0.5 ? 'now' : ahead <= 26 ? 'hourly' : 'extended'));
     }
-    if (location.search) history.replaceState(null, '', location.pathname + location.hash);
+    if (link.has('t') || link.has('layer')) {
+        link.delete('t');
+        link.delete('layer');
+        history.replaceState(null, '', location.pathname + (link.size ? `?${link}` : '') + location.hash);
+    }
 
     setOverlay(overlay);
     els.overlay.addEventListener('change', () => setOverlay(els.overlay.value));

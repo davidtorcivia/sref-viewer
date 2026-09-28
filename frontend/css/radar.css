@@ -570,3 +570,23 @@ body {
     box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 28%, transparent), 0 1px 4px rgba(0, 0, 0, 0.45);
     pointer-events: none;
 }
+
+/* Embedded in the overview page (radar.js EMBED). The overview supplies the
+   close button top-right; in the mini view only the map shows. */
+body.embed .radar-header {
+    display: none;
+}
+
+body.embed .radar-legend {
+    top: max(0.6rem, env(safe-area-inset-top));
+}
+
+body.embed .maplibregl-ctrl-top-right {
+    top: calc(max(0.6rem, env(safe-area-inset-top)) + 52px);
+}
+
+body.embed-mini .radar-legend,
+body.embed-mini .radar-controls,
+body.embed-mini .maplibregl-control-container {
+    display: none;
+}

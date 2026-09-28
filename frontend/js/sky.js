@@ -39,14 +39,19 @@ function makeCloudSprite() {
     return c;
 }
 
-function resize() {
+// Backing store follows the canvas's CSS box. Mobile browsers resize the
+// viewport as the URL bar slides during scrolling; only a width change (or a
+// new scene) re-places the clouds and stars, so the sky does not jump.
+function resize(force) {
     dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    w = window.innerWidth;
-    h = window.innerHeight;
+    const nw = canvas.clientWidth, nh = canvas.clientHeight;
+    const widthChanged = nw !== w;
+    w = nw;
+    h = nh;
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    populate();
+    if (force || widthChanged) populate();
 }
 
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -102,7 +107,8 @@ function draw(t) {
     // Clouds drift with the wind (east is right; flow direction simplified to left-to-right)
     const drift = (4 + s.wind * 0.8) / 1000;
     for (const c of clouds) {
-        if (!reducedMotion) c.x += drift * c.v * (t - (c.t || t));
+        // Frame step capped so a tab coming back from hidden does not jump the clouds
+        if (!reducedMotion) c.x += drift * c.v * Math.min(t - (c.t || t), 100);
         c.t = t;
         const cw = cloudSprite.width * c.s, ch = cloudSprite.height * c.s;
         if (c.x > w + 40) c.x = -cw - rand(0, 120);
@@ -192,7 +198,7 @@ export function setScene(next) {
     }
     const same = scene && ['cloud', 'precip', 'snowy'].every(k => scene[k] === next[k]);
     scene = next;
-    if (!same || !w) resize();
+    if (!same || !w) resize(true);
     cancelAnimationFrame(raf);
     if (reducedMotion) draw(0);
     else raf = requestAnimationFrame(loop);
