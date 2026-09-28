@@ -159,12 +159,15 @@ def http_get(url, headers=None, timeout=FETCH_TIMEOUT):
 
 
 def http_exists(url):
+    """True/False from the server; None when it could not say (timeout, 5xx, network)."""
     req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT):
             return True
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-        return False
+    except urllib.error.HTTPError as err:
+        return False if err.code in (403, 404) else None
+    except (urllib.error.URLError, OSError):
+        return None
 
 
 # ============ Deterministic RRFS (BUFR soundings) ============
@@ -670,6 +673,7 @@ FIELDS = {
 }
 
 _field_cycle = {}   # mode -> (checked at, (date, cycle))
+_field_cycle_lock = threading.Lock()
 _warm_pool = ThreadPoolExecutor(max_workers=4)
 _warming = set()    # (date, cycle, fh, msg) already queued
 
@@ -775,22 +779,32 @@ def indexed_png(pixels, palette):
 
 
 def field_cycle(mode):
-    """Newest cycle with the mode's marker hour published (cached)."""
+    """Newest cycle with the mode's marker hour published (cached). One
+    thread refreshes while the others keep the cached answer; a probe S3
+    could not answer keeps it too, since falling back a cycle would purge
+    the newer one."""
     at, value = _field_cycle.get(mode, (0, (None, None)))
-    if time.time() - at < FIELD_CYCLE_TTL_S:
+    if time.time() - at < FIELD_CYCLE_TTL_S or not _field_cycle_lock.acquire(blocking=value[0] is None):
         return value
-    now = time.time()
-    value = (None, None)
-    for back in range(1, 13):
-        t = time.gmtime(now - back * 3600)
-        if t.tm_hour % 3:
-            continue
-        date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-        if http_exists(FIELD_URL.format(date=date, cycle=cycle, fh=f'{FIELD_MODES[mode]:03d}') + '.idx'):
-            value = (date, cycle)
-            break
-    _field_cycle[mode] = (time.time(), value)
-    return value
+    try:
+        now = time.time()
+        found = (None, None)
+        for back in range(1, 13):
+            t = time.gmtime(now - back * 3600)
+            if t.tm_hour % 3:
+                continue
+            date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
+            ok = http_exists(FIELD_URL.format(date=date, cycle=cycle, fh=f'{FIELD_MODES[mode]:03d}') + '.idx')
+            if ok is None:
+                _field_cycle[mode] = (now - FIELD_CYCLE_TTL_S + 60, value)   # retry in a minute
+                return value
+            if ok:
+                found = (date, cycle)
+                break
+        _field_cycle[mode] = (time.time(), found)
+        return found
+    finally:
+        _field_cycle_lock.release()
 
 
 def cycle_age_h(date, cycle):
@@ -822,9 +836,12 @@ def purge_fields():
             continue
         # Inside a live cycle: only GRIB messages, plus writes still in progress
         for f in os.scandir(os.path.join(FIELD_DIR, old)):
-            if not f.name.endswith(('.grib2', '.tmp')) or f.name.endswith('.tmp') and time.time() - f.stat().st_mtime > 600:
-                os.remove(f.path)
-    _warming = {k for k in _warming if f'{k[0]}{k[1]}' in keep}
+            try:
+                if not f.name.endswith(('.grib2', '.tmp')) or f.name.endswith('.tmp') and time.time() - f.stat().st_mtime > 600:
+                    os.remove(f.path)
+            except FileNotFoundError:
+                pass   # renamed into place or removed by a concurrent purge
+    _warming = {k for k in list(_warming) if f'{k[0]}{k[1]}' in keep}
 
 
 def fetch_msg(date, cycle, fh, msg):

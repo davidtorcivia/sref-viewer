@@ -852,11 +852,12 @@ async function warmRadarTilesOnce() {
 // ============ Model fields (RRFS temp/dew point/wind/cloud, rendered by the extractor) ============
 app.get('/api/radar/field', async (req, res) => {
     try {
-        res.set('Cache-Control', 'public, max-age=300');
         const mode = ['now', 'hourly', 'extended'].includes(req.query.mode) ? req.query.mode : 'hourly';
         // field: the extractor pre-fetches that field's hours in the background
         const field = /^[a-z]{1,10}$/.test(req.query.field || '') ? req.query.field : '';
-        res.json(await getJson(`${EXTRACTOR_URL}/fields?mode=${mode}&field=${field}`, 30000));
+        const index = await getJson(`${EXTRACTOR_URL}/fields?mode=${mode}&field=${field}`, 30000);
+        res.set('Cache-Control', 'public, max-age=300');
+        res.json(index);
     } catch (err) {
         res.status(502).json({ error: 'Model fields unavailable', details: err.message });
     }

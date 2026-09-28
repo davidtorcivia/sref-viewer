@@ -29,6 +29,8 @@ const SAT_OPACITY = 0.8;
 // Radar colors changed with the backend TILE_STYLE: a new value keeps browsers
 // from mixing hour-cached tiles of the old scheme into the loop
 const TILE_STYLE_V = 'twc';
+// Field tiles are cached immutable per URL: bump with any extractor palette/rendering change
+const FIELD_STYLE_V = '1';
 const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past this instead of fetching
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
@@ -74,7 +76,8 @@ function savedPosition() {
     return NYC;
 }
 
-const isLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+// radar.html sets data-theme before first paint (saved choice, else the system's)
+const isLight = document.documentElement.dataset.theme === 'light';
 const BASEMAP_STYLE = isLight
     ? 'https://tiles.openfreemap.org/styles/positron'
     : 'https://tiles.openfreemap.org/styles/dark';
@@ -93,6 +96,7 @@ const els = {
     legend: document.getElementById('legend'),
     overlay: document.getElementById('overlaySelect'),
     overlayName: document.getElementById('overlayName'),
+    themeBtn: document.getElementById('themeBtn'),
     rangeBtn: document.getElementById('rangeBtn'),
 };
 
@@ -118,7 +122,7 @@ let speedIdx = (() => {
 })();
 
 function tileUrl(frame) {
-    if (frame.field) return `/api/radar/field/${frame.field}/{z}/{x}/{y}.png`;
+    if (frame.field) return `/api/radar/field/${frame.field}/{z}/{x}/{y}.png?v=${FIELD_STYLE_V}`;
     if (frame.sat) return `/api/radar/sat/${frame.time}/{z}/{x}/{y}.png`;
     const url = `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png?v=${TILE_STYLE_V}`;
     // A nowcast frame shares its time with the observed frame it later
@@ -139,7 +143,7 @@ function layerId(frame) {
 // backdrop shown under the radar in 'both'
 async function fetchFrames(which) {
     const field = fieldFor(which, RANGES[rangeIdx].mode);
-    if (field) return { frames: await fetchFieldFrames(field), backdrop: null };
+    if (field) return { ...await fetchFieldFrames(field), backdrop: null };
     const res = await fetch('/api/radar/frames');
     if (!res.ok) throw new Error(`Frame index HTTP ${res.status}`);
     const data = await res.json();
@@ -156,14 +160,13 @@ async function fetchFieldFrames(name) {
     const res = await fetch(`/api/radar/field?mode=${RANGES[rangeIdx].mode}&field=${name}`);
     if (!res.ok) throw new Error(`Field index HTTP ${res.status}`);
     const d = await res.json();
-    if (d.fields[name]) renderFieldLegend(d.fields[name]);
     const run = Date.UTC(+d.date.slice(0, 4), +d.date.slice(4, 6) - 1, +d.date.slice(6, 8), +d.cycle) / 1000;
     const now = Date.now() / 1000;
-    return d.hours.map(h => ({
+    return { legend: d.fields[name], frames: d.hours.map(h => ({
         time: run + h * 3600, basis: run, fh: h, cycle: d.cycle, bounds: d.bounds, tile: d.tile, maxzoom: d.maxzoom,
         grid: d.grid.fields.includes(name) ? d.grid : null,
         name, field: `${name}/${d.date}/${d.cycle}/${h}`, nowcast: run + h * 3600 > now,
-    }));
+    })) };
 }
 
 // Legend bar and ticks from the same stops the extractor paints with
@@ -494,8 +497,9 @@ function setOverlay(which) {
 async function refreshFrames({ initial = false } = {}) {
     try {
         const which = overlay, range = rangeIdx;
-        const { frames: newFrames, backdrop } = await fetchFrames(which);
+        const { frames: newFrames, backdrop, legend } = await fetchFrames(which);
         if (which !== overlay || range !== rangeIdx) return;   // switched mid-fetch
+        if (legend) renderFieldLegend(legend);
         syncBackdrop(backdrop);
         if (!newFrames.length) throw new Error('No frames available');
 
@@ -534,9 +538,13 @@ async function refreshFrames({ initial = false } = {}) {
 
 // ============ Map numbers + wind particles ============
 // Both read the field's coarse lat/lon grid (/grid.bin: int8, -128 off the
-// model grid; wind is earth-relative u then v in 0.5 m/s). Numbers are a
-// symbol layer under the basemap labels, so place names win collisions.
-const NUMBER_SPACING_PX = 110;
+// model grid; wind is earth-relative u then v in 0.5 m/s). Numbers sit under
+// the towns the basemap is currently showing, so their density follows the
+// basemap's own label density; a sparse lattice fills the gaps (sea, rural
+// areas) and yields to them in collision placement.
+const NUMBER_FILL_PX = 240;           // spacing of the numbers filling town-less areas
+// Place classes that get a number, in placement priority order
+const NUMBER_PLACES = ['city', 'town', 'village'];
 const FLOW_CELL = 8;                  // px per screen-space velocity lookup cell
 const PARTICLE_SPEED = 0.25;          // px per animation frame per m/s, same at every zoom
 const PARTICLE_DENSITY = 1 / 900;     // particles per px of map
@@ -585,26 +593,67 @@ function numberText(lng, lat) {
     return u === null || v === null ? null : String(Math.round(Math.hypot(u, v) / 2 * 2.23694));
 }
 
-// A lattice fixed in lat/lon (power-of-two degree spacing, odd rows offset)
-// so numbers stay put while panning instead of re-sampling under the finger
 function updateNumbers() {
     const src = map.getSource('numbers');
     if (!src) return;
     const features = [];
+    const add = (lng, lat, rank) => {
+        const t = numberText(lng, lat);
+        if (t !== null) features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { t, rank } });
+    };
     if (grid) {
+        const seen = new Set();
+        for (const f of map.queryRenderedFeatures({ layers: placeLayerIds() })) {
+            const rank = NUMBER_PLACES.indexOf(f.properties.class);
+            const key = `${f.properties.name}|${f.geometry.coordinates}`;
+            if (rank === -1 || f.geometry.type !== 'Point' || seen.has(key)) continue;
+            seen.add(key);
+            add(...f.geometry.coordinates, rank);
+        }
+        // Fill: cells fixed in lat/lon (power-of-two degrees, stable while
+        // panning), each labelled at its most unusual grid point, so terrain
+        // shows up: a cold hollow, a warm valley, a windy ridge
         const pxPerDeg = 512 * 2 ** map.getZoom() / 360;
-        const s = 2 ** Math.round(Math.log2(NUMBER_SPACING_PX / pxPerDeg));
+        const s = 2 ** Math.round(Math.log2(NUMBER_FILL_PX / pxPerDeg));
         const b = map.getBounds();
         for (let i = Math.floor(b.getSouth() / s); i * s <= b.getNorth(); i++) {
-            const shift = i % 2 ? s / 2 : 0;
-            for (let j = Math.floor(b.getWest() / s) - 1; j * s + shift <= b.getEast(); j++) {
-                const lng = j * s + shift, lat = i * s;
-                const t = numberText(lng, lat);
-                if (t !== null) features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { t } });
+            for (let j = Math.floor(b.getWest() / s); j * s <= b.getEast(); j++) {
+                const p = standoutPoint(j * s, i * s, s);
+                if (p) add(p[0], p[1], NUMBER_PLACES.length);
             }
         }
     }
     src.setData({ type: 'FeatureCollection', features });
+}
+
+// Grid point in the cell [lng0, lng0+s) x [lat0, lat0+s) furthest from the
+// cell's mean (wind: the strongest, which is what matters offshore); null if
+// the cell has no model data
+function standoutPoint(lng0, lat0, s) {
+    const { meta, data } = grid;
+    const n = meta.nx * meta.ny;
+    const c0 = Math.max(0, Math.ceil((lng0 - meta.west) / meta.step));
+    const c1 = Math.min(meta.nx - 1, Math.floor((lng0 + s - meta.west) / meta.step - 1e-9));
+    const r0 = Math.max(0, Math.ceil((meta.north - lat0 - s) / meta.step + 1e-9));
+    const r1 = Math.min(meta.ny - 1, Math.floor((meta.north - lat0) / meta.step));
+    const pts = [];
+    for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+            const o = r * meta.nx + c;
+            if (data[o] === -128) continue;
+            pts.push([c, r, grid.name === 'wind' ? Math.hypot(data[o], data[o + n]) : data[o]]);
+        }
+    }
+    if (!pts.length) return null;
+    const mean = grid.name === 'wind' ? 0 : pts.reduce((a, p) => a + p[2], 0) / pts.length;
+    const [c, r] = pts.reduce((best, p) => Math.abs(p[2] - mean) > Math.abs(best[2] - mean) ? p : best);
+    return [meta.west + c * meta.step, meta.north - r * meta.step];
+}
+
+let placeLayers = null;
+function placeLayerIds() {
+    placeLayers ??= map.getStyle().layers.filter(l => l.type === 'symbol' && l['source-layer'] === 'place').map(l => l.id);
+    return placeLayers;
 }
 
 function addNumbersLayer() {
@@ -615,8 +664,16 @@ function addNumbersLayer() {
     map.addSource('numbers', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({
         id: 'numbers', type: 'symbol', source: 'numbers',
-        layout: { 'text-field': ['get', 't'], 'text-font': font, 'text-size': 12, 'text-padding': 8 },
+        layout: {
+            'text-field': ['get', 't'], 'text-font': font, 'text-padding': 6,
+            'text-size': ['case', ['<', ['get', 'rank'], NUMBER_PLACES.length], 13, 11],
+            // Just under the town name when there is room, else beside it
+            'text-variable-anchor': ['top', 'bottom', 'right', 'left'],
+            'text-radial-offset': 0.95,
+            'symbol-sort-key': ['get', 'rank'],
+        },
         paint: {
+            'text-opacity': ['case', ['<', ['get', 'rank'], NUMBER_PLACES.length], 1, 0.7],
             'text-color': isLight ? '#1b2230' : '#f4f6fb',
             'text-halo-color': isLight ? 'rgba(255,255,255,0.8)' : 'rgba(8,10,16,0.7)',
             'text-halo-width': 1.4,
@@ -718,8 +775,8 @@ function syncGrid(frame) {
         return;
     }
     loadGrid(frame).then(data => {
-        if (frames[currentFrame] !== frame || !data) return;
-        grid = { name: frame.name, meta: frame.grid, data };
+        if (frames[currentFrame] !== frame) return;
+        grid = data ? { name: frame.name, meta: frame.grid, data } : null;
         updateNumbers();
         buildFlow();
     });
@@ -784,7 +841,8 @@ function init() {
     });
 
     map.on('movestart', stopParticles);
-    map.on('moveend', () => { if (grid) { updateNumbers(); buildFlow(); } });
+    // Town labels are only queryable once placed, so numbers wait for idle
+    map.on('moveend', () => { if (grid) { map.once('idle', updateNumbers); buildFlow(); } });
     map.on('resize', () => grid && buildFlow());   // a size change restarts the particles
 
     // Refetch alerts when the map moves well away from the last fetch center
@@ -813,6 +871,14 @@ function init() {
         store.set(RANGE_KEY, RANGES[rangeIdx].mode);
         showRange();
         setOverlay(overlay);
+    });
+
+    // The basemap style, tile dimming and canvas colors are all chosen at
+    // load, so switching reloads; position, overlay and range persist
+    els.themeBtn.setAttribute('aria-label', isLight ? 'Switch to dark mode' : 'Switch to light mode');
+    els.themeBtn.addEventListener('click', () => {
+        store.set('sref-theme', isLight ? 'dark' : 'light');
+        location.reload();
     });
 
     if (store.get(LEGEND_KEY) === '0') els.legend.open = false;
