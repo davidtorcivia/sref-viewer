@@ -17,6 +17,7 @@ COPY css/ /usr/share/nginx/html/css/
 COPY js/ /usr/share/nginx/html/js/
 COPY vendor/ /usr/share/nginx/html/vendor/
 COPY icons/ /usr/share/nginx/html/icons/
+COPY fonts/ /usr/share/nginx/html/fonts/
 
 # Stamp asset URLs with a per-build version so browsers and CDNs can
 # never mix old and new files across deploys. This layer only re-runs

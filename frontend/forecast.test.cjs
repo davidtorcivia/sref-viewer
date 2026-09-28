@@ -124,5 +124,53 @@ const assert = require('node:assert/strict');
     assert.equal(u.precip(0.254, u.DEFAULT_UNITS), '0.25"');
     assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), C), '15:05');
     assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), u.DEFAULT_UNITS, false), '3PM');
+    // Signal layout: ramp, certainty weight, quantiles, the spiral
+    const sg = await import('./js/signal.js');
+    assert.match(sg.rampColor(63), /^oklch\(/);
+    assert.equal(sg.rampColor(-100), sg.rampColor(-10));
+    assert.equal(sg.rampColor(200), sg.rampColor(110));
+    assert.equal(sg.rampColor(NaN), sg.rampColor(-10));
+    assert.equal(sg.certaintyWeight(1), 850);
+    assert.equal(sg.certaintyWeight(2.8), 690);
+    assert.equal(sg.certaintyWeight(20), 300);
+    assert.equal(sg.certaintyWeight(null), 820);
+    const qrow = { y: 60, p10: 56, p25: 58, p75: 62, p90: 64 };
+    assert.equal(sg.quantile(qrow, 0.1), 56);
+    assert.equal(sg.quantile(qrow, 0.5), 60);
+    assert.equal(sg.quantile(qrow, 0.9), 64);
+    assert.equal(sg.quantile(qrow, 0.2), 56 + 2 * (0.1 / 0.15));
+    assert.equal(sg.valueAt([{ t: 0, v: 1 }, { t: 10, v: 3 }], 5), 2);
+    assert.equal(sg.valueAt([{ t: 0, v: 1 }, { t: 10, v: 3 }], 11), null);
+    assert.equal(sg.valueAt([{ t: 0, v: 1 }, { t: 4 * H, v: 3 }], H), null);   // across a gap
+    {
+        const now = Date.parse('2026-09-28T19:15:00Z');
+        const h0 = Math.floor(now / H) * H;
+        const past = Array.from({ length: 25 }, (_, i) => ({ t: h0 - 24 * H + i * H, tmp: 60 + (i % 3), precip: i === 2 ? 0.1 : i === 5 ? 0 : null }));
+        const future = Array.from({ length: 26 }, (_, i) => ({ t: h0 + i * H, tmp: 55 + i / 2, qpf: i === 3 ? 0.02 : 0, wind: 10, dir: 270 }));
+        const sp = sg.spiral({ past, future, now, nowTemp: 63, nights: [[now + 3 * H, now + 15 * H]] });
+        assert.equal(sp.segs.length, 192);
+        assert.ok(sp.segs[0].observed && !sp.segs[96].observed);
+        assert.equal(sp.segs[96].tmp, 63);                       // the join shows the analysis value
+        assert.equal(sp.now.x, '260.0');                         // now sits at the top
+        const strokes = n => Math.round(n / (0.4 / 25.4));
+        assert.equal(sp.rain.length, strokes(0.1) + strokes(0.02));
+        assert.equal(sp.wedges.length, 1);
+        assert.equal(sp.table.pastRain, 0.1);
+        assert.equal(sp.table.pastLow, 60);
+        assert.equal(sp.table.nextLow, 55);
+        assert.ok(Math.abs(sp.table.nextRain - 0.02) < 1e-9);
+        assert.equal(sp.low.tmp, 55);
+        assert.equal(sp.wind.length, 12);
+        // the current hour's report not in yet: the lap still reaches now, no gap
+        const gap = past.map((h, i) => (i === past.length - 1 ? { ...h, tmp: null } : h));
+        const sp2 = sg.spiral({ past: gap, future, now, nowTemp: 63 });
+        assert.ok(sp2.segs.slice(88, 96).every(x => x.tmp != null));
+        assert.ok(Math.abs(sp2.segs[95].tmp - 63) < 1);
+        // a pointer on the outer lap just clockwise of the top reads as just after now
+        const t = sg.spiralTimeAt(260 + 5, 260 - (120 + 25 / 48 * 100), now);
+        assert.ok(t > now && t < now + 2 * H, 'outer lap is the future');
+        const tp = sg.spiralTimeAt(260 + 5, 260 - (120 + 1 / 48 * 100), now);
+        assert.ok(tp < now - 20 * H, 'inner lap is the past');
+    }
     console.log('Forecast checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

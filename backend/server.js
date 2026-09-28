@@ -975,6 +975,123 @@ app.get('/api/geocode', async (req, res) => {
     }
 });
 
+// ============ Observed history (NWS station observations) ============
+// The last 25 clock hours at the nearest NWS station, one observation per
+// hour: the one nearest the routine :51 METAR that has a temperature, else
+// the latest in the hour. Hours without reports stay in, all null.
+const cToF = c => c == null ? null : Math.round((c * 9 / 5 + 32) * 10) / 10;
+const kmhToMph = k => k == null ? null : Math.round(k / 1.609344 * 10) / 10;
+
+function bucketObservations(features, nowMs) {
+    const byHour = new Map();
+    for (const f of features || []) {
+        const p = f.properties || {};
+        const at = Date.parse(p.timestamp);
+        if (!Number.isFinite(at)) continue;
+        const t = Math.floor(at / HOUR) * HOUR;
+        if (!byHour.has(t)) byHour.set(t, []);
+        byHour.get(t).push({ p, at });
+    }
+    const end = Math.floor(nowMs / HOUR) * HOUR;
+    const hours = [];
+    for (let t = end - 24 * HOUR; t <= end; t += HOUR) {
+        const obs = byHour.get(t) || [];
+        // Nearest :51; ties go to a METAR/SPECI (non-empty rawMessage), then the later report
+        const nearest51 = list => list.reduce((a, b) => {
+            if (!a) return b;
+            const da = Math.abs((a.at - t) / MINUTE - 51), db = Math.abs((b.at - t) / MINUTE - 51);
+            if (db !== da) return db < da ? b : a;
+            if (!!a.p.rawMessage !== !!b.p.rawMessage) return b.p.rawMessage ? b : a;
+            return b.at > a.at ? b : a;
+        }, null);
+        const withTemp = obs.filter(o => o.p.temperature?.value != null);
+        // No temperature anywhere in the hour: the latest report
+        const pick = withTemp.length ? nearest51(withTemp) : obs.reduce((a, b) => (!a || b.at > a.at ? b : a), null);
+        const p = pick?.p || {};
+        // 5-minute reports carry no precipitation; take it from the hour's METAR
+        const metar = nearest51(obs.filter(o => o.p.rawMessage && o.p.precipitationLastHour?.value != null));
+        const mm = (metar?.p || p).precipitationLastHour?.value;
+        hours.push({
+            t,
+            tmp: cToF(p.temperature?.value),
+            dpt: cToF(p.dewpoint?.value),
+            wind: kmhToMph(p.windSpeed?.value),
+            dir: p.windDirection?.value ?? null,
+            gust: kmhToMph(p.windGust?.value),
+            precip: mm == null ? null : Math.round(mm / 25.4 * 1000) / 1000,
+            text: p.textDescription || null
+        });
+    }
+    return hours;
+}
+
+const kmBetween = (lat1, lon1, lat2, lon2) => {
+    const r = Math.PI / 180;
+    const a = Math.sin((lat2 - lat1) * r / 2) ** 2
+        + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin((lon2 - lon1) * r / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(a));
+};
+
+// Place -> station changes only when NWS redraws its grid; observations
+// every 10 minutes per station, concurrent askers share one request.
+// ponytail: unbounded Maps, fine at personal-tool scale; add an LRU cap if traffic grows
+const stationCache = new Map();
+const obsCache = new Map();
+async function nearestStation(lat, lon) {
+    const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+    const hit = stationCache.get(key);
+    if (hit && Date.now() - hit.at < (hit.station ? 7 * DAY : DAY)) {
+        if (!hit.station) throw Object.assign(new Error('Outside NWS coverage'), { status: 404 });
+        return hit.station;
+    }
+    let point;
+    try {
+        point = await getJson(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`, 10000);
+    } catch (err) {
+        if (err.status === 404) stationCache.set(key, { station: null, at: Date.now() });
+        throw err;
+    }
+    const list = await getJson(point.properties.observationStations, 10000);
+    const f = list.features?.[0];
+    if (!f) throw Object.assign(new Error('No observation station near this place'), { status: 404 });
+    const [slon, slat] = f.geometry.coordinates;
+    const station = { id: f.properties.stationIdentifier, name: f.properties.name, lat: slat, lon: slon };
+    stationCache.set(key, { station, at: Date.now() });
+    return station;
+}
+
+function stationObservations(id) {
+    const hit = obsCache.get(id);
+    if (hit && (hit.pending || Date.now() - hit.at < 10 * MINUTE)) return hit.promise;
+    const start = new Date(Date.now() - 26 * HOUR).toISOString().replace(/\.\d+Z$/, 'Z');
+    const promise = getJson(`https://api.weather.gov/stations/${id}/observations?start=${start}&limit=500`, 15000)
+        .then(d => d.features || []);
+    const entry = { promise, pending: true };
+    obsCache.set(id, entry);
+    promise.then(() => Object.assign(entry, { pending: false, at: Date.now() }), () => obsCache.delete(id));
+    return promise;
+}
+
+app.get('/api/history', async (req, res) => {
+    const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+    if (req.query.lat === '' || req.query.lon === '' || !(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) {
+        return res.status(400).json({ error: 'Invalid lat/lon' });
+    }
+    if (rateLimited(req, res)) return;
+    try {
+        const s = await nearestStation(lat, lon);
+        const features = await stationObservations(s.id);
+        res.set('Cache-Control', 'public, max-age=300');
+        res.json({
+            station: { id: s.id, name: s.name, km: Math.round(kmBetween(lat, lon, s.lat, s.lon) * 10) / 10 },
+            hours: bucketObservations(features, Date.now())
+        });
+    } catch (err) {
+        if (err.status === 404) return res.status(404).json({ error: 'No NWS observations for this place' });
+        res.status(502).json({ error: 'Observations unavailable', details: err.message });
+    }
+});
+
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
 // Cached per rounded location so all viewers of an area share one
 // upstream request every 2 minutes.
@@ -1086,4 +1203,4 @@ if (require.main === module) {
     setInterval(sweep, 10 * MINUTE);
 }
 
-module.exports = { shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken };
+module.exports = { shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations };

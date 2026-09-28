@@ -10,7 +10,8 @@
     <link rel="apple-touch-icon" href="/icons/icon-180.png">
     <link rel="stylesheet" href="/css/overview.css?v=__V__">
     <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" content="#0b1430">
+    <meta name="theme-color" content="#f3f0e8">
+    <link rel="preload" href="/fonts/anybody-latin.woff2" as="font" type="font/woff2" crossorigin>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
@@ -21,32 +22,22 @@
 </head>
 
 <body>
-    <!-- Sky behind everything: gradient by condition (overview.js showSky), living layer on the canvas (sky.js) -->
-    <div class="sky" id="sky" aria-hidden="true"></div>
-    <canvas class="sky-canvas" id="skyCanvas" aria-hidden="true"></canvas>
-
-    <header class="wx-header" id="header">
-        <div class="wx-header-side">
-            <a href="#" class="wx-icon-btn" id="backBtn" aria-label="All places" hidden>
-                <svg class="ic"><use href="#i-back" /></svg>
-            </a>
-            <a href="#" class="wx-brand" id="brand">Weather</a>
-        </div>
-        <div class="wx-header-title" id="headerTitle" aria-hidden="true"></div>
-        <nav class="wx-header-side wx-nav">
+    <header class="sg-nav" id="header">
+        <nav class="sg-chips" id="chips" aria-label="Places"></nav>
+        <div class="sg-nav-actions">
+            <button class="sg-find" id="searchBtn" aria-label="Find a place">
+                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-search" /></svg><span>Find a place</span>
+            </button>
             <a href="/radar" class="wx-icon-btn" aria-label="Radar map">
-                <svg class="ic"><use href="#i-radar" /></svg>
+                <svg class="ic" aria-hidden="true"><use href="#i-radar" /></svg>
             </a>
-            <button class="wx-icon-btn" id="searchBtn" aria-label="Search and add places">
-                <svg class="ic"><use href="#i-search" /></svg>
-            </button>
             <button class="wx-icon-btn" id="settingsBtn" aria-label="Settings">
-                <svg class="ic"><use href="#i-gear" /></svg>
+                <svg class="ic" aria-hidden="true"><use href="#i-gear" /></svg>
             </button>
-        </nav>
+        </div>
     </header>
 
-    <main id="view" class="wx-main" aria-live="polite"></main>
+    <main id="view" class="wx-main"></main>
 
     <dialog id="searchDialog" class="wx-sheet" aria-label="Search places">
         <form class="wx-search">
@@ -62,7 +53,7 @@
     </dialog>
 
     <dialog id="settingsDialog" class="wx-sheet wx-settings" aria-label="Settings">
-        <div class="settings-card glass">
+        <div class="settings-card">
             <div class="settings-head">
                 <h2>Settings</h2>
                 <button type="button" class="wx-cancel settings-done">Done</button>
@@ -73,7 +64,7 @@
     </dialog>
 
     <dialog id="detailDialog" class="wx-sheet wx-detail" aria-labelledby="detailTitle">
-        <div class="settings-card glass detail-card">
+        <div class="settings-card detail-card">
             <div class="settings-head">
                 <h2 class="detail-title" id="detailTitle"></h2>
                 <button type="button" class="wx-cancel detail-done">Done</button>
@@ -81,8 +72,6 @@
             <div class="detail-body"></div>
         </div>
     </dialog>
-
-    <button type="button" class="edit-done glass" id="editDone" hidden>Done</button>
 
     <!-- Line icons. Colored parts read --sun/--moon/--drop/--flake/--bolt, which
          reach inside <use> because custom properties inherit. -->

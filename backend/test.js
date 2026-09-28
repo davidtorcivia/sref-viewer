@@ -1,6 +1,6 @@
 // Run: node test.js
 const assert = require('assert');
-const { latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken } = require('./server');
+const { latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations } = require('./server');
 
 // Latest ready run rolls back to yesterday before the first cycle is out
 const at = (iso) => Date.parse(iso);
@@ -49,5 +49,45 @@ assert.deepStrictEqual(pickSettings({ defaultStations: [] }), {});
 const buckets = new Map();
 for (let i = 0; i < 3; i++) assert.ok(takeToken('ip', buckets, 3, 1));
 assert.ok(!takeToken('ip', buckets, 3, 1));
+
+// Observed history: nearest-:51 report with a temperature wins, km/h -> mph,
+// precip null vs 0 kept apart, empty hours present, oldest first
+const ob = (iso, c, extra = {}) => ({ properties: { timestamp: iso, temperature: { value: c },
+    dewpoint: { value: 0 }, windSpeed: { value: 16.09344 }, windGust: { value: null },
+    windDirection: { value: 270 }, precipitationLastHour: { value: null }, textDescription: iso, ...extra } });
+const hist = bucketObservations([
+    ob('2026-09-28T19:51:00Z', 20, { precipitationLastHour: { value: 25.4 } }),
+    ob('2026-09-28T19:20:00Z', 10),
+    ob('2026-09-28T19:55:00Z', null),
+    ob('2026-09-28T18:10:00Z', 0),
+    ob('2026-09-28T18:40:00Z', 5, { precipitationLastHour: { value: 0 } }),
+    ob('2026-09-28T17:30:00Z', null, { textDescription: 'no temp' }),
+    ob('2026-09-27T12:00:00Z', 30)
+], at('2026-09-28T20:05Z'));
+assert.strictEqual(hist.length, 25);
+assert.ok(hist.every((h, i) => i === 0 || h.t - hist[i - 1].t === 3600e3));
+assert.strictEqual(hist[0].t, at('2026-09-27T20:00Z'));
+const hr = iso => hist.find(h => h.t === at(iso));
+assert.deepStrictEqual(hr('2026-09-28T19:00Z'), { t: at('2026-09-28T19:00Z'), tmp: 68, dpt: 32, wind: 10, dir: 270,
+    gust: null, precip: 1, text: '2026-09-28T19:51:00Z' });
+assert.strictEqual(hr('2026-09-28T18:00Z').tmp, 41);
+assert.strictEqual(hr('2026-09-28T18:00Z').precip, 0);
+assert.strictEqual(hr('2026-09-28T17:00Z').tmp, null);
+assert.strictEqual(hr('2026-09-28T17:00Z').text, 'no temp');
+assert.deepStrictEqual(hr('2026-09-28T20:00Z'), { t: at('2026-09-28T20:00Z'), tmp: null, dpt: null, wind: null,
+    dir: null, gust: null, precip: null, text: null });
+
+// A 5-minute report (no rawMessage) wins temperature; the hour's METAR supplies precip;
+// at equal distance from :51 the METAR wins temperature too
+const five = bucketObservations([
+    ob('2026-09-28T19:50:00Z', 18, { rawMessage: '', textDescription: 'five' }),
+    ob('2026-09-28T19:05:00Z', 17, { rawMessage: 'KEWR 281905Z', precipitationLastHour: { value: 2.54 } }),
+    ob('2026-09-28T18:50:00Z', 10, { rawMessage: '' }),
+    ob('2026-09-28T18:52:00Z', 12, { rawMessage: 'KEWR 281852Z' })
+], at('2026-09-28T20:05Z'));
+const f19 = five.find(h => h.t === at('2026-09-28T19:00Z'));
+assert.strictEqual(f19.text, 'five');
+assert.strictEqual(f19.precip, 0.1);
+assert.strictEqual(five.find(h => h.t === at('2026-09-28T18:00Z')).tmp, 53.6);
 
 console.log('backend: all checks passed');

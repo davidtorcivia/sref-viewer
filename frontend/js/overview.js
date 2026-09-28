@@ -1,19 +1,26 @@
 /**
- * Weather overview: saved places (plus the device location) as cards, and a
- * page per place: observed conditions, the next 48 hours, daily summaries
- * and detail tiles (wind, humidity, sun, moon, feels-like, precipitation),
- * over a living sky (sky.js). Data: /api/forecast (RTMA now + RRFS hourly),
- * /api/geocode, /api/radar/alerts. Routes: #  (places)  and  #p=<id>.
+ * Weather overview, Signal layout: one place per page, switched by the place
+ * chips. Color is temperature and nothing else (signal.js rampColor).
+ *   hero      the next 24 hours as a color field, the observed temperature,
+ *             one sentence, and the 48-hour spiral (last 24 h observed inside,
+ *             next 24 h forecast outside)
+ *   readouts  eight values at the cursor time
+ *   hours     48 hours: RRFS line, ensemble quantile paths, wind
+ *   days      the NBM days on one temperature axis, rain as 20 outcomes
+ *   radar, ensemble plumes
+ * One cursor time drives the hero number, the readouts, the chart and the
+ * spiral; a drag on the chart or the spiral moves it, release returns to now.
+ * Data: /api/forecast, /api/history, /api/refs, /api/geocode, /api/radar/alerts.
+ * Routes: #  (the first place)  and  #p=<id>.
  */
 
 import { store, getLatestRunWithDate, previousCycle } from './config.js?v=__V__';
 import { applySiteSettings } from './site.js?v=__V__';
 import {
-    hourlyRows, dailyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, nextMoon,
-    moonPath, humidity, feelsLike, comfort, moments, compass, tempColor, monotonePath, dayKey, nbmDays,
-    sunCross, solarNoon, moonTimes, nextPhases, uvIndex, uvCategory,
+    hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
+    comfort, compass, monotonePath, dayKey, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex,
 } from './forecast.js?v=__V__';
-import { setScene } from './sky.js?v=__V__';
+import { rampColor, certaintyWeight, quantile, windArrow, spiral, spiralTimeAt, SPIRAL } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
 
 const PLACES_KEY = 'wx-places';
@@ -24,14 +31,13 @@ const DEFAULT_PLACES = [{ id: 'nyc', name: 'New York, NY', lat: 40.7128, lon: -7
 const POLL_MS = 4000;                  // a new region's hourly series is cut in ~7 s
 const POLL_TRIES = 10;
 const HOURS_SHOWN = 48;
+const HOUR = 3600000;
 const ENSEMBLE_MAX_KM = 40;            // farther than this, the station's spread says little about the place
 const NS = 'http://www.w3.org/2000/svg';
+const PAPER = '#f3f0e8';
 
 const view = document.getElementById('view');
-const sky = document.getElementById('sky');
-const header = document.getElementById('header');
-const headerTitle = document.getElementById('headerTitle');
-const backBtn = document.getElementById('backBtn');
+const chipsBox = document.getElementById('chips');
 const dialog = document.getElementById('searchDialog');
 const searchInput = document.getElementById('searchInput');
 const searchResults = document.getElementById('searchResults');
@@ -42,6 +48,7 @@ let here = readJson(HERE_KEY, null);
 const savePlaces = () => store.set(PLACES_KEY, JSON.stringify(places));
 
 const forecasts = new Map();   // place id -> Promise<forecast>
+const histories = new Map();   // place id -> Promise<history | null>
 let units = U.parseUnits(store.get(UNITS_KEY));
 
 // ============ Small DOM helpers ============
@@ -58,6 +65,7 @@ const svgEl = (tag, attrs = {}, parent) => {
     parent?.appendChild(e);
     return e;
 };
+const svgTitle = (node, text) => { svgEl('title', {}, node).textContent = text; return node; };
 const icon = (key, cls = '') => {
     const s = svgEl('svg', { class: `ic ic-${key} ${cls}`, 'aria-hidden': 'true' });
     svgEl('use', { href: `#i-${key}` }, s);
@@ -70,10 +78,15 @@ const hourOf = ms => U.clock(ms, units, false);
 const windStr = mph => U.wind(mph, units);
 const rain = (inches, snow) => U.precip(inches, units, snow);
 const weekday = ms => (dayKey(ms) === dayKey(Date.now()) ? 'Today' : new Date(ms).toLocaleDateString('en-US', { weekday: 'short' }));
-const radarLink = (place, layer, t) =>
-    `/radar?layer=${layer}${t ? `&t=${Math.round(t / 1000)}` : ''}#8.5/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
-// A place's id as a CSS ident, for the card-to-hero view transition
-const vtName = id => `t${[...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7)}`;
+
+// Words for a time ahead: "this afternoon", "tonight", "tomorrow morning"
+function partOfDay(t, now = Date.now()) {
+    const h = new Date(t).getHours();
+    const days = Math.round((new Date(t).setHours(12, 0, 0, 0) - new Date(now).setHours(12, 0, 0, 0)) / 86400000);
+    if (days === 0) return h < 12 ? 'this morning' : h < 17 ? 'this afternoon' : h < 21 ? 'this evening' : 'tonight';
+    if (days === 1) return h < 6 ? 'overnight' : h < 12 ? 'tomorrow morning' : h < 17 ? 'tomorrow afternoon' : h < 21 ? 'tomorrow evening' : 'tomorrow night';
+    return new Date(t).toLocaleDateString('en-US', { weekday: 'long' });
+}
 
 function allPlaces() {
     return here && store.get(GPS_KEY) === '1' ? [{ id: 'here', here: true, ...here }, ...places] : places;
@@ -97,39 +110,35 @@ async function fetchForecast(place) {
 function shape(d, place) {
     const rows = d.hourly ? hourlyRows(d.hourly) : [];
     const now = Date.now();
-    const upcoming = rows.filter(r => r.t + 3600000 > now);
+    const upcoming = rows.filter(r => r.t + HOUR > now);
     const cur = upcoming[0];
     const sun = sunPosition(now, place.lat, place.lon);
     const night = sun.alt < -0.8;
     // Observed values where RTMA has them; the model hour fills the rest (precipitation)
     const obs = d.now || {};
-    // Without a model hour (still building), the observed cloud cover alone sets the condition
     const nowRow = cur ? { ...cur, tmp: obs.tmp ?? cur.tmp, dpt: obs.dpt ?? cur.dpt, cloud: obs.cloud ?? cur.cloud }
         : obs.cloud != null ? { cloud: obs.cloud, qpf: 0, dbz: -30 } : null;
-    // A run from last evening still holds hours of yesterday: days start today
-    const today = new Date().setHours(0, 0, 0, 0);
-    const days = dailyRows(rows.filter(r => r.t >= today));
-    // Today's range includes what has actually been observed
-    if (days[0]?.key === dayKey(now) && obs.tmp != null) {
-        days[0].hi = Math.max(days[0].hi, obs.tmp);
-        days[0].lo = Math.min(days[0].lo, obs.tmp);
-    }
     const temp = obs.tmp ?? cur?.tmp;
     const dpt = obs.dpt ?? cur?.dpt;
     const wind = obs.wind?.mph ?? cur?.wind ?? 0;
-    // Today's range, shared by the hero, the card and the daily row: the RRFS
-    // and NBM days and the observed temperature all fold in
-    const nbmToday = d.daily?.find(x => x.date === new Date(now).toLocaleDateString('en-CA'));
-    const rrfsToday = days.find(x => x.key === dayKey(now));
-    const his = [rrfsToday?.hi, nbmToday?.hi, obs.tmp].filter(v => v != null);
-    const los = [rrfsToday?.lo, nbmToday?.lo, obs.tmp].filter(v => v != null);
+    const days = daysWithObserved(d.daily, temp);
     return {
-        raw: d, rows, upcoming, night, sun, obs: d.now, days, nowRow,
+        raw: d, rows, upcoming, night, sun, obs: d.now, nowRow, days,
         cond: nowRow ? condition(nowRow, night) : { key: night ? 'clear-night' : 'clear', label: '' },
-        temp, dpt, wind,
+        temp, dpt, wind, gust: obs.gust ?? cur?.gust, dir: obs.wind?.from ?? cur?.dir,
         feels: temp != null && dpt != null ? feelsLike(temp, dpt, wind) : null,
-        today: his.length ? { hi: Math.max(...his), lo: Math.min(...los) } : null,
     };
+}
+
+// NBM days, today's range widened by what has actually been observed
+function daysWithObserved(daily, temp) {
+    const days = daily?.length ? nbmDays(daily) : [];
+    const today = days.find(x => x.key === dayKey(Date.now()));
+    if (today && temp != null) {
+        today.hi = Math.max(today.hi ?? temp, temp);
+        today.lo = today.lo == null ? null : Math.min(today.lo, temp);
+    }
+    return days;
 }
 
 function forecastFor(place) {
@@ -140,6 +149,17 @@ function forecastFor(place) {
         }, err => { forecasts.delete(place.id); throw err; }));
     }
     return forecasts.get(place.id);
+}
+
+// The last 24 hours observed at the nearest NWS station; null outside the US or on failure
+function historyFor(place) {
+    if (!histories.has(place.id)) {
+        histories.set(place.id, fetch(`/api/history?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`)
+            .then(r => (r.ok ? r.json() : null))
+            .catch(() => null)
+            .then(h => { if (!h) histories.delete(place.id); return h; }));
+    }
+    return histories.get(place.id);
 }
 
 async function alertsFor(place) {
@@ -173,22 +193,21 @@ function refsSeries(st, param, cycle = getLatestRunWithDate('refs')) {
 }
 const ensembleFor = f => refsSeries(f.raw.station, '3hrly-TMP').then(d => d?.Mean || null);
 
-// Spread below and above the mean at time t, linear between the 3-hourly points
-function spreadAt(ens, t) {
-    const k = ens.findIndex(m => m.x >= t);
-    if (k < 0 || (k === 0 && ens[0].x > t)) return null;
-    const a = ens[Math.max(0, k - 1)], b = ens[k];
-    const w = b.x === a.x ? 0 : (t - a.x) / (b.x - a.x);
-    const lerp = key => a[key] + (b[key] - a[key]) * w;
-    const y = lerp('y');
-    return { lo90: y - lerp('p10'), hi90: lerp('p90') - y, lo75: y - lerp('p25'), hi75: lerp('p75') - y };
+// Linear value of a series' key at time t; null outside it
+function interp(series, t, key = 'y') {
+    const k = series.findIndex(p => p.x >= t);
+    if (k < 0 || series[k][key] == null) return null;
+    if (series[k].x === t || k === 0) return series[k].x === t ? series[k][key] : null;
+    const a = series[k - 1], b = series[k];
+    if (a[key] == null) return null;
+    return a[key] + (b[key] - a[key]) * (t - a.x) / (b.x - a.x);
 }
 
-function confidence(ens, t) {
-    const s = spreadAt(ens, t);
-    if (!s) return null;
-    const width = s.lo90 + s.hi90;
-    return width <= 4 ? 'High confidence' : width <= 8 ? 'Moderate confidence' : 'Low confidence';
+// Ensemble p10..p90 at time t, or null
+function rangeAt(ens, t) {
+    if (!ens) return null;
+    const lo = interp(ens, t, 'p10'), hi = interp(ens, t, 'p90');
+    return lo == null || hi == null ? null : { lo, hi };
 }
 
 // Point in (Multi)Polygon by ray casting; holes count as outside
@@ -207,57 +226,69 @@ function contains(geom, { lat, lon }) {
     return false;
 }
 
-// ============ Sky ============
-
-// Two-stop gradients per condition; night variants are deeper
-const SKIES = {
-    clear: ['#1f5fc4', '#5e9ce0'], partly: ['#2c569c', '#6488b8'], cloudy: ['#343f52', '#5a6679'],
-    rain: ['#1d2737', '#36445a'], snow: ['#3a4a63', '#63758e'], storm: ['#161b28', '#3a3150'],
-    'clear-night': ['#050b20', '#18264e'], 'partly-night': ['#0a1230', '#28345a'],
-};
-const skyColors = (key, night) => {
-    const [a, b] = SKIES[key] || SKIES.cloudy;
-    const dim = night && !key.endsWith('night');
-    return dim ? [`color-mix(in srgb, ${a} 42%, #04060e)`, `color-mix(in srgb, ${b} 42%, #04060e)`] : [a, b];
-};
-
-function showSky(f) {
-    const [a, b] = skyColors(f.cond.key, f.night);
-    document.documentElement.style.setProperty('--sky-a', a);
-    document.documentElement.style.setProperty('--sky-b', b);
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', a);
-    const r = f.nowRow || {};
-    setScene({
-        cloud: r.cloud ?? 30, wind: f.wind, precip: r.qpf >= 0.01 || r.dbz >= 20 ? Math.max(r.qpf, 0.02) : 0,
-        snowy: !!r.snowy, storm: f.cond.key === 'storm', sunAlt: f.sun.alt, sunAz: f.sun.az, moon: moonPhase(Date.now()),
-    });
+// Dark spells [sunset, next sunrise] around now, for the spiral's night wedge
+function nightsAround(place, now) {
+    const out = [];
+    for (let d = -1; d <= 1; d++) {
+        const day = now + d * 86400000;
+        const set = sunTimes(day, place.lat, place.lon).set;
+        const rise = sunTimes(day + 86400000, place.lat, place.lon).rise;
+        if (set && rise) out.push([set, rise]);
+    }
+    return out;
 }
+
+// ============ The cursor ============
+// One time for the whole page: null is now. Views subscribe while connected.
+
+const cursor = { t: null, subs: new Set() };
+function setCursor(t) {
+    if (t === cursor.t) return;
+    cursor.t = t;
+    for (const fn of cursor.subs) fn(t);
+}
+function onCursor(node, fn) {
+    const sub = t => { if (!node.isConnected) { cursor.subs.delete(sub); return; } fn(t); };
+    cursor.subs.add(sub);
+}
+// A drag on a surface scrubs; letting go returns to now. Vertical page scroll still works on touch.
+function scrubSurface(node, timeAt) {
+    let active = false;
+    const move = e => setCursor(timeAt(e));
+    node.addEventListener('pointerdown', e => { active = true; node.setPointerCapture?.(e.pointerId); move(e); });
+    node.addEventListener('pointermove', e => { if (active || e.pointerType === 'mouse') move(e); });
+    const end = e => {
+        active = false;
+        if (e.type !== 'pointerleave' || e.pointerType === 'mouse') setCursor(null);
+    };
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) node.addEventListener(ev, end);
+}
+// Arrow keys step the cursor an hour at a time within [first, last]; Escape returns to now
+function keyScrub(node, first, last) {
+    node.tabIndex = 0;
+    node.addEventListener('keydown', e => {
+        const step = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+        if (e.key === 'Escape') { setCursor(null); return; }
+        if (!step) return;
+        e.preventDefault();
+        const base = cursor.t ?? Math.floor(Date.now() / HOUR) * HOUR;
+        const t = base + step * HOUR;
+        setCursor(t < first ? null : Math.min(last, t));
+    });
+    node.addEventListener('blur', () => setCursor(null));
+}
+
+// The hourly row at time t (the hour containing it), falling back to the first
+const rowAt = (f, t) => f.upcoming.find(r => r.t <= t && r.t + HOUR > t) ?? f.upcoming[0];
 
 // ============ Navigation ============
 
-// Same-document view transitions where supported: a card's temperature
-// morphs into the place page's large one. Opening a place from home pushes
-// an entry marked fromHome, so "back" (the header arrow or the system back)
-// pops it instead of stacking another home entry; going home otherwise
-// replaces the current entry.
 function navigate(hash) {
-    const home = !hash || hash === '#';
-    const url = home ? location.pathname + location.search : hash;
-    const go = () => {
-        if (home && history.state?.fromHome) { history.back(); return; }   // popstate routes
-        if (home) history.replaceState(null, '', url);
-        else history.pushState({ fromHome: !location.hash.startsWith('#p=') }, '', url);
-        route();
-    };
-    if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        document.startViewTransition(go);
-    } else go();
+    const url = !hash || hash === '#' ? location.pathname + location.search : hash;
+    history.pushState(null, '', url);
+    route();
 }
 document.addEventListener('click', e => {
-    if (document.body.classList.contains('editing') && e.target.closest?.('.places a, [data-section] a')) {
-        e.preventDefault();   // in edit mode, cards and links are for dragging
-        return;
-    }
     const a = e.target.closest?.('a[href^="#"]');
     if (!a || e.defaultPrevented || e.metaKey || e.ctrlKey || e.button) return;
     e.preventDefault();
@@ -266,167 +297,99 @@ document.addEventListener('click', e => {
 // Back/forward and a typed #hash both arrive as popstate
 window.addEventListener('popstate', () => route());
 
-// Header: transparent at the top of the page; scrolling down it gets out of
-// the way, scrolling up it comes back as a compact floating capsule. On a
-// place page the capsule carries the place's name and temperature.
-let lastScroll = 0;
-window.addEventListener('scroll', () => {
-    const y = scrollY, down = y > lastScroll;
-    if (Math.abs(y - lastScroll) < 6 && y > 60) return;   // ignore jitter
-    header.classList.toggle('floating', y > 60 && !down);
-    header.classList.toggle('tucked', y > 60 && down);
-    lastScroll = y;
-}, { passive: true });
-let heroObserver = null;
-function watchHero(hero, title) {
-    heroObserver?.disconnect();
-    headerTitle.textContent = title;
-    header.classList.remove('show-title');
-    heroObserver = new IntersectionObserver(([e]) => header.classList.toggle('show-title', !e.isIntersecting),
-        { rootMargin: '-64px 0px 0px 0px' });
-    heroObserver.observe(hero);
-}
+// ============ Place chips ============
 
-// ============ Places (home) ============
-
-let renderSeq = 0;
-
-function renderHome() {
-    renderSeq++;   // a place page still loading must not draw over home
-    view.classList.remove('place-view');
-    heroObserver?.disconnect();
-    header.classList.remove('show-title');
-    backBtn.hidden = true;
-    view.replaceChildren();
-    const intro = el('div', 'home-intro');
-    const titleRow = el('div', 'home-title-row');
-    const editBtn = el('button', 'text-btn', 'Edit');
-    editBtn.type = 'button';
-    editBtn.addEventListener('click', () => setEditing(true));
-    titleRow.append(el('h1', 'home-title', 'Your places'), editBtn);
-    intro.append(el('div', 'home-date', new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })), titleRow);
-    view.append(intro);
-    const list = el('section', 'places');
+function renderChips(activeId) {
     const ps = allPlaces();
-    ps.forEach((place, i) => list.append(placeCard(place, i === 0)));
-    if (store.get(GPS_KEY) !== '1' && navigator.geolocation) {
-        const b = el('button', 'glass place-add');
-        b.append(icon('locate', 'ic-sm'), el('span', null, 'Use my location'));
-        b.addEventListener('click', () => locate(true));
-        list.append(b);
-    }
-    const add = el('button', 'glass place-add');
-    add.append(icon('plus', 'ic-sm'), el('span', null, 'Add a place'));
-    add.addEventListener('click', openSearch);
-    list.append(add);
-    view.append(list);
-    // Saved places reorder by drag in edit mode (the device location stays first)
-    sortable(list, '.place-card:not([data-place="here"])', ids => {
-        places = ids.map(id => places.find(p => p.id === id)).filter(Boolean);
-        savePlaces();
-    });
-    if (!ps.length) {
-        document.documentElement.style.setProperty('--sky-a', SKIES.cloudy[0]);
-        document.documentElement.style.setProperty('--sky-b', SKIES.cloudy[1]);
-    }
-}
-
-function placeCard(place, setsSky) {
-    const a = el('a', 'glass place-card loading');
-    a.href = `#p=${encodeURIComponent(place.id)}`;
-    a.dataset.place = place.id;
-    const name = el('div', 'pc-name', place.name);
-    if (place.here) name.prepend(icon('locate', 'ic-xs'));
-    const temp = el('div', 'pc-temp', '--');
-    temp.style.viewTransitionName = vtName(place.id);
-    const cond = el('div', 'pc-cond');
-    const hilo = el('div', 'pc-hilo');
-    const line = el('div', 'pc-line');
-    const spark = el('div', 'pc-spark');
-    const alertChip = el('div', 'pc-alert');
-    alertChip.hidden = true;
-    a.append(name, temp, cond, hilo, spark, line, alertChip);
-
-    forecastFor(place).then(f => {
-        a.classList.remove('loading');
-        temp.textContent = deg(f.temp);
-        cond.replaceChildren(icon(f.cond.key), el('span', null, f.cond.label));
-        if (f.today) hilo.textContent = `H ${deg(f.today.hi)}  L ${deg(f.today.lo)}`;
-        line.textContent = nowcast(f.rows, Date.now(), hourOf);
-        // The card carries its own sky
-        const [ca, cb] = skyColors(f.cond.key, f.night);
-        a.style.setProperty('--tint-a', ca);
-        a.style.setProperty('--tint-b', cb);
-        spark.append(sparkline(f.upcoming.slice(0, 13)));
-        if (setsSky && a.isConnected) showSky(f);   // not after leaving home
-    }).catch(() => {
-        a.classList.remove('loading');
-        line.textContent = 'Forecast unavailable';
-    });
-    alertsFor(place).then(al => {
-        if (!al.length) return;
-        alertChip.hidden = false;
-        alertChip.textContent = al[0].properties.title?.split(' issued ')[0] || 'Weather alert';
-    });
-    return a;
-}
-
-// Next 12 hours as a small temperature curve with precipitation ticks
-function sparkline(rows) {
-    const W = 240, H = 34;
-    const s = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', class: 'spark', 'aria-hidden': 'true' });
-    if (rows.length < 2) return s;
-    const t = rows.map(r => r.tmp);
-    const lo = Math.min(...t), hi = Math.max(...t, lo + 4);
-    const pts = rows.map((r, i) => [i / (rows.length - 1) * W, 4 + (1 - (r.tmp - lo) / (hi - lo)) * (H - 12)]);
-    const defs = svgEl('defs', {}, s);
-    const id = `sg${Math.random().toString(36).slice(2, 8)}`;
-    const g = svgEl('linearGradient', { id, x1: 0, x2: 1, y1: 0, y2: 0 }, defs);
-    rows.forEach((r, i) => svgEl('stop', { offset: i / (rows.length - 1), 'stop-color': tempColor(r.tmp) }, g));
-    svgEl('path', { d: monotonePath(pts), fill: 'none', stroke: `url(#${id})`, 'stroke-width': 2.2, 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' }, s);
-    rows.forEach((r, i) => {
-        if (r.qpf < 0.01) return;
-        const h = Math.min(r.qpf / 0.2, 1) * 8 + 1;
-        svgEl('rect', { x: pts[i][0] - 2, y: H - 2 - h, width: 4, height: h, rx: 1, class: r.snowy ? 'bar-snow' : 'bar-rain' }, s);
-    });
-    return s;
+    chipsBox.replaceChildren(...ps.map(place => {
+        const a = el('a', 'chip');
+        a.href = `#p=${encodeURIComponent(place.id)}`;
+        if (place.id === activeId) a.setAttribute('aria-current', 'page');
+        const sw = el('span', 'chip-swatch');
+        const name = el('span', 'chip-name', place.here ? 'Here' : place.name.split(',')[0]);
+        const t = el('span', 'chip-temp', '');
+        a.append(sw, name, t);
+        a.title = place.name;
+        forecastFor(place).then(f => {
+            if (f.temp == null) return;
+            sw.style.background = rampColor(f.temp);
+            t.textContent = deg(f.temp);
+        }).catch(() => {});
+        return a;
+    }));
+    chipsBox.querySelector('[aria-current]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
 }
 
 // ============ One place ============
 
-async function renderPlace(id) {
+let renderSeq = 0;
+
+async function renderPlace(place) {
     const seq = ++renderSeq;
-    const place = allPlaces().find(p => p.id === id);
-    if (!place) { history.replaceState(null, '', location.pathname); renderHome(); return; }
-    backBtn.hidden = false;
-    view.classList.add('place-view');
+    cursor.t = null;
+    renderChips(place.id);
     view.replaceChildren();
-    const hero = el('section', 'hero');
-    const temp = el('div', 'hero-temp skeleton-text', '--');
-    temp.style.viewTransitionName = vtName(place.id);
-    hero.append(el('div', 'hero-name', place.name), temp);
-    view.append(hero);
-    watchHero(hero, place.name);
+    const top = el('section', 'sg-top');
+    const heroText = el('div', 'sg-hero');
+    const label = el('div', 'sg-label', place.name);
+    const num = el('div', 'sg-num sg-skeleton', '--');
+    heroText.append(label, num);
+    top.append(heroText);
+    view.append(top);
+    document.title = `${place.name} · Weather`;
 
     let f;
     try {
         f = await forecastFor(place);
     } catch {
-        if (seq === renderSeq) hero.append(el('div', 'hero-line', 'Forecast unavailable. Try again in a moment.'));
+        if (seq === renderSeq) heroText.append(el('p', 'sg-sentence', 'Forecast unavailable. Try again in a moment.'));
         return;
     }
     if (seq !== renderSeq) return;   // another render started meanwhile (navigation, refresh)
-    showSky(f);
-    hero.replaceChildren(...heroContent(place, f));
-    headerTitle.textContent = `${place.name}  ${deg(f.temp)}`;
-    let hourly = hourlySection(place, f, null), daily = dailySection(place, f, null), ens = null;
-    const sections = { hourly, radar: radarPanel(place), daily, plumes: plumePanel(f), tiles: tiles(place, f) };
-    if (hourly) hourly.dataset.section = 'hourly';
-    if (daily) daily.dataset.section = 'daily';
-    view.append(...layout().sections.map(k => sections[k]).filter(Boolean), actions(place, f), sources(f));
-    sortable(view, '[data-section]', keys => saveLayout('sections', keys));
-    sortable(sections.tiles, '.tile', keys => saveLayout('tiles', keys));
-    // A new region's 10-day rows are cut after its hourly series: ask again until they land
+    num.classList.remove('sg-skeleton');
+    const next24 = f.upcoming.slice(0, 25);
+    if (next24.length > 1) {
+        top.style.background = `linear-gradient(90deg, ${next24.map((r, i) => `${rampColor(r.tmp)} ${(i / (next24.length - 1) * 100).toFixed(1)}%`).join(', ')})`;
+    } else if (f.temp != null) top.style.background = rampColor(f.temp);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', f.temp != null ? rampColor(f.temp) : PAPER);
+    top.prepend(skyTicks(next24));
+
+    const sentence = el('p', 'sg-sentence', headline(f));
+    const alerts = el('div', 'sg-alerts');
+    heroText.append(sentence, alerts);
+    const hero = { label, num, place, f };
+    showHero(hero, null, null);
+
+    const spiralBox = el('div', 'sg-spiral');
+    top.append(spiralBox);
+    const cells = readouts(place, f);
+    const hours = hoursSection(place, f, null);
+    const daysSec = daysSection(f);
+    const more = el('section', 'sg-more');
+    const radar = radarPanel(place);
+    const plume = plumePanel(f);
+    more.append(radar, ...(plume ? [plume] : []));
+    view.append(cells.sec, ...(hours ? [hours.sec] : []), ...(daysSec ? [daysSec] : []), more, placeFooter(place, f));
+
+    let ens = null, hist = null;
+    // a redraw keeps keyboard focus on the spiral
+    const drawSpiral = () => {
+        const hadFocus = spiralBox.contains(document.activeElement);
+        spiralBox.replaceChildren(spiralSvg(place, f, hist));
+        if (hadFocus) spiralBox.firstChild.focus();
+    };
+    drawSpiral();
+    onCursor(top, t => { showHero(hero, t, ens); });
+    onCursor(cells.sec, t => cells.update(t, ens));
+    alertsFor(place).then(al => { if (seq === renderSeq) alerts.replaceChildren(...al.map(alertRow)); });
+    historyFor(place).then(h => { if (h && seq === renderSeq) { hist = h; drawSpiral(); } });
+    ensembleFor(f).then(e => {
+        if (!e || seq !== renderSeq) return;
+        ens = e;
+        cells.update(cursor.t, ens);
+        hours?.setEnsemble(ens);
+    });
+    // A new region's days are cut after its hourly series: ask again until they land
     if (f.raw.daily_building) {
         (async () => {
             for (let i = 0; i < 12 && seq === renderSeq; i++) {
@@ -435,254 +398,466 @@ async function renderPlace(id) {
                     const d = await (await fetch(`/api/forecast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`)).json();
                     if (d.daily?.length && !d.daily_building) {
                         Object.assign(f.raw, { daily: d.daily, daily_run: d.daily_run, daily_building: false });
+                        f.days = daysWithObserved(d.daily, f.temp);
                         if (seq !== renderSeq) return;
-                        const d2 = dailySection(place, f, ens);
-                        if (d2) d2.dataset.section = 'daily';
-                        if (daily && d2) { daily.replaceWith(d2); daily = d2; }
+                        const d2 = daysSection(f);
+                        if (d2) (daysSec ? daysSec.replaceWith(d2) : more.before(d2));
                         return;
                     }
                 } catch { /* try again */ }
             }
         })();
     }
-    alertsFor(place).then(al => { if (seq === renderSeq) al.forEach(a => hero.append(alertRow(a))); });
-    // The ensemble arrives later: redraw the strip and days with its spread
-    ensembleFor(f).then(e => {
-        if (!e || seq !== renderSeq) return;
-        ens = e;
-        const keep = hourly?.querySelector('.hourly-scroll')?.scrollLeft || 0;
-        const h2 = hourlySection(place, f, ens), d2 = dailySection(place, f, ens);
-        if (h2) h2.dataset.section = 'hourly';
-        if (d2) d2.dataset.section = 'daily';
-        if (hourly && h2) { hourly.replaceWith(h2); h2.querySelector('.hourly-scroll').scrollLeft = keep; hourly = h2; }
-        if (daily && d2) { daily.replaceWith(d2); daily = d2; }
-    });
 }
 
-function heroContent(place, f) {
-    const out = [el('div', 'hero-name', place.name)];
-    const temp = el('div', 'hero-temp', deg(f.temp));
-    temp.style.viewTransitionName = vtName(place.id);
-    out.push(temp);
-    const cond = el('div', 'hero-cond');
-    cond.append(icon(f.cond.key), el('span', null, f.cond.label));
-    out.push(cond);
-    const bits = [];
-    if (f.today) bits.push(`H ${deg(f.today.hi)}  L ${deg(f.today.lo)}`);
-    if (f.feels != null && Math.abs(f.feels - f.temp) >= 2) bits.push(`Feels like ${deg(f.feels)}`);
-    if (bits.length) out.push(el('div', 'hero-hilo', bits.join('   ')));
-    const line = nowcast(f.rows, Date.now(), hourOf);
-    if (line) out.push(el('div', 'hero-line', line));
-    for (const m of moments(f.upcoming, Date.now(), 3, deg)) {
-        const chip = el('div', 'hero-moment');
-        chip.append(el('span', 'moment-name', m.name), el('span', null, `${m.label === m.name ? '' : `${m.label} `}${m.text}`));
-        out.push(chip);
+// Cloud cover along the top edge of the color field: ink density per hour
+function skyTicks(rows) {
+    const strip = el('div', 'sg-sky');
+    strip.setAttribute('aria-hidden', 'true');
+    for (const r of rows.slice(0, 24)) {
+        const i = el('i');
+        i.style.opacity = ((r.cloud ?? 0) / 100 * 0.85).toFixed(2);
+        strip.append(i);
     }
-    return out;
+    return strip;
+}
+
+// The hero number: the observation at rest, the forecast at the cursor (set lighter where the ensemble disagrees)
+function showHero({ label, num, place, f }, t, ens) {
+    if (t == null) {
+        const age = f.obs?.time ? Math.round((Date.now() - f.obs.time * 1000) / 60000) : null;
+        label.textContent = f.obs?.time
+            ? `Now · observed ${timeOf(f.obs.time * 1000)}${age != null && age >= 2 ? `, ${age} min ago` : ''} · ${place.name}`
+            : `Now · ${place.name}`;
+        num.textContent = deg(f.temp);
+        num.style.fontWeight = 820;
+        return;
+    }
+    const r = rowAt(f, t);
+    if (!r) return;
+    const rg = rangeAt(ens, t);
+    label.textContent = `${weekday(t)} ${timeOf(t)} · forecast`;
+    num.textContent = deg(r.tmp);
+    num.style.fontWeight = certaintyWeight(rg ? rg.hi - rg.lo : null);
+}
+
+// One sentence: the sky now, the next 12 hours, and the next rain in the days
+function headline(f) {
+    const parts = [];
+    if (f.cond.label) parts.push(f.cond.label);
+    const soon = nowcast(f.rows, Date.now(), hourOf);
+    if (soon) parts.push(soon);
+    const wetDay = f.days.find(d => d.key !== dayKey(Date.now()) && (d.pop ?? 0) >= 40);
+    if (wetDay) {
+        const n = Math.round(wetDay.pop / 5);
+        parts.push(`${wetDay.snow >= 0.1 ? 'Snow' : 'Rain'} likely ${new Date(wetDay.t).toLocaleDateString('en-US', { weekday: 'long' })}: ${n} of 20 outcomes wet`);
+    } else if (f.days.length > 3) parts.push(`No rain in sight through ${new Date(f.days[f.days.length - 1].t).toLocaleDateString('en-US', { weekday: 'long' })}`);
+    return `${parts.join('. ')}.`;
 }
 
 function alertRow(feature) {
     const p = feature.properties;
-    const a = el('div', 'hero-alert');
+    const a = el('div', 'sg-alert');
     a.append(el('strong', null, (p.title || 'Weather alert').split(' issued ')[0]));
     if (p.expires) a.append(el('span', null, ` until ${weekday(Number(p.expires) * 1000)} ${timeOf(Number(p.expires) * 1000)}`));
     return a;
 }
 
-// Next 48 hours: temperature curve colored by temperature, night shaded,
-// precipitation bars, wind; each hour opens the radar page at that time
-function hourlySection(place, f, ens) {
-    const rows = f.upcoming.slice(0, HOURS_SHOWN);
-    if (rows.length < 2) return null;
-    const sec = el('section', 'glass panel');
-    const head = el('div', 'panel-head');
-    head.append(el('h2', 'panel-title', `Next ${rows.length} hours`));
-    const conf = ens && confidence(ens, rows[0].t + 24 * 3600000);
-    if (conf) head.append(el('span', 'panel-chip', conf));
-    sec.append(head);
-    const scroller = el('div', 'hourly-scroll');
-    const W = 56, H = 218, n = rows.length;
-    // Ensemble spread placed around this place's curve: its width says how far
-    // the forecast could swing (the station ensemble's own level can differ)
-    const spreads = rows.map(r => (ens ? spreadAt(ens, r.t) : null));
-    const temps = rows.flatMap((r, i) => (spreads[i] ? [r.tmp - spreads[i].lo90, r.tmp + spreads[i].hi90] : [r.tmp]));
-    const tmin = Math.min(...temps), tmax = Math.max(...temps);
-    const span = Math.max(tmax - tmin, 6);
-    const yT = t => 128 - (t - tmin) / span * 58;        // curve band y 70..128
-    const xAt = ms => (ms - rows[0].t) / 3600000 * W + W / 2;
-    const QMAX = 0.25;                                     // in/hr for a full precip bar
-    const svg = svgEl('svg', { width: n * W, height: H, class: 'hourly-svg' });
+// ============ The spiral ============
 
-    // Night: shade from each sunset to the next sunrise
-    const nights = svgEl('g', { class: 'nights' }, svg);
-    for (let d = new Date(rows[0].t).setHours(12, 0, 0, 0) - 86400000; d < rows[n - 1].t + 86400000; d += 86400000) {
-        const a = sunTimes(d, place.lat, place.lon).set, b = sunTimes(d + 86400000, place.lat, place.lon).rise;
-        if (!a || !b) continue;
-        const x0 = Math.max(0, xAt(a)), x1 = Math.min(n * W, xAt(b));
-        if (x1 > x0) svgEl('rect', { x: x0, y: 0, width: x1 - x0, height: H, class: 'night' }, nights);
+function spiralSvg(place, f, hist) {
+    const now = Date.now();
+    const past = hist?.hours?.map(h => ({ t: h.t, tmp: h.tmp, precip: h.precip })) ?? [];
+    const future = f.upcoming.slice(0, 26);
+    const sp = spiral({ past, future, now, nowTemp: f.temp, nights: nightsAround(place, now) });
+    const s = svgEl('svg', { viewBox: '-40 -40 600 612', class: 'spiral', role: 'img',
+        'aria-label': `The last 24 hours observed and the next 24 forecast, as a spiral colored by temperature` });
+
+    svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272, class: 'sp-disk' }, s);
+    for (const w of sp.wedges) {
+        svgTitle(svgEl('path', { d: w.d, class: 'sp-night' }, s), `Night: sunset ${timeOf(w.a)} to sunrise ${timeOf(w.b)}`);
+        svgEl('text', { x: w.label.x, y: w.label.y, class: 'sp-night-label', 'text-anchor': 'middle', 'dominant-baseline': 'central' }, s).textContent = 'NIGHT';
     }
+    const id = `sw${Math.random().toString(36).slice(2, 8)}`;
+    const mask = svgEl('mask', { id }, svgEl('defs', {}, s));
+    svgEl('path', { d: sp.track, class: 'sp-sweep', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
+    const g = svgEl('g', { mask: `url(#${id})` }, s);
+    for (const seg of sp.segs) {
+        const c = seg.tmp == null ? '#dcd7cb' : rampColor(seg.tmp);
+        const p = svgEl('path', { d: seg.d, fill: c, stroke: c, 'stroke-width': 0.6 }, g);
+        svgTitle(p, `${weekday(seg.t)} ${timeOf(seg.t)} · ${seg.tmp == null ? 'no observation' : deg(seg.tmp)}${seg.observed ? `, observed${hist?.station ? ` at ${hist.station.id}` : ''}` : ''}`);
+    }
+    for (const r of sp.rain) svgEl('line', { ...r, class: 'sp-rain' }, g);
+    svgEl('path', { d: sp.edge, class: 'sp-edge' }, g);
+    svgEl('path', { d: sp.tip, class: 'sp-tip', fill: sp.end != null ? rampColor(sp.end) : PAPER }, g);
 
-    const defs = svgEl('defs', {}, svg);
-    const grad = (id, alpha0, alpha1) => {
-        const g = svgEl('linearGradient', { id, gradientUnits: 'userSpaceOnUse', x1: 0, y1: yT(tmax), x2: 0, y2: yT(tmin) }, defs);
-        for (let k = 0; k <= 4; k++) {
-            const t = tmax - (tmax - tmin) * k / 4;
-            svgEl('stop', { offset: k / 4, 'stop-color': tempColor(t), 'stop-opacity': alpha0 + (alpha1 - alpha0) * k / 4 }, g);
+    for (const w of sp.wind) {
+        const a = svgEl('g', { class: 'sp-wind' }, s);
+        svgEl('line', { x1: w.x, y1: w.y, x2: w.x2.toFixed(1), y2: w.y2.toFixed(1) }, a);
+        svgEl('path', { d: w.head }, a);
+        svgTitle(a, `${weekday(w.t)} ${timeOf(w.t)} · wind from the ${compass(w.dir)}, ${windStr(w.wind)}`);
+    }
+    svgEl('circle', { cx: sp.now.x, cy: sp.now.y, r: 7, class: 'sp-now' }, s);
+    svgEl('text', { x: sp.now.x, y: (sp.now.y - 17).toFixed(1), class: 'sp-now-label', 'text-anchor': 'middle' }, s).textContent = 'NOW';
+
+    const label = (pt, big, small, anchor) => {
+        svgEl('text', { x: pt.x, y: pt.y, class: 'sp-big', 'text-anchor': anchor }, s).textContent = big;
+        svgEl('text', { x: pt.x, y: (+pt.y + 19).toFixed(1), class: 'sp-small', 'text-anchor': anchor }, s).textContent = small;
+    };
+    if (sp.low) label(sp.low, deg(sp.low.tmp), partOfDay(sp.low.t, now), sp.low.right ? 'start' : 'end');
+    if (sp.high && Math.round(sp.high.tmp) !== Math.round(sp.low?.tmp)) label(sp.high, deg(sp.high.tmp), partOfDay(sp.high.t, now), sp.high.right ? 'start' : 'end');
+
+    // Center: the day behind against the day ahead
+    const { C } = SPIRAL, tb = sp.table;
+    const cell = (x, y, cls, text, anchor = 'middle') => { svgEl('text', { x, y, class: cls, 'text-anchor': anchor }, s).textContent = text; };
+    cell(C - 50, C - 44, 'sp-th', 'Last 24 h');
+    cell(C + 50, C - 44, 'sp-th', 'Next 24 h');
+    svgEl('line', { x1: C - 92, x2: C + 92, y1: C - 34, y2: C - 34, class: 'sp-rule' }, s);
+    cell(C - 50, C + 2, 'sp-td', tb.pastRain == null ? '—' : tb.pastRain < 0.005 ? 'Dry' : rain(tb.pastRain));
+    cell(C + 50, C + 2, 'sp-td', tb.nextRain < 0.005 ? 'Dry' : rain(tb.nextRain));
+    cell(C, C + 20, 'sp-tl', 'rain');
+    cell(C - 50, C + 56, 'sp-td', tb.pastLow == null ? '—' : deg(tb.pastLow));
+    cell(C + 50, C + 56, 'sp-td', tb.nextLow == null ? '—' : deg(tb.nextLow));
+    cell(C, C + 74, 'sp-tl', 'low');
+
+    // The cursor on the spiral
+    const mark = svgEl('circle', { r: 9, class: 'sp-cursor', visibility: 'hidden' }, s);
+    const R = sv => SPIRAL.r0 + sv / 48 * (SPIRAL.r1 - SPIRAL.r0);
+    onCursor(s, t => {
+        const sv = t == null ? null : 24 + (t - now) / HOUR;
+        if (sv == null || sv < 24 || sv > 48) { mark.setAttribute('visibility', 'hidden'); return; }
+        const a = ((sv % 24) / 24) * 2 * Math.PI - Math.PI / 2;
+        mark.setAttribute('cx', (C + R(sv) * Math.cos(a)).toFixed(1));
+        mark.setAttribute('cy', (C + R(sv) * Math.sin(a)).toFixed(1));
+        mark.setAttribute('visibility', 'visible');
+    });
+    const last = f.upcoming[Math.min(f.upcoming.length - 1, 24)]?.t ?? now;
+    if (f.upcoming.length) keyScrub(s, f.upcoming[0].t, last);
+    scrubSurface(s, e => {
+        const b = s.getBoundingClientRect();
+        const x = -40 + (e.clientX - b.left) / b.width * 600, y = -40 + (e.clientY - b.top) / b.height * 612;
+        if (Math.hypot(x - C, y - C) < SPIRAL.r0 - 20) return null;   // the table, not the ring
+        const t = spiralTimeAt(x, y, now);
+        return t < now || !f.upcoming.length ? null : Math.min(last, Math.ceil(t / HOUR) * HOUR);
+    });
+    return s;
+}
+
+// ============ Readouts at the cursor ============
+
+function gauge(v, a, b, marks) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    svgEl('rect', { x: 0, y: 13, width: 138, height: 4, class: 'mini-track' }, s);
+    for (const m of marks) { const x = (m - a) / (b - a) * 138; svgEl('line', { x1: x, x2: x, y1: 8, y2: 22, class: 'mini-mark' }, s); }
+    svgEl('circle', { cx: Math.max(6, Math.min(132, (v - a) / (b - a) * 138)), cy: 15, r: 6, class: 'mini-dot' }, s);
+    return s;
+}
+function squares(n) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    for (let i = 0; i < 20; i++) svgEl('rect', { x: (i % 10) * 13 + 1, y: Math.floor(i / 10) * 13 + 3, width: 10, height: 10, class: i < n ? 'sq sq-on' : 'sq' }, s);
+    return s;
+}
+function coverBar(pct) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    svgEl('rect', { x: 1, y: 10, width: 136, height: 10, class: 'sq' }, s);
+    svgEl('rect', { x: 1, y: 10, width: 136 * Math.max(0, Math.min(1, pct / 100)), height: 10, class: 'sq-on' }, s);
+    return s;
+}
+function windGlyph(dir, mph, gust) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    const a = (dir + 180) * Math.PI / 180, ux = Math.sin(a), uy = -Math.cos(a);
+    const x0 = 22 - ux * 11, y0 = 15 - uy * 11, w = windArrow(x0, y0, dir, 22, 8);
+    svgEl('line', { x1: x0, y1: y0, x2: w.x2, y2: w.y2, class: 'mini-shaft' }, s);
+    svgEl('path', { d: w.head, class: 'mini-head' }, s);
+    const X = v => 56 + Math.min(v, 40) / 40 * 80;
+    svgEl('rect', { x: 56, y: 12, width: 80, height: 6, class: 'mini-track' }, s);
+    svgEl('rect', { x: 56, y: 12, width: X(mph) - 56, height: 6, class: 'sq-on' }, s);
+    if (gust != null) svgEl('line', { x1: X(gust), x2: X(gust), y1: 6, y2: 24, class: 'mini-mark' }, s);
+    return s;
+}
+function band(lo, hi, v, a, b) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    const X = x => Math.max(0, Math.min(138, (x - a) / (b - a) * 138));
+    svgEl('rect', { x: 0, y: 13, width: 138, height: 4, class: 'mini-track' }, s);
+    if (lo != null) svgEl('rect', { x: X(lo), y: 10, width: Math.max(2, X(hi) - X(lo)), height: 10, fill: rampColor(v), class: 'mini-band' }, s);
+    svgEl('circle', { cx: X(v), cy: 15, r: 4, class: 'mini-dot' }, s);
+    return s;
+}
+function dayBar(rise, set, t) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    const d0 = new Date(t).setHours(0, 0, 0, 0), X = ms => (ms - d0) / 86400000 * 138;
+    svgEl('rect', { x: 0, y: 10, width: 138, height: 10, class: 'mini-night' }, s);
+    if (rise && set) svgEl('rect', { x: X(rise), y: 10, width: X(set) - X(rise), height: 10, class: 'mini-day' }, s);
+    svgEl('line', { x1: X(t), x2: X(t), y1: 5, y2: 25, class: 'mini-mark' }, s);
+    return s;
+}
+
+const CELL_DETAIL = { feels: 'feels', dew: 'humidity', wind: 'wind', rain: 'precip', sun: 'sun' };
+
+function readouts(place, f) {
+    const sec = el('section', 'sg-cells');
+    sec.title = 'Values at the time you drag to on the chart or the spiral; lighter numbers mean the ensemble disagrees more';
+    const keys = ['feels', 'dew', 'wind', 'sky', 'rain', 'later3', 'later12', 'sun'];
+    const cells = Object.fromEntries(keys.map(k => {
+        const c = el(CELL_DETAIL[k] ? 'button' : 'div', 'sg-cell');
+        if (CELL_DETAIL[k]) { c.type = 'button'; c.addEventListener('click', () => openDetail(CELL_DETAIL[k], place, f)); }
+        const parts = { k: el('div', 'sg-cell-k'), v: el('div', 'sg-cell-v'), sub: el('div', 'sg-cell-sub'), mini: el('div', 'sg-cell-mini') };
+        c.append(parts.k, parts.v, parts.sub, parts.mini);
+        sec.append(c);
+        return [k, parts];
+    }));
+    const put = (k, key, value, sub, mini, weight = 820) => {
+        const c = cells[k];
+        c.k.textContent = key;
+        c.v.textContent = value;
+        c.v.style.fontWeight = weight;
+        c.sub.textContent = sub;
+        c.mini.replaceChildren(...(mini ? [mini] : []));
+    };
+    const update = (t, ens) => {
+        const now = t == null;
+        const tt = t ?? Date.now();
+        const r = rowAt(f, tt) || {};
+        const tmp = now ? f.temp : r.tmp, dpt = now ? f.dpt : r.dpt, wind = now ? f.wind : r.wind;
+        const dir = now ? f.dir ?? r.dir : r.dir, gust = now ? f.gust : r.gust;
+        const feels = tmp != null && dpt != null ? feelsLike(tmp, dpt, wind ?? 0) : null;
+        const diff = feels != null ? feels - tmp : 0;
+        put('feels', 'Feels like', deg(feels), diff <= -2 ? 'The wind takes the edge off.' : diff >= 2 ? 'Humidity adds heat.' : 'Same as the air.', feels != null ? gauge(feels, 0, 110, [32, 80]) : null);
+        const rh = tmp != null && dpt != null ? Math.round(humidity(tmp, dpt)) : null;
+        put('dew', 'Dew point', deg(dpt), rh != null ? `${rh}% humidity. ${comfort(dpt)}.` : '', dpt != null ? gauge(dpt, 30, 80, [55, 65]) : null);
+        put('wind', dir != null ? `Wind, from ${compass(dir)}` : 'Wind', String(Math.round(U.toWind(wind ?? 0, units))),
+            `${U.windUnit(units)}${gust != null ? `, gusts ${Math.round(U.toWind(gust, units))}` : ''}`, dir != null ? windGlyph(dir, wind ?? 0, gust) : null);
+        const cloud = now ? f.nowRow?.cloud : r.cloud;
+        const cover = cloud == null ? '' : cloud < 20 ? 'Clear' : cloud < 60 ? 'Partly cloudy' : cloud < 90 ? 'Mostly cloudy' : 'Overcast';
+        put('sky', 'Sky', cloud == null ? '--' : `${Math.round(cloud)}%`, cover, cloud != null ? coverBar(cloud) : null);
+        const day = f.days.find(d => d.key === dayKey(tt));
+        if (day?.pop != null) {
+            const n = Math.round(day.pop / 5);
+            put('rain', `Rain, ${weekday(tt).toLowerCase() === 'today' ? 'today' : weekday(tt)}`, `${n}/20`,
+                `outcomes wet, ${day.pop}%.${day.qpf >= 0.01 ? ` About ${rain(day.snow >= 0.1 ? day.snow : day.qpf, day.snow >= 0.1)}.` : ''}`, squares(n));
+        } else put('rain', 'Rain, this hour', rain(r.qpf ?? 0), '', null);
+        const ahead = (h, key) => {
+            const at = tt + h * HOUR, rr = rowAt(f, at), rg = rangeAt(ens, at);
+            if (!rr || rr.t + HOUR < at) { put(key, `In ${h} hours`, '--', '', null); return; }
+            put(key, `In ${h} hours`, deg(rr.tmp), rg ? `${deg(rg.lo)} to ${deg(rg.hi)} in 8 of 10.` : `${weekday(at)} ${hourOf(at)}.`,
+                band(rg?.lo, rg?.hi, rr.tmp, Math.min(rr.tmp, rg?.lo ?? rr.tmp) - 6, Math.max(rr.tmp, rg?.hi ?? rr.tmp) + 6), certaintyWeight(rg ? rg.hi - rg.lo : null));
+        };
+        ahead(3, 'later3');
+        ahead(12, 'later12');
+        const st = sunTimes(tt, place.lat, place.lon), st2 = sunTimes(tt + 86400000, place.lat, place.lon);
+        const events = [[st.rise, 'Sunrise'], [st.set, 'Sunset'], [st2.rise, 'Sunrise'], [st2.set, 'Sunset']].filter(([x]) => x && x > tt);
+        if (events.length) {
+            const [when, name] = events[0];
+            const len = st.rise && st.set ? Math.round((st.set - st.rise) / 60000) : null;
+            put('sun', name, timeOf(when), len != null ? `${Math.floor(len / 60)} h ${len % 60} m of daylight.` : '', dayBar(st.rise, st.set, tt));
         }
     };
-    grad('tline', 1, 1);
-    grad('tfill', 0.32, 0.04);
+    update(null, null);
+    return { sec, update };
+}
 
-    // Ensemble bands: 10-90% outer, 25-75% inner, over the hours the ensemble covers
-    const covered = rows.map((r, i) => [r, spreads[i], i]).filter(([, s]) => s);
-    if (covered.length > 1) {
-        const band = (lo, hi, cls) => {
-            const top = covered.map(([r, s, i]) => [i * W + W / 2, yT(r.tmp + s[hi])]);
-            const bot = covered.map(([r, s, i]) => [i * W + W / 2, yT(r.tmp - s[lo])]).reverse();
-            svgEl('path', { d: `${monotonePath(top)}L${bot.map(p => p.join(',')).join('L')}Z`, class: cls }, svg);
+// ============ 48 hours ============
+
+function hoursSection(place, f, ens0) {
+    const rows = f.upcoming.slice(0, HOURS_SHOWN);
+    if (rows.length < 2) return null;
+    const sec = el('section', 'sg-hours');
+    const head = el('div', 'sg-head');
+    const h2 = el('h2', 'sg-h2', 'Forty-eight hours');
+    h2.title = 'Solid line: the RRFS forecast. Faint lines: nine ensemble quantile paths (quantile levels, not members), redrawn one at a time. Arrows point the way the wind blows; longer is stronger.';
+    head.append(h2);
+    const wrap = el('div', 'sg-chart');
+    const card = el('div', 'sg-card');
+    card.hidden = true;
+    wrap.append(card);
+    sec.append(head, wrap);
+    let ens = ens0;
+    let redraw = () => {};
+
+    const draw = () => {
+        const W = Math.max(300, wrap.clientWidth);
+        const narrow = W < 700;
+        const L = 40, Rm = narrow ? 30 : 64, HT = narrow ? 220 : 340, STRIP = 22, WIND = narrow ? 72 : 96, HRS = 26;
+        const H = HT + STRIP + 26 + WIND + HRS;
+        const x0 = rows[0].t, x1 = rows[rows.length - 1].t;
+        const X = t => L + (t - x0) / (x1 - x0) * (W - L - Rm);
+        const ensIn = ens ? ens.filter(m => m.x >= x0 - 3 * HOUR && m.x <= x1 + 3 * HOUR) : [];
+        const vals = [...rows.map(r => r.tmp), ...ensIn.flatMap(m => [m.p10, m.p90])].map(v => U.toTemp(v, units));
+        let lo = Math.min(...vals), hi = Math.max(...vals);
+        const pad = Math.max(1.5, (hi - lo) * 0.12);
+        lo -= pad; hi += pad;
+        const Y = v => 26 + (1 - (U.toTemp(v, units) - lo) / (hi - lo)) * (HT - 34);
+        const s = svgEl('svg', { width: W, height: H, class: 'sg-svg', role: 'img', 'aria-label': 'Temperature and wind for the next 48 hours' });
+
+        // grid
+        const step = (hi - lo) > 24 ? 10 : (hi - lo) > 12 ? 5 : 2;
+        for (let v = Math.ceil(lo / step) * step; v < hi; v += step) {
+            const y = 26 + (1 - (v - lo) / (hi - lo)) * (HT - 34);
+            svgEl('line', { x1: L, x2: W - Rm, y1: y, y2: y, class: 'g-grid' }, s);
+            svgEl('text', { x: 0, y: y + 4, class: 'g-axis' }, s).textContent = `${v}°`;
+        }
+        // days
+        for (let t = new Date(x0).setHours(24, 0, 0, 0); t < x1; t = new Date(t).setDate(new Date(t).getDate() + 1)) {
+            svgEl('line', { x1: X(t), x2: X(t), y1: 0, y2: H - HRS, class: 'g-day' }, s);
+            svgEl('text', { x: X(t) + 8, y: 16, class: 'g-dayname' }, s).textContent = new Date(t).toLocaleDateString('en-US', { weekday: 'long' });
+        }
+        // the hours as color
+        const bw = (W - L - Rm) / (rows.length - 1);
+        for (const r of rows) {
+            const rect = svgEl('rect', { x: X(r.t) - bw / 2, y: HT, width: bw + 0.5, height: STRIP, fill: rampColor(r.tmp) }, s);
+            svgTitle(rect, `${weekday(r.t)} ${timeOf(r.t)} · ${deg(r.tmp)}`);
+        }
+        // ensemble quantile paths, redrawn one at a time
+        if (ensIn.length > 1) {
+            const clipId = `hc${Math.random().toString(36).slice(2, 8)}`;
+            svgEl('rect', { x: L, y: 0, width: W - L - Rm, height: HT }, svgEl('clipPath', { id: clipId }, svgEl('defs', {}, s)));
+            const hops = svgEl('g', { 'clip-path': `url(#${clipId})` }, s);
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9].forEach((q, k) => {
+                const pts = ensIn.map(m => [X(m.x), Y(quantile(m, q))]);
+                const p = svgEl('path', { d: monotonePath(pts), class: 'g-hop' }, hops);
+                p.style.animationDelay = `${((k * 5) % 9) * 0.8}s`;
+            });
+        }
+        // rain and snow, hourly
+        for (const r of rows) {
+            const amt = r.snowy ? r.snow : r.qpf;
+            if (!(r.qpf >= 0.01)) continue;
+            const h = Math.min(40, 6 + r.qpf * 160);
+            const b = svgEl('rect', { x: X(r.t) - Math.max(2, bw * 0.3), y: HT - h, width: Math.max(4, bw * 0.6), height: h, class: 'g-rain' }, s);
+            svgTitle(b, `${weekday(r.t)} ${timeOf(r.t)} · ${rain(amt, r.snowy)}${r.snowy ? ' snow' : ''}`);
+        }
+        // the forecast
+        svgEl('path', { d: monotonePath(rows.map(r => [X(r.t), Y(r.tmp)])), class: 'g-line' }, s);
+        if (!narrow) {
+            const lastR = rows[rows.length - 1];
+            svgEl('text', { x: X(lastR.t) + 8, y: Y(lastR.tmp) + 4, class: 'g-end' }, s).textContent = 'forecast';
+            if (ensIn.length > 1) {
+                const lm = ensIn[ensIn.length - 1];
+                if (lm.x <= x1 + 3 * HOUR) svgEl('text', { x: Math.min(X(lm.x), W - Rm) + 8, y: Y(lm.p10) + 16, class: 'g-end g-end-soft' }, s).textContent = 'likely range';
+            }
+        }
+        // wind lane
+        const wy = HT + STRIP + 26 + WIND / 2 - 8;
+        svgEl('text', { x: 0, y: HT + STRIP + 22, class: 'g-lane' }, s).textContent = `Wind, ${U.windUnit(units)}`;
+        const every = bw < 12 ? 2 : 1;
+        rows.forEach((r, i) => {
+            if (i % every) return;
+            const len = 4 + Math.min(r.wind, 30) * (narrow ? 1.1 : 1.6);
+            const w = windArrow(X(r.t), wy, r.dir, len, narrow ? 4 : 6);
+            const g = svgEl('g', { class: 'g-wind' }, s);
+            svgEl('line', { x1: X(r.t), y1: wy, x2: w.x2, y2: w.y2 }, g);
+            svgEl('path', { d: w.head }, g);
+            svgEl('circle', { cx: X(r.t), cy: wy, r: 1.8 }, g);
+            svgTitle(g, `${weekday(r.t)} ${timeOf(r.t)} · from the ${compass(r.dir)}, ${windStr(r.wind)}${r.gust ? `, gusts ${windStr(r.gust)}` : ''}`);
+        });
+        rows.forEach((r, i) => {
+            if (i % (narrow ? 6 : 3)) return;
+            svgEl('text', { x: X(r.t), y: HT + STRIP + 26 + WIND - 2, class: `g-speed${r.wind >= 15 ? ' strong' : ''}`, 'text-anchor': 'middle' }, s).textContent = Math.round(U.toWind(r.wind, units));
+            svgEl('text', { x: X(r.t), y: H - 6, class: 'g-hour', 'text-anchor': 'middle' }, s).textContent = hourOf(r.t);
+        });
+        // now, and the cursor
+        const now = Date.now();
+        if (now >= x0 && now <= x1) svgEl('line', { x1: X(now), x2: X(now), y1: 22, y2: H - HRS, class: 'g-now' }, s);
+        const cur = svgEl('line', { y1: 22, y2: H - HRS, class: 'g-cursor', visibility: 'hidden' }, s);
+        const dot = svgEl('circle', { r: 7, class: 'g-dot', visibility: 'hidden' }, s);
+        const old = wrap.querySelector('svg'), hadFocus = old && old === document.activeElement;
+        old?.remove();
+        wrap.prepend(s);
+
+        const show = t => {
+            if (t == null) { cur.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); card.hidden = true; return; }
+            const r = rowAt(f, t);
+            const x = X(r.t);
+            cur.setAttribute('x1', x); cur.setAttribute('x2', x); cur.setAttribute('visibility', 'visible');
+            dot.setAttribute('cx', x); dot.setAttribute('cy', Y(r.tmp)); dot.setAttribute('visibility', 'visible');
+            const rg = rangeAt(ens, r.t);
+            card.hidden = false;
+            card.replaceChildren(el('div', 'sg-card-k', `${weekday(r.t)} ${timeOf(r.t)}`),
+                Object.assign(el('div', 'sg-card-v', deg(r.tmp)), { style: `font-weight:${certaintyWeight(rg ? rg.hi - rg.lo : null)}` }),
+                el('div', 'sg-card-sub', [rg ? `${deg(rg.lo)} to ${deg(rg.hi)} in 8 of 10 outcomes.` : null,
+                    `${condition(r, sunAltitude(r.t, place.lat, place.lon) < -0.8).label}, wind ${compass(r.dir)} ${windStr(r.wind)}.`].filter(Boolean).join(' ')));
+            const cw = Math.min(260, W * 0.45);
+            card.style.width = `${cw}px`;
+            card.style.left = `${x + 18 + cw > W ? x - 18 - cw : x + 18}px`;
         };
-        band('lo90', 'hi90', 'band-outer');
-        band('lo75', 'hi75', 'band-inner');
-    }
-
-    const pts = rows.map((r, i) => [i * W + W / 2, yT(r.tmp)]);
-    const path = monotonePath(pts);
-    svgEl('path', { d: `${path}L${pts[n - 1][0]},140L${pts[0][0]},140Z`, fill: 'url(#tfill)' }, svg);
-    svgEl('path', { d: path, fill: 'none', stroke: 'url(#tline)', 'stroke-width': 3, 'stroke-linecap': 'round' }, svg);
-
-    rows.forEach((r, i) => {
-        const x = i * W, cx = x + W / 2;
-        const night = sunAltitude(r.t, place.lat, place.lon) < -0.8;
-        const c = condition(r, night);
-        const wet = r.qpf >= 0.01 || r.dbz >= 20;
-        const link = svgEl('a', { href: radarLink(place, wet ? 'radar' : 'temp', r.t) }, svg);
-        svgEl('rect', { x, y: 0, width: W, height: H, fill: 'transparent', class: 'hour-hit' }, link);
-        const newDay = i > 0 && dayKey(r.t) !== dayKey(rows[i - 1].t);
-        if (newDay) svgEl('line', { x1: x, x2: x, y1: 6, y2: H - 6, class: 'day-rule' }, link);
-        svgEl('text', { x: cx, y: 17, class: 'h-time' }, link).textContent = i === 0 ? 'Now' : newDay ? weekday(r.t) : hourOf(r.t);
-        svgEl('use', { href: `#i-${c.key}`, x: cx - 11, y: 26, width: 22, height: 22, class: `ic ic-${c.key}` }, link);
-        svgEl('text', { x: cx, y: yT(r.tmp) - 10, class: 'h-temp' }, link).textContent = deg(r.tmp);
-        // Precip bar: liquid equivalent; blue for rain, white for snow
-        if (r.qpf >= 0.005) {
-            const h = Math.max(3, Math.min(r.qpf / QMAX, 1) * 38);
-            svgEl('rect', { x: cx - 9, y: 184 - h, width: 18, height: h, rx: 3, class: r.snowy ? 'bar-snow' : 'bar-rain' }, link);
-            svgEl('text', { x: cx, y: 145, class: 'h-amt' }, link).textContent = units.precip === 'mm'
-                ? String(Math.max(1, Math.round(r.qpf * 25.4))) : r.qpf >= 0.1 ? r.qpf.toFixed(1) : r.qpf.toFixed(2).slice(1);
-        }
-        svgEl('line', { x1: x + 8, x2: x + W - 8, y1: 184.5, y2: 184.5, class: 'bar-base' }, link);
-        // Wind: arrow points where the air is going
-        if (r.wind != null) {
-            const g = svgEl('g', { transform: `translate(${cx - 13} 196) rotate(${r.dir} 6 7)` }, link);
-            svgEl('use', { href: '#i-arrow', width: 12, height: 14, class: 'h-arrow' }, g);
-            svgEl('text', { x: cx + 7, y: 208, class: 'h-wind' }, link).textContent = Math.round(U.toWind(r.wind, units));
-        }
-    });
-    scroller.append(svg);
-    dragScroll(scroller);
-    sec.append(scroller);
-    if (covered.length > 1) {
-        sec.append(el('div', 'panel-note', `Shaded: the range the REFS ensemble spans at ${f.raw.station.id} (10-90% and 25-75%)`));
-    }
-    return sec;
+        redraw = () => show(cursor.t);
+        show(cursor.t);
+        keyScrub(s, x0, x1);
+        if (hadFocus) s.focus();
+        scrubSurface(s, e => {
+            const b = s.getBoundingClientRect();
+            const t = x0 + (e.clientX - b.left - L) / (W - L - Rm) * (x1 - x0);
+            return Math.min(x1, Math.max(x0, Math.round(t / HOUR) * HOUR));
+        });
+    };
+    onCursor(sec, () => redraw());
+    let lastW = 0, timer = 0;
+    new ResizeObserver(([e]) => {
+        const w = Math.round(e.contentRect.width);
+        if (w && w !== lastW) { const first = !lastW; lastW = w; clearTimeout(timer); timer = setTimeout(draw, first ? 0 : 120); }
+    }).observe(wrap);
+    return { sec, setEnsemble: e => { ens = e; if (wrap.isConnected && wrap.clientWidth) draw(); } };
 }
 
-// A mouse wheel scrolls vertically and a mouse cannot swipe: turn the wheel
-// sideways over the strip (until it reaches an end) and let a mouse drag it.
-// A drag must not end as a click on the hour under the pointer.
-function dragScroll(box) {
-    box.addEventListener('wheel', e => {
-        if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;   // trackpads already scroll sideways
-        const max = box.scrollWidth - box.clientWidth;
-        const next = Math.min(max, Math.max(0, box.scrollLeft + e.deltaY));
-        if (next === box.scrollLeft) return;   // at an end: let the page scroll
-        e.preventDefault();
-        box.scrollLeft = next;
-    }, { passive: false });
-    // Pointer capture keeps the drag on the strip even outside it, with no
-    // window listeners to pile up across renders
-    let start = null, moved = false;
-    const end = () => { start = null; box.classList.remove('dragging'); };
-    box.addEventListener('pointerdown', e => {
-        moved = false;   // any new press (mouse, touch, pen) starts clean
-        if (e.pointerType !== 'mouse' || e.button !== 0) return;
-        start = { x: e.clientX, left: box.scrollLeft };
-    });
-    box.addEventListener('pointermove', e => {
-        if (start && !(e.buttons & 1)) end();   // released outside before the drag captured
-        if (!start) return;
-        const dx = e.clientX - start.x;
-        if (!moved && Math.abs(dx) > 4) {
-            moved = true;
-            box.setPointerCapture(e.pointerId);
-            box.classList.add('dragging');
-        }
-        if (moved) box.scrollLeft = start.left - dx;
-    });
-    box.addEventListener('pointerup', end);
-    box.addEventListener('pointercancel', end);
-    box.addEventListener('keydown', () => { moved = false; });
-    box.addEventListener('click', e => {
-        if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; }
-    }, true);
-}
+// ============ Days ============
 
-// Daily rows with low-high bars on one shared scale (Apple Weather style):
-// the National Blend of Models' 10-11 days when available, else the RRFS
-// run's days. Today folds in the observed temperature and the RRFS low.
-function dailySection(place, f, ens) {
-    const nbm = f.raw.daily?.length ? nbmDays(f.raw.daily) : null;
-    const today = dayKey(Date.now());
-    let days = (nbm || f.days).filter(d => d.t >= new Date().setHours(0, 0, 0, 0)).map(d => ({ ...d }));
-    // An evening 00z NBM run starts tomorrow: today comes from the RRFS run
-    const rrfsToday = f.days.find(d => d.key === today);
-    if (days[0]?.key !== today && rrfsToday) days.unshift({ ...rrfsToday });
-    if (days[0]?.key === today && f.today) Object.assign(days[0], f.today);
-    days = days.filter(d => d.hi != null && d.lo != null);
+function daysSection(f) {
+    const days = f.days;
     if (!days.length) return null;
-    const sec = el('section', 'glass panel');
-    const head = el('div', 'panel-head');
-    head.append(el('h2', 'panel-title', nbm ? `${days.length}-day forecast` : `Next ${days.length} days`));
-    if (nbm) head.append(el('span', 'panel-chip', 'National Blend'));
+    const sec = el('section', 'sg-days');
+    const head = el('div', 'sg-head');
+    const h2 = el('h2', 'sg-h2', `${days.length === 1 ? 'One day' : `${['', '', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve'][days.length] || days.length} days`}`);
+    h2.title = 'Each bar is painted with the temperatures the day passes through. Squares: 20 equally likely outcomes, filled when wet (NBM probability of 0.01 in or more).';
+    head.append(h2);
     sec.append(head);
-    const lo = Math.min(...days.map(d => d.lo)), hi = Math.max(...days.map(d => d.hi));
-    const pct = v => `${((v - lo) / Math.max(hi - lo, 1) * 100).toFixed(1)}%`;
-    const list = el('div', 'days');
-    for (const d of days) {
-        const row = el('a', 'day');
-        row.href = radarLink(place, d.qpf >= 0.05 ? 'precip' : 'temp', new Date(d.t).setHours(14, 0, 0, 0));
-        const precip = el('span', 'day-precip');
-        if (d.pop != null && d.pop >= 20) precip.append(el('b', null, `${Math.round(d.pop / 10) * 10}%`));
-        if (d.snow >= 0.1) precip.append(el('span', null, `${rain(d.snow, true)} snow`));
-        else if (d.qpf >= 0.05 || (d.pop == null && d.qpf >= 0.01)) precip.append(el('span', null, rain(d.qpf)));
-        const bar = el('span', 'day-bar');
-        const fill = el('i');
-        fill.style.left = pct(d.lo);
-        fill.style.right = `calc(100% - ${pct(d.hi)})`;
-        fill.style.background = `linear-gradient(90deg, ${tempColor(d.lo)}, ${tempColor(d.hi)})`;
-        bar.append(fill);
-        if (d.key === today && f.temp != null) {
-            const dot = el('b');
-            dot.style.left = pct(Math.min(Math.max(f.temp, d.lo), d.hi));
-            bar.append(dot);
-        }
-        const hiCell = el('span', 'day-hi', deg(d.hi));
-        // Ensemble half-width over the day's hours, where the ensemble reaches
-        const hrs = f.rows.filter(r => dayKey(r.t) === d.key).map(r => ens && spreadAt(ens, r.t)).filter(Boolean);
-        if (hrs.length >= 6) hiCell.append(el('small', 'day-spread', `±${Math.round(U.toTempDelta(Math.max(...hrs.map(s => (s.lo90 + s.hi90) / 2)), units))}`));
-        const name = el('span', 'day-name', weekday(d.t));
-        name.append(el('small', 'day-date', new Date(d.t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })));
-        row.append(name, icon(d.cond.key), precip, el('span', 'day-lo', deg(d.lo)), bar, hiCell);
-        list.append(row);
+    const lowOf = d => d.lo ?? (d.key === dayKey(Date.now()) ? f.temp : null) ?? d.hi;
+    const his = days.map(d => d.hi).filter(v => v != null), los = days.map(lowOf).filter(v => v != null);
+    const lo = Math.min(...los) - 2, hi = Math.max(...his) + 2;
+    const pos = v => `${((v - lo) / (hi - lo) * 100).toFixed(2)}%`;
+    const table = el('div', 'sg-daylist');
+    const axis = el('div', 'sg-day sg-day-axis');
+    const scale = el('div', 'sg-day-bar');
+    const step = hi - lo > 40 ? 10 : 5;
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+        const tick = el('span', 'sg-tick', U.deg(v, units));
+        tick.style.left = pos(v);
+        scale.append(tick);
     }
-    sec.append(list);
+    axis.append(el('span'), el('span', 'sg-day-date'), scale, el('span', 'sg-day-colh', 'Chance of rain'), el('span', 'sg-day-colh sg-right', 'Amount'));
+    table.append(axis);
+    for (const d of days) {
+        const row = el('div', 'sg-day');
+        const low = d.lo ?? (d.key === dayKey(Date.now()) ? f.temp : null) ?? null;
+        const name = el('span', 'sg-day-name', weekday(d.t));
+        const date = el('span', 'sg-day-date', new Date(d.t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        const barBox = el('div', 'sg-day-bar');
+        if (d.hi != null) {
+            const l = low ?? d.hi;
+            const bar = el('div', 'sg-day-fill');
+            bar.style.left = pos(l);
+            bar.style.width = `${((d.hi - l) / (hi - lo) * 100).toFixed(2)}%`;
+            bar.style.background = `linear-gradient(90deg, ${rampColor(l)}, ${rampColor(d.hi)})`;
+            const lt = el('span', 'sg-day-lo', low == null ? '' : deg(low));
+            lt.style.left = pos(l);
+            const ht = el('span', 'sg-day-hi', deg(d.hi));
+            ht.style.left = pos(d.hi);
+            barBox.append(bar, lt, ht);
+        }
+        const n = d.pop != null ? Math.round(d.pop / 5) : 0;
+        const sq = el('div', 'sg-squares');
+        sq.title = d.pop != null ? `${d.pop}% chance of 0.01 in or more` : 'No probability available';
+        for (let i = 0; i < 20; i++) sq.append(el('i', i < n ? 'on' : ''));
+        const snow = d.snow >= 0.1;
+        const amt = el('span', 'sg-day-amt sg-right', (d.pop ?? 0) >= 30 && (snow || d.qpf >= 0.01) ? `${rain(snow ? d.snow : d.qpf, snow)}${snow ? ' snow' : ''}` : '');
+        row.append(name, date, barBox, sq, amt);
+        table.append(row);
+    }
+    sec.append(table);
     return sec;
 }
 
 // ============ Ensemble plumes ============
-// The plume page's REFS series drawn in place: 10-90% and 25-75% bands, the
-// ensemble mean, the dashed deterministic RRFS run and the two previous
-// runs' means (fainter the older), 60 hours. The pointer scrubs on a
-// 30-minute grid, interpolating between the ensemble's 3-hourly points.
+
 const PLUMES = [
     { key: 'temp', label: 'Temperature', param: '3hrly-TMP', conv: v => U.toTemp(v, units), fmt: v => `${Math.round(v)}°`,
         trend: ['Warmer', 'Cooler'], delta: d => `${Math.round(Math.abs(U.toTempDelta(d, units)))}°`, flat: 1 },
@@ -697,21 +872,10 @@ const PLUMES = [
 ];
 const HALF_HOUR = 1800000;
 
-// Linear value of a series' key at time t; null outside it
-function interp(series, t, key = 'y') {
-    const k = series.findIndex(p => p.x >= t);
-    if (k < 0 || series[k][key] == null) return null;
-    if (series[k].x === t || k === 0) return series[k].x === t ? series[k][key] : null;
-    const a = series[k - 1], b = series[k];
-    if (a[key] == null) return null;
-    return a[key] + (b[key] - a[key]) * (t - a.x) / (b.x - a.x);
-}
-
 function plumePanel(f) {
     const st = f.raw.station;
     if (!st || st.km > ENSEMBLE_MAX_KM) return null;
-    const sec = el('section', 'glass panel plume-panel');
-    sec.dataset.section = 'plumes';
+    const sec = el('section', 'sg-panel plume-panel');
     const head = el('div', 'panel-head');
     head.append(el('h2', 'panel-title', 'Ensemble plumes'));
     const tabs = el('div', 'seg');
@@ -724,7 +888,7 @@ function plumePanel(f) {
     const more = el('a', 'text-link', `Full plumes for ${st.id}`);
     more.href = `/?station=${encodeURIComponent(st.id)}`;
     foot.append(el('span', null, `REFS ensemble at ${st.id}, ${st.km} km away`), more);
-    sec.append(head, readout, chart, legend, trend, foot);
+    sec.append(head, trend, readout, chart, legend, foot);
 
     const latest = getLatestRunWithDate('refs');
     const cycles = [latest, previousCycle('refs', latest.date, latest.run, 1), previousCycle('refs', latest.date, latest.run, 2)];
@@ -790,10 +954,10 @@ function drawPlume(box, readout, d, spec, prevs) {
     const cs = getComputedStyle(box);
     const W = Math.max(260, box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)), H = 210, L = 44, R = 12, T = 12, B = 26;
     const now = Date.now();
-    const mean = d.Mean.filter(m => m.x >= now - 3 * 3600000);
+    const mean = d.Mean.filter(m => m.x >= now - 3 * HOUR);
     if (mean.length < 2) { readout.textContent = 'Ensemble not available right now'; return; }
     const x0 = mean[0].x, x1 = mean[mean.length - 1].x;
-    const det = d.RRFS.filter(p => p.x >= x0 - 3600000 && p.x <= x1 + 3600000 && p.y != null);
+    const det = d.RRFS.filter(p => p.x >= x0 - HOUR && p.x <= x1 + HOUR && p.y != null);
     const c = v => spec.conv(v);
     const vals = [...mean.flatMap(m => [c(m.p10), c(m.p90)]), ...det.map(p => c(p.y)),
         ...prevs.flatMap(p => p.mean.filter(m => m.x >= x0 && m.x <= x1).map(m => c(m.y)))];
@@ -830,13 +994,13 @@ function drawPlume(box, readout, d, spec, prevs) {
     if (detIn.length > 1) svgEl('path', { d: monotonePath(detIn.map(p => [X(p.x), Y(c(p.y))])), class: 'plume-det' }, s);
     svgEl('path', { d: monotonePath(mean.map(m => [X(m.x), Y(c(m.y))])), class: 'plume-mean' }, s);
 
-    const cursor = svgEl('line', { y1: T, y2: H - B, class: 'plume-cursor' }, s);
+    const cursorLine = svgEl('line', { y1: T, y2: H - B, class: 'plume-cursor' }, s);
     const dot = svgEl('circle', { r: 4, class: 'plume-dot' }, s);
     const at = t => {
         const m = interp(mean, t);
         if (m == null) return;
-        cursor.setAttribute('x1', X(t));
-        cursor.setAttribute('x2', X(t));
+        cursorLine.setAttribute('x1', X(t));
+        cursorLine.setAttribute('x2', X(t));
         dot.setAttribute('cx', X(t));
         dot.setAttribute('cy', Y(c(m)));
         const r = interp(det, t);
@@ -853,7 +1017,7 @@ function drawPlume(box, readout, d, spec, prevs) {
     };
     s.addEventListener('pointermove', scrub);
     s.addEventListener('pointerdown', scrub);
-    at(Math.min(x1, Math.max(x0, Math.round((now + 21 * 3600000) / HALF_HOUR) * HALF_HOUR)));
+    at(Math.min(x1, Math.max(x0, Math.round((now + 21 * HOUR) / HALF_HOUR) * HALF_HOUR)));
     box.append(s);
 }
 
@@ -866,7 +1030,7 @@ window.addEventListener('message', e => {
 // The radar page embedded (radar.html?embed=1): loaded once scrolled near,
 // paused while out of view, a tap expands it to full screen in place
 function radarPanel(place) {
-    const sec = el('section', 'glass panel radar-panel');
+    const sec = el('section', 'sg-panel radar-panel');
     const head = el('div', 'panel-head');
     head.append(el('h2', 'panel-title', 'Radar'));
     const frame = el('div', 'radar-frame');
@@ -878,7 +1042,6 @@ function radarPanel(place) {
     close.append(icon('close'));
     frame.append(open, close);
     sec.append(head, frame);
-    sec.dataset.section = 'radar';
 
     let iframe = null;
     const post = msg => iframe?.contentWindow?.postMessage({ type: 'wx-radar', ...msg }, location.origin);
@@ -909,31 +1072,27 @@ function radarPanel(place) {
     return sec;
 }
 
-// ============ Detail tiles ============
-// Tiles in the user's order (edit mode); a tap opens the tile's detail sheet
-
-const TILE_KEYS = ['wind', 'humidity', 'uv', 'sun', 'moon', 'feels', 'precip'];
-const SECTION_KEYS = ['hourly', 'radar', 'daily', 'plumes', 'tiles'];
-const LAYOUT_KEY = 'wx-layout';
-const layout = () => {
-    const saved = readJson(LAYOUT_KEY, {});
-    const order = (keys, got) => [...(got || []).filter(k => keys.includes(k)), ...keys.filter(k => !(got || []).includes(k))];
-    return { sections: order(SECTION_KEYS, saved.sections), tiles: order(TILE_KEYS, saved.tiles) };
-};
-const saveLayout = (part, keys) => store.set(LAYOUT_KEY, JSON.stringify({ ...readJson(LAYOUT_KEY, {}), [part]: keys }));
-
-function tile(key, title, place, f) {
-    const t = el('section', 'glass tile');
-    t.dataset.tile = key;
-    t.tabIndex = 0;
-    t.setAttribute('role', 'button');
-    t.setAttribute('aria-label', `${title} details`);
-    t.append(el('h3', 'tile-title', title));
-    const open = () => { if (!document.body.classList.contains('editing')) openDetail(key, place, f); };
-    t.addEventListener('click', open);
-    t.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
-    return t;
+function placeFooter(place, f) {
+    const foot = el('footer', 'sg-foot');
+    const src = [];
+    if (f.obs) src.push(`Observed ${timeOf(f.obs.time * 1000)}, NOAA RTMA`);
+    if (f.raw.hourly) src.push(`Hours: RRFS ${f.raw.hourly.run.slice(8)}Z`);
+    if (f.raw.station) src.push(`Ensemble: REFS at ${f.raw.station.id}`);
+    if (f.raw.daily_run) src.push(`Days: NBM ${f.raw.daily_run.slice(8)}Z`);
+    foot.append(el('span', null, src.join(' · ')));
+    const links = el('span', 'sg-foot-links');
+    const a = el('a', null, 'Radar map');
+    a.href = `/radar?layer=radar#8.5/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
+    links.append(a);
+    foot.append(links);
+    return foot;
 }
+
+// ============ Detail sheets ============
+
+const detailDialog = document.getElementById('detailDialog');
+detailDialog.querySelector('.detail-done').addEventListener('click', () => detailDialog.close());
+detailDialog.addEventListener('click', e => { if (e.target === detailDialog) detailDialog.close(); });
 
 // Today's hourly UV estimate from the sun's elevation and the forecast cloud cover
 function uvHours(place, f) {
@@ -941,84 +1100,9 @@ function uvHours(place, f) {
     return f.rows.filter(r => dayKey(r.t) === today).map(r => ({ t: r.t, uv: uvIndex(sunAltitude(r.t, place.lat, place.lon), r.cloud) }));
 }
 
-function tiles(place, f) {
-    const grid = el('div', 'tiles');
-    grid.dataset.section = 'tiles';
-    const make = { wind: windTile, humidity: humidityTile, uv: uvTile, sun: sunTile, moon: moonTile, feels: feelsTile, precip: precipTile };
-    for (const key of layout().tiles) {
-        const t = make[key](place, f);
-        if (t) grid.append(t);
-    }
-    return grid;
-}
-
-function windTile(place, f) {
-    const t = tile('wind', 'Wind', place, f);
-    const dir = f.obs?.wind?.from ?? f.upcoming[0]?.dir ?? 0;
-    const gust = f.obs?.gust ?? f.upcoming[0]?.gust;
-    t.append(compassSvg(dir, f.wind), el('div', 'tile-note', `From the ${compass(dir)}${gust != null ? ` · gusts ${windStr(gust)}` : ''}`));
-    return t;
-}
-
-// Dial: fine ticks every 5 degrees, cardinals outside the ring, a needle
-// pointing downwind that passes under the speed hub
-function compassSvg(dir, mph) {
-    const s = svgEl('svg', { viewBox: '-10 -10 140 140', class: 'compass', 'aria-hidden': 'true' });
-    svgEl('circle', { cx: 60, cy: 60, r: 55, class: 'dial' }, s);
-    for (let a = 0; a < 360; a += 5) {
-        const major = a % 90 === 0, mid = a % 30 === 0;
-        const r0 = major ? 47 : mid ? 49 : 51, rad = a * Math.PI / 180;
-        svgEl('line', { x1: 60 + r0 * Math.sin(rad), y1: 60 - r0 * Math.cos(rad), x2: 60 + 54 * Math.sin(rad), y2: 60 - 54 * Math.cos(rad), class: major ? 'tick tick-major' : 'tick' }, s);
-    }
-    [['N', 0], ['E', 90], ['S', 180], ['W', 270]].forEach(([l, a]) => {
-        const rad = a * Math.PI / 180;
-        svgEl('text', { x: 60 + 64 * Math.sin(rad), y: 60 - 64 * Math.cos(rad), class: `cardinal${l === 'N' ? ' north' : ''}`, 'dominant-baseline': 'central' }, s).textContent = l;
-    });
-    const g = svgEl('g', { transform: `rotate(${dir} 60 60)` }, s);
-    svgEl('path', { d: 'M60 10 L60 38', class: 'needle-tail' }, g);
-    svgEl('path', { d: 'M60 82 L60 108 M54 100 L60 109 L66 100', class: 'needle' }, g);
-    svgEl('circle', { cx: 60, cy: 60, r: 22, class: 'hub' }, s);
-    svgEl('text', { x: 60, y: 57, class: 'hub-speed', 'dominant-baseline': 'central' }, s).textContent = Math.round(U.toWind(mph, units));
-    svgEl('text', { x: 60, y: 71, class: 'hub-unit', 'dominant-baseline': 'central' }, s).textContent = U.windUnit(units);
-    return s;
-}
-
-function humidityTile(place, f) {
-    const t = tile('humidity', 'Humidity', place, f);
-    if (f.temp == null || f.dpt == null) return t;
-    const rh = humidity(f.temp, f.dpt);
-    t.append(el('div', 'tile-value', `${Math.round(rh)}%`), el('div', 'tile-sub', comfort(f.dpt)),
-        el('div', 'tile-note', `Dew point ${deg(f.dpt)}`));
-    const bar = el('div', 'meter');
-    const fill = el('i');
-    fill.style.width = `${Math.round(rh)}%`;
-    bar.append(fill);
-    t.append(bar);
-    return t;
-}
-
-// UV: only on days whose estimated peak is moderate or more
-function uvTile(place, f) {
-    const hrs = uvHours(place, f);
-    const peak = hrs.reduce((a, h) => (h.uv > (a?.uv ?? -1) ? h : a), null);
-    if (!peak || peak.uv < 3) return null;
-    const t = tile('uv', 'UV index', place, f);
-    const now = uvIndex(f.sun.alt, f.nowRow?.cloud);
-    const guard = hrs.filter(h => h.uv >= 3);
-    t.append(el('div', 'tile-value', String(Math.round(now))), el('div', 'tile-sub', uvCategory(now)),
-        el('div', 'tile-note', guard.length ? `Protection ${hourOf(guard[0].t)}–${hourOf(guard[guard.length - 1].t + 3600000)} · peak ${Math.round(peak.uv)}` : `Peak ${Math.round(peak.uv)}`));
-    const bar = el('div', 'meter meter-uv');
-    const fill = el('i');
-    fill.style.width = `${Math.min(100, now / 11 * 100)}%`;
-    bar.append(fill);
-    t.append(bar);
-    return t;
-}
-
-// The sun's altitude over the whole local day: above the horizon lit and
-// filled, below it dim; the sun where it is now
-function sunCurve(place, big) {
-    const W = 160, H = big ? 90 : 74, BASE = big ? 56 : 46;
+// The sun's altitude over the whole local day: above the horizon lit, below it dim; the sun where it is now
+function sunCurve(place) {
+    const W = 160, H = 90, BASE = 56;
     const day = new Date();
     day.setHours(0, 0, 0, 0);
     const noon = solarNoon(Date.now(), place.lat, place.lon);
@@ -1029,35 +1113,15 @@ function sunCurve(place, big) {
     const pts = [];
     for (let t = day.getTime(); t <= day.getTime() + 86400000; t += 15 * 60000) pts.push([X(t), Y(sunAltitude(t, place.lat, place.lon))]);
     const s = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'sun-arc', 'aria-hidden': 'true' });
-    const id = `sc${Math.random().toString(36).slice(2, 8)}`;
-    const defs = svgEl('defs', {}, s);
-    const clip = svgEl('clipPath', { id: `${id}a` }, defs);
-    svgEl('rect', { x: 0, y: 0, width: W, height: BASE }, clip);
-    const lg = svgEl('linearGradient', { id: `${id}f`, x1: 0, x2: 0, y1: 0, y2: 1 }, defs);
-    svgEl('stop', { offset: 0, 'stop-color': '#ffcf5a', 'stop-opacity': 0.5 }, lg);
-    svgEl('stop', { offset: 1, 'stop-color': '#ffcf5a', 'stop-opacity': 0.02 }, lg);
     const path = monotonePath(pts);
     svgEl('path', { d: path, class: 'sun-night' }, s);
-    const lit = svgEl('g', { 'clip-path': `url(#${id}a)` }, s);
-    svgEl('path', { d: `${path}L${W},${BASE}L0,${BASE}Z`, fill: `url(#${id}f)` }, lit);
-    svgEl('path', { d: path, class: 'sun-day' }, lit);
+    const clip = svgEl('clipPath', { id: 'sunlit' }, svgEl('defs', {}, s));
+    svgEl('rect', { x: 0, y: 0, width: W, height: BASE }, clip);
+    svgEl('path', { d: path, class: 'sun-day', 'clip-path': 'url(#sunlit)' }, s);
     svgEl('line', { x1: 0, x2: W, y1: BASE, y2: BASE, class: 'horizon' }, s);
     const alt = sunAltitude(Date.now(), place.lat, place.lon);
-    const cx = X(Date.now()), cy = Y(alt);
-    if (alt > 0) svgEl('circle', { cx, cy, r: big ? 10 : 8, class: 'sun-halo' }, s);
-    svgEl('circle', { cx, cy, r: big ? 5.5 : 4.5, class: alt > 0 ? 'sun-dot' : 'sun-dot sun-below' }, s);
+    svgEl('circle', { cx: X(Date.now()), cy: Y(alt), r: 5.5, class: alt > 0 ? 'sun-dot' : 'sun-dot sun-below' }, s);
     return s;
-}
-
-function sunTile(place, f) {
-    const t = tile('sun', 'Sun', place, f);
-    const { rise, set } = sunTimes(Date.now(), place.lat, place.lon);
-    if (!rise || !set) return t;
-    const times = el('div', 'sun-times');
-    times.append(el('span', null, `Rise ${timeOf(rise)}`), el('span', null, `Set ${timeOf(set)}`));
-    const mins = Math.round((set - rise) / 60000);
-    t.append(sunCurve(place), times, el('div', 'tile-note', `${Math.floor(mins / 60)}h ${mins % 60}m of daylight`));
-    return t;
 }
 
 function moonDisk(size) {
@@ -1067,41 +1131,6 @@ function moonDisk(size) {
     svgEl('path', { d: moonPath(40, 40, 30, m.phase), class: 'moon-lit' }, s);
     return s;
 }
-
-function moonTile(place, f) {
-    const t = tile('moon', 'Moon', place, f);
-    const now = Date.now();
-    const m = moonPhase(now);
-    const full = nextMoon(now, 0.5);
-    const next = full - now < 86400000 ? nextMoon(now + 2 * 86400000, 0.5) : full;
-    t.append(moonDisk(64), el('div', 'tile-sub', m.name), el('div', 'tile-note',
-        `${Math.round(m.illum * 100)}% lit · full ${new Date(next).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`));
-    return t;
-}
-
-function feelsTile(place, f) {
-    const t = tile('feels', 'Feels like', place, f);
-    if (f.feels == null) return t;
-    const diff = Math.round(f.feels - f.temp);   // °F: the thresholds below are in °F
-    const why = diff <= -2 ? 'The wind makes it feel colder.' : diff >= 2 ? 'Humidity makes it feel warmer.' : 'Close to the actual temperature.';
-    t.append(el('div', 'tile-value', deg(f.feels)), el('div', 'tile-note', why));
-    return t;
-}
-
-function precipTile(place, f) {
-    const t = tile('precip', 'Precipitation', place, f);
-    const sum = (h, k) => f.upcoming.slice(0, h).reduce((a, r) => a + (r[k] || 0), 0);
-    const q24 = sum(24, 'qpf'), q48 = sum(48, 'qpf'), s48 = sum(48, 'snow');
-    t.append(el('div', 'tile-value', rain(q24)), el('div', 'tile-sub', 'next 24 hours'),
-        el('div', 'tile-note', `${rain(q48)} over 48 hours${s48 >= 0.1 ? `, ${rain(s48, true)} snow` : ''}`));
-    return t;
-}
-
-// ============ Detail sheets ============
-
-const detailDialog = document.getElementById('detailDialog');
-detailDialog.querySelector('.detail-done').addEventListener('click', () => detailDialog.close());
-detailDialog.addEventListener('click', e => { if (e.target === detailDialog) detailDialog.close(); });
 
 function rowsList(rows) {
     const dl = el('dl', 'detail-rows');
@@ -1114,7 +1143,7 @@ function rowsList(rows) {
 
 function openDetail(key, place, f) {
     const body = detailDialog.querySelector('.detail-body');
-    const titles = { wind: 'Wind', humidity: 'Humidity', uv: 'UV index', sun: 'Sun', moon: 'Moon', feels: 'Feels like', precip: 'Precipitation' };
+    const titles = { wind: 'Wind', humidity: 'Humidity', uv: 'UV index', sun: 'Sun and moon', feels: 'Feels like', precip: 'Precipitation' };
     detailDialog.querySelector('.detail-title').textContent = titles[key];
     body.replaceChildren();
     detailDialog.showModal();
@@ -1130,7 +1159,12 @@ function openDetail(key, place, f) {
             const y = sunTimes(now - 86400000, place.lat, place.lon);
             const change = len && y.rise && y.set ? Math.round((len - (y.set - y.rise)) / 1000) : null;
             const t = v => (v ? timeOf(v) : '--');
-            return [sunCurve(place, true), rowsList([
+            const m = moonPhase(now);
+            const today = moonTimes(now, place.lat, place.lon), tmr = moonTimes(now + 86400000, place.lat, place.lon);
+            const tm = v => (v ? timeOf(v) : 'none');
+            const date = ms => new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            const u = uvHours(place, f), peak = u.reduce((a, h) => (h.uv > (a?.uv ?? -1) ? h : a), null);
+            return [sunCurve(place), rowsList([
                 ['Astronomical dawn', t(ast.up)], ['Nautical dawn', t(nau.up)], ['Civil dawn', t(civ.up)],
                 ['Sunrise', t(rs.up)], ['Morning golden hour ends', t(gold.up)],
                 ['Solar noon', `${t(noon.t)} · ${Math.round(noon.alt)}° high`],
@@ -1138,18 +1172,11 @@ function openDetail(key, place, f) {
                 ['Nautical dusk', t(nau.down)], ['Astronomical dusk', t(ast.down)],
                 ['Daylight', len ? `${Math.floor(Math.round(len / 60000) / 60)}h ${Math.round(len / 60000) % 60}m` : '--'],
                 ['Change from yesterday', change == null ? null : `${change < 0 ? '−' : '+'}${Math.floor(Math.abs(change) / 60)}m ${Math.abs(change) % 60}s`],
-            ])];
-        },
-        moon: () => {
-            const now = Date.now();
-            const m = moonPhase(now);
-            const today = moonTimes(now, place.lat, place.lon), tmr = moonTimes(now + 86400000, place.lat, place.lon);
-            const t = v => (v ? timeOf(v) : 'none');
-            const date = ms => new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-            return [el('div', 'detail-moon', null), rowsList([
-                ['Phase', m.name], ['Illuminated', `${Math.round(m.illum * 100)}%`], ['Age', `${(m.phase * 29.53).toFixed(1)} days`],
-                ['Moonrise today', t(today.rise)], ['Moonset today', t(today.set)],
-                ['Moonrise tomorrow', t(tmr.rise)], ['Moonset tomorrow', t(tmr.set)],
+                ['UV peak today', peak ? `${Math.round(peak.uv)} around ${hourOf(peak.t)} (estimate)` : null],
+            ]), el('div', 'detail-moon'), rowsList([
+                ['Moon', `${m.name}, ${Math.round(m.illum * 100)}% lit`],
+                ['Moonrise today', tm(today.rise)], ['Moonset today', tm(today.set)],
+                ['Moonrise tomorrow', tm(tmr.rise)], ['Moonset tomorrow', tm(tmr.set)],
                 ...nextPhases(now).map(p => [p.name, date(p.t)]),
             ])];
         },
@@ -1161,21 +1188,13 @@ function openDetail(key, place, f) {
             rowsList([['Now', f.dpt != null ? `${comfort(f.dpt)} · dew point ${deg(f.dpt)}` : null]])],
         feels: () => [seriesChart(hrs, [{ get: r => T(r.tmp), cls: 'line-alt', label: 'Air' },
             { get: r => T(feelsLike(r.tmp, r.dpt, r.wind)), cls: 'line-main', label: 'Feels like' }], { fmt: v => `${Math.round(v)}°` })],
-        precip: () => {
-            const daily = f.raw.daily?.length ? nbmDays(f.raw.daily) : [];
-            return [seriesChart(hrs, [], { fmt: v => rain(v), bars: { get: r => r.qpf, snow: r => r.snowy }, zero: true, label: 'Per hour' }),
-                rowsList(daily.slice(0, 10).map(d => [weekday(d.t), `${d.pop != null ? `${d.pop}% chance · ` : ''}${d.snow >= 0.1 ? `${rain(d.snow, true)} snow` : rain(d.qpf)}`]))];
-        },
-        uv: () => {
-            const u = uvHours(place, f);
-            return [seriesChart(u.map(h => ({ t: h.t, uv: h.uv })), [{ get: r => r.uv, cls: 'line-uv', label: 'UV index' }], { fmt: v => v.toFixed(0), zero: true }),
-                rowsList([['Estimate', 'From the sun\'s elevation and forecast cloud cover; no model here forecasts UV, so ozone and haze are not included.']])];
-        },
+        precip: () => [seriesChart(hrs, [], { fmt: v => rain(v), bars: { get: r => r.qpf, snow: r => r.snowy }, zero: true, label: 'Per hour' }),
+            rowsList(f.days.slice(0, 11).map(d => [weekday(d.t), `${d.pop != null ? `${d.pop}% chance · ` : ''}${d.snow >= 0.1 ? `${rain(d.snow, true)} snow` : rain(d.qpf)}`]))],
     }[key];
     // Charts size to the sheet, so build once it is laid out
     requestAnimationFrame(() => {
         body.replaceChildren(...content());
-        if (key === 'moon') body.querySelector('.detail-moon').append(moonDisk(120));
+        body.querySelector('.detail-moon')?.append(moonDisk(96));
     });
 }
 
@@ -1215,11 +1234,11 @@ function seriesChart(rows, lines, opts) {
         const pts = rows.map(r => [X(r.t), l.get(r)]).filter(p => p[1] != null && !Number.isNaN(p[1])).map(([x, v]) => [x, Y(v)]);
         if (pts.length > 1) svgEl('path', { d: monotonePath(pts), class: `series-line ${l.cls}` }, s);
     }
-    const cursor = svgEl('line', { y1: T, y2: H - B, class: 'plume-cursor' }, s);
+    const cursorLine = svgEl('line', { y1: T, y2: H - B, class: 'plume-cursor' }, s);
     const at = i => {
         const r = rows[i];
-        cursor.setAttribute('x1', X(r.t));
-        cursor.setAttribute('x2', X(r.t));
+        cursorLine.setAttribute('x1', X(r.t));
+        cursorLine.setAttribute('x2', X(r.t));
         readout.replaceChildren(el('b', null, `${weekday(r.t)} ${hourOf(r.t)}`),
             ...lines.map(l => el('span', l.cls, `${l.label} ${opts.fmt(l.get(r))}`)),
             ...(opts.bars ? [el('span', 'det', `${opts.label} ${opts.fmt(opts.bars.get(r) || 0)}`)] : []));
@@ -1238,91 +1257,6 @@ function seriesChart(rows, lines, opts) {
     return wrap;
 }
 
-function actions(place, f) {
-    const sec = el('section', 'actions');
-    const link = (text, href) => {
-        const a = el('a', 'glass action', text);
-        a.href = href;
-        return a;
-    };
-    sec.append(link('Radar', radarLink(place, 'radar')));
-    const ed = el('button', 'glass action', 'Edit layout');
-    ed.type = 'button';
-    ed.addEventListener('click', () => setEditing(true));
-    sec.append(ed);
-    const st = f.raw.station;
-    if (st) sec.append(link(`Ensemble plumes (${st.id})`, `/?station=${encodeURIComponent(st.id)}`));
-    if (!place.here) {
-        const rn = el('button', 'glass action action-quiet', 'Rename');
-        rn.addEventListener('click', () => {
-            const name = prompt('Name this place', place.name)?.trim();
-            if (!name) return;
-            place.name = name.slice(0, 60);
-            savePlaces();
-            route();
-        });
-        const rm = el('button', 'glass action action-quiet', 'Remove');
-        rm.addEventListener('click', () => {
-            places = places.filter(p => p.id !== place.id);
-            savePlaces();
-            navigate('');
-        });
-        sec.append(rn, rm);
-    }
-    return sec;
-}
-
-function sources(f) {
-    const src = [];
-    if (f.obs) src.push(`Observed ${timeOf(f.obs.time * 1000)} (NOAA RTMA, 2.5 km)`);
-    if (f.raw.hourly) src.push(`Forecast RRFS ${f.raw.hourly.run.slice(8)}Z (3 km)`);
-    return el('footer', 'sources', src.join('  ·  '));
-}
-
-// ============ Edit mode: drag to reorder ============
-// Items of a container reorder by dragging while the page is in edit mode;
-// onEnd gets the new order of the items' keys (data-place/-section/-tile)
-function sortable(container, itemSel, onEnd) {
-    if (!container) return;
-    container.addEventListener('pointerdown', e => {
-        if (!document.body.classList.contains('editing')) return;
-        const item = e.target.closest(itemSel);
-        if (!item || item.parentElement !== container) return;
-        e.preventDefault();
-        e.stopPropagation();   // a tile inside the tiles section: the inner list takes the drag
-        item.classList.add('lifted');
-        const move = ev => {
-            const over = document.elementsFromPoint(ev.clientX, ev.clientY)
-                .map(n => n.closest?.(itemSel)).find(n => n && n !== item && n.parentElement === container);
-            if (!over) return;
-            const r = over.getBoundingClientRect();
-            const sameRow = ev.clientY > r.top && ev.clientY < r.bottom && r.width < container.clientWidth * 0.9;
-            const after = sameRow ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
-            after ? over.after(item) : over.before(item);
-        };
-        // Listen on window for the drag: moving the item in the DOM would drop a pointer capture
-        const end = () => {
-            item.classList.remove('lifted');
-            window.removeEventListener('pointermove', move);
-            window.removeEventListener('pointerup', end);
-            window.removeEventListener('pointercancel', end);
-            const keys = [...container.children].filter(n => n.matches(itemSel))
-                .map(n => n.dataset.place ?? n.dataset.section ?? n.dataset.tile);
-            onEnd(keys);
-        };
-        window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', end);
-        window.addEventListener('pointercancel', end);
-    });
-}
-
-const editDone = document.getElementById('editDone');
-function setEditing(on) {
-    document.body.classList.toggle('editing', on);
-    editDone.hidden = !on;
-}
-editDone.addEventListener('click', () => { setEditing(false); route(true); });
-
 // ============ Location and search ============
 
 function locate(prompted) {
@@ -1338,9 +1272,10 @@ function locate(prompted) {
         here = { lat, lon, name };
         store.set(HERE_KEY, JSON.stringify(here));
         store.set(GPS_KEY, '1');
-        if (moved) forecasts.delete('here');
+        if (moved) { forecasts.delete('here'); histories.delete('here'); }
         if (prompted && dialog.open) dialog.close();
-        if (moved || prompted) route();
+        if (prompted) navigate('#p=here');
+        else if (moved) route(true);
     }, err => {
         if (prompted) alert(err.code === 1 ? 'Location permission was denied.' : 'Could not get your location.');
     }, { maximumAge: 10 * 60000, timeout: 15000 });
@@ -1402,12 +1337,12 @@ function openSearch() {
 
 document.getElementById('searchBtn').addEventListener('click', openSearch);
 
-// ============ Settings ============
+// ============ Settings: units and places ============
 const settingsDialog = document.getElementById('settingsDialog');
 const SETTING_LABELS = { temp: 'Temperature', wind: 'Wind', precip: 'Precipitation', clock: 'Time' };
 function renderSettings() {
     const body = settingsDialog.querySelector('.settings-body');
-    body.replaceChildren(...Object.entries(U.UNIT_CHOICES).map(([k, opts]) => {
+    const unitRows = Object.entries(U.UNIT_CHOICES).map(([k, opts]) => {
         const row = el('div', 'setting');
         const seg = el('div', 'seg');
         seg.setAttribute('role', 'group');
@@ -1426,7 +1361,35 @@ function renderSettings() {
         }
         row.append(el('span', 'setting-label', SETTING_LABELS[k]), seg);
         return row;
-    }));
+    });
+    // Places: order, rename, remove; the device location is a switch
+    const list = el('ol', 'setting-places');
+    places.forEach((p, i) => {
+        const li = el('li', 'setting-place');
+        const btn = (text, label, fn, disabled) => {
+            const b = el('button', 'seg-btn', text);
+            b.type = 'button';
+            b.setAttribute('aria-label', `${label} ${p.name}`);
+            b.disabled = !!disabled;
+            b.addEventListener('click', () => { fn(); savePlaces(); renderSettings(); route(true); });
+            return b;
+        };
+        const move = d => { const [x] = places.splice(i, 1); places.splice(i + d, 0, x); };
+        li.append(el('span', 'setting-place-name', p.name),
+            btn('↑', 'Move up', () => move(-1), i === 0), btn('↓', 'Move down', () => move(1), i === places.length - 1),
+            btn('Rename', 'Rename', () => { const n = prompt('Name this place', p.name)?.trim(); if (n) p.name = n.slice(0, 60); }),
+            btn('Remove', 'Remove', () => { places = places.filter(x => x.id !== p.id); }));
+        list.append(li);
+    });
+    const gps = el('div', 'setting');
+    const gb = el('button', 'seg-btn', store.get(GPS_KEY) === '1' ? 'On' : 'Off');
+    gb.type = 'button';
+    gb.setAttribute('aria-pressed', String(store.get(GPS_KEY) === '1'));
+    gb.addEventListener('click', () => {
+        if (store.get(GPS_KEY) === '1') { store.set(GPS_KEY, '0'); renderSettings(); route(true); } else { settingsDialog.close(); locate(true); }
+    });
+    gps.append(el('span', 'setting-label', 'My location'), gb);
+    body.replaceChildren(...unitRows, el('h3', 'setting-h', 'Places'), gps, list);
 }
 document.getElementById('settingsBtn').addEventListener('click', () => { renderSettings(); settingsDialog.showModal(); });
 settingsDialog.querySelector('.settings-done').addEventListener('click', () => settingsDialog.close());
@@ -1442,12 +1405,26 @@ dialog.querySelector('form').addEventListener('submit', e => {
 
 // ============ Routing ============
 
+function renderEmpty() {
+    renderSeq++;
+    renderChips(null);
+    const box = el('section', 'sg-empty');
+    const b = el('button', 'sg-btn', 'Find a place');
+    b.type = 'button';
+    b.addEventListener('click', openSearch);
+    box.append(el('p', null, 'No places yet.'), b);
+    view.replaceChildren(box);
+}
+
 // keepScroll: a redraw of the same page (settings, refresh) stays where the user was
 function route(keepScroll = false) {
     document.body.classList.remove('no-scroll');   // a full-screen radar left by back or refresh
     const y = scrollY;
     const m = location.hash.match(/^#p=(.+)$/);
-    const done = m ? renderPlace(decodeURIComponent(m[1])) : renderHome();
+    const ps = allPlaces();
+    const place = (m && ps.find(p => p.id === decodeURIComponent(m[1]))) || ps[0];
+    if (m && place && place.id !== decodeURIComponent(m[1])) history.replaceState(null, '', location.pathname);
+    const done = place ? renderPlace(place) : renderEmpty();
     // once the redraw is in: a place page waits on its forecast before its sections exist
     const seq = renderSeq;
     if (keepScroll) Promise.resolve(done).then(() => { if (seq === renderSeq) requestAnimationFrame(() => window.scrollTo(0, y)); });
@@ -1458,9 +1435,8 @@ function route(keepScroll = false) {
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
-    if (Date.now() - hiddenAt > 10 * 60000) { forecasts.clear(); refsCache.clear(); route(true); }
+    if (Date.now() - hiddenAt > 10 * 60000) { forecasts.clear(); histories.clear(); refsCache.clear(); route(true); }
 });
-
 applySiteSettings();
 route();
 if (store.get(GPS_KEY) === '1') locate(false);
