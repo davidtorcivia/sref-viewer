@@ -720,8 +720,13 @@ const tileInFlight = new Map();     // key -> Promise
 // map zoom 8.2 and, because 512px tiles are declared as 256, requests source
 // zoom round(map zoom + 1) = 9; 8 covers zooming out one step.
 // ponytail: fixed box; derive from visitors' viewports if that matters.
-const TILE_WARM_ZOOMS = [8, 9];
-const TILE_WARM_BBOX = { west: -75.5, east: -72.5, south: 39.8, north: 41.8 };
+// Zoom 7 covers the wider view the overview's embedded mini radar opens on;
+// 8 and 9 the radar page's default NYC view
+const TILE_WARM = [
+    { z: 7, bbox: { west: -78.5, east: -69.5, south: 38.3, north: 43.2 } },
+    { z: 8, bbox: { west: -75.5, east: -72.5, south: 39.8, north: 41.8 } },
+    { z: 9, bbox: { west: -75.5, east: -72.5, south: 39.8, north: 41.8 } },
+];
 
 const tileKey = (time, z, x, y, fc) => `${time}/${z}/${x}/${y}/${fc || ''}`;
 const freshTile = key => {
@@ -831,9 +836,9 @@ async function warmRadarTilesOnce() {
     // restarts all get re-warmed; in-flight dedup keeps overlapping passes cheap
     const jobs = [];
     for (const f of frames) {
-        for (const z of TILE_WARM_ZOOMS) {
-            for (let x = lonToX(TILE_WARM_BBOX.west, z); x <= lonToX(TILE_WARM_BBOX.east, z); x++) {
-                for (let y = latToY(TILE_WARM_BBOX.north, z); y <= latToY(TILE_WARM_BBOX.south, z); y++) {
+        for (const { z, bbox } of TILE_WARM) {
+            for (let x = lonToX(bbox.west, z); x <= lonToX(bbox.east, z); x++) {
+                for (let y = latToY(bbox.north, z); y <= latToY(bbox.south, z); y++) {
                     if (!freshTile(tileKey(f.time, z, x, y, f.fc))) jobs.push(() => getTile(f.time, z, x, y, f.fc));
                 }
             }
