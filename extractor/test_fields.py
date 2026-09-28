@@ -195,6 +195,8 @@ assert d['qpf'] == 0.4 and d['snow'] == 0 and d['ptype'] == 'rain', d
 assert (d['wind'], d['gust'], d['cloud']) == (round(4 * 2.23694), round(8 * 2.23694), 36), d
 # 30 cm of snow (12z-18z on the 29th) outweighs 4 x 2.54 mm of rain as liquid
 assert by['2026-09-29']['snow'] == 11.8 and by['2026-09-29']['ptype'] == 'snow', by['2026-09-29']
+# A 00z run's last day ends at 8pm, before its 2am-2am total: no partial total
+assert by['2026-10-08']['qpf'] is None and by['2026-10-08']['ptype'] is None and by['2026-10-08']['hi'] is not None
 # The last day with a hi ends the list (f264 = 8pm Oct 8)
 assert by['2026-10-08']['hi'] == round(X.K_TO_F(322))
 # A 12z run has no TMIN for its own morning: today is listed with lo None; the last TMAX is f252

@@ -1435,6 +1435,10 @@ def daily_rows(start, hours, v):
                      'cloud': pick('TCDC', lambda a: sum(a) / len(a)), 'ptype': ptype})
     first = next((i for i, r in enumerate(rows) if r['hi'] is not None or r['lo'] is not None), len(rows))
     last = max((i for i, r in enumerate(rows) if r['hi'] is not None), default=-1)
+    # The last day can end before its 2am-2am total does (a 00z run's final
+    # hour is 8pm): a partial total would read as the whole day's, so drop it
+    if last >= 0 and len(days[rows[last]['date']].get('APCP', [])) < 4:
+        rows[last].update(qpf=None, snow=None, ptype=None)
     return rows[first:last + 1]
 
 
