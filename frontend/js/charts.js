@@ -16,8 +16,8 @@ function getResponsiveOptions() {
     return {
         tickFontSize: mobile ? 10 : 11,
         stepSize: mobile ? 12 : 6,
-        meanLineWidth: mobile ? 5 : 4,
-        memberLineWidth: mobile ? 1.8 : 1.4,
+        meanLineWidth: 4,
+        memberLineWidth: mobile ? 1.3 : 1.1,
     };
 }
 
@@ -34,11 +34,14 @@ function getThemeColors() {
         gridColor: token('--chart-grid'),
         tickColor: token('--chart-tick'),
         meanLineColor: token('--chart-mean'),
+        memberColor: token('--chart-member'),
+        bandOuter: token('--chart-band-outer'),
+        bandInner: token('--chart-band-inner'),
         surface: token('--surface'),
         crosshair: token('--chart-crosshair'),
         nowLineColor: token('--chart-now'),
-        nowLabelBg: token('--surface'),
-        nowLabelText: token('--text-dim'),
+        nowLabelBg: token('--chart-mean'),
+        nowLabelText: token('--surface'),
     };
 }
 
@@ -86,8 +89,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 label: overlay.label,
                 data: chartPoints,
                 borderColor: overlay.color,
-                borderWidth: 2,
-                borderDash: [6, 4],
+                borderWidth: 1.5,
                 pointRadius: 0,
                 pointHitRadius: 20,
                 pointHoverRadius: 0,
@@ -114,11 +116,12 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             : points;
 
         const bandGroups = [];
-        if (hasARW) bandGroups.push({ name: 'ARW', core: 'ARW', filter: 'ARW', color: '255, 100, 100' });
-        if (hasNMB) bandGroups.push({ name: 'NMB', core: 'NMB', filter: 'NMB', color: '100, 150, 255' });
+        // Both SREF cores in the same ink: where they agree the bands stack darker
+        if (hasARW) bandGroups.push({ name: 'ARW', core: 'ARW', filter: 'ARW' });
+        if (hasNMB) bandGroups.push({ name: 'NMB', core: 'NMB', filter: 'NMB' });
         if (!hasARW && !hasNMB) {
             // Single-family ensemble (REFS): one band set over all members
-            bandGroups.push({ name: 'ENS', core: 'Mean', filter: null, color: '100, 150, 255' });
+            bandGroups.push({ name: 'ENS', core: 'Mean', filter: null });
         }
 
         for (const group of bandGroups) {
@@ -128,8 +131,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             // Outer band: P90 filling down to a hidden P10 boundary
             // Inner band: P75 filling down to a hidden P25 boundary (darker)
             const layers = [
-                { lo: bands.p10, hi: bands.p90, loName: 'P10', hiName: 'P90', order: 4, edge: 0.4, fill: 0.12 },
-                { lo: bands.p25, hi: bands.p75, loName: 'P25', hiName: 'P75', order: 3, edge: 0.6, fill: 0.22 },
+                { lo: bands.p10, hi: bands.p90, loName: 'P10', hiName: 'P90', order: 4, fill: theme.bandOuter },
+                { lo: bands.p25, hi: bands.p75, loName: 'P25', hiName: 'P75', order: 3, fill: theme.bandInner },
             ];
             for (const layer of layers) {
                 datasets.push({
@@ -149,16 +152,16 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 datasets.push({
                     label: `${group.name} ${layer.hiName}`,
                     data: convertPoints(layer.hi),
-                    borderColor: `rgba(${group.color}, ${layer.edge})`,
-                    borderWidth: 1,
+                    borderColor: 'transparent',
+                    borderWidth: 0,
                     pointRadius: 0,
                     pointHitRadius: 0,
                     pointHoverRadius: 0,
                     tension: 0.3,
                     fill: {
                         target: datasets.length - 1,
-                        above: `rgba(${group.color}, ${layer.fill})`,
-                        below: `rgba(${group.color}, ${layer.fill})`
+                        above: layer.fill,
+                        below: layer.fill
                     },
                     order: layer.order,
                     _band: true,
@@ -207,11 +210,15 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 ? points.map(p => ({ x: p.x, y: convertWind(p.y) }))
                 : points;
 
+            // Ink throughout: mean heavy, RRFS (deterministic) dashed,
+            // members faint (NMB dashed so the two SREF cores stay apart)
+            const isRRFS = label === 'RRFS';
             datasets.push({
                 label,
                 data: chartPoints,
-                borderColor: isMean ? theme.meanLineColor : (CONFIG.memberColors[label] || '#666'),
-                borderWidth: isMean ? responsive.meanLineWidth : responsive.memberLineWidth,
+                borderColor: isMean || isRRFS ? theme.meanLineColor : theme.memberColor,
+                borderWidth: isMean ? responsive.meanLineWidth : isRRFS ? 1.75 : responsive.memberLineWidth,
+                borderDash: isRRFS ? [6, 4] : core === 'NMB' ? [4, 3] : [],
                 pointRadius: 0,
                 pointHitRadius: 20,
                 pointHoverRadius: 0,
@@ -265,12 +272,11 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                                 content: 'NOW',
                                 position: 'start',
                                 backgroundColor: theme.nowLabelBg,
-                                borderColor: theme.gridColor,
-                                borderWidth: 1,
-                                borderRadius: 6,
+                                borderWidth: 0,
+                                borderRadius: 4,
                                 padding: { x: 6, y: 3 },
                                 color: theme.nowLabelText,
-                                font: { size: 9, weight: '700' }
+                                font: { size: 10, weight: '700' }
                             }
                         }
                     }
@@ -287,7 +293,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                         stepSize: responsive.stepSize,
                         displayFormats: { hour: 'EEE ha' }
                     },
-                    grid: { color: theme.gridColor, drawTicks: false },
+                    grid: { display: false },
                     border: { display: false },
                     ticks: {
                         color: theme.tickColor,
@@ -475,7 +481,7 @@ const crosshairPlugin = {
             ctx.stroke();
         };
         for (const o of v.overlays) ring(o.p, o.color);
-        if (v.rrfs) ring(v.rrfs, CONFIG.memberColors.RRFS);
+        if (v.rrfs) ring(v.rrfs, t.meanLineColor);
         if (v.mean) ring(v.mean, t.meanLineColor);
         ctx.restore();
     }
@@ -523,7 +529,7 @@ export function exportChartPng(param, subtitle, filename) {
     const color = name => css.getPropertyValue(name).trim();
     // The canvas is in device pixels: scale the title block to match
     const dpr = window.devicePixelRatio || 1;
-    const font = (weight, px) => `${weight} ${px * dpr}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    const font = (weight, px) => `${weight} ${px * dpr}px Anybody, system-ui, sans-serif`;
 
     const src = chart.canvas;
     const top = 60 * dpr, bottom = 30 * dpr;

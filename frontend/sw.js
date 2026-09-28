@@ -11,9 +11,9 @@ const API_MAX_AGE_MS = 24 * 60 * 60 * 1000; // Don't serve API data older than 2
 const PRECACHE_URLS = [
     '/',
     '/index.html',
+    '/plumes',
     '/radar',
     '/radar.html',
-    '/overview',
     '/overview.html',
     '/css/styles.css?v=__V__',
     '/css/radar.css?v=__V__',
@@ -151,7 +151,9 @@ async function networkFirstPage(request) {
     } catch (error) {
         let cachedResponse = await cache.match(request);
         if (!cachedResponse && request.mode === 'navigate') {
-            cachedResponse = await cache.match('/index.html');
+            // the page's own shell: plumes and radar have theirs, everything else is the overview
+            const path = new URL(request.url).pathname;
+            cachedResponse = await cache.match(path.startsWith('/plumes') ? '/index.html' : path.startsWith('/radar') ? '/radar.html' : '/overview.html');
         }
         if (cachedResponse) return cachedResponse;
         return new Response('Offline', { status: 503 });

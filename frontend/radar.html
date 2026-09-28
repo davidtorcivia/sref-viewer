@@ -18,16 +18,16 @@
     <link rel="stylesheet" href="/css/radar.css?v=__V__">
 
     <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" id="themeColor" content="#07090f">
+    <meta name="theme-color" id="themeColor" content="#151413">
 
-    <!-- Theme before first paint: saved choice, else the system's -->
+    <!-- Theme before first paint: an embed's ?theme= (the overview's), else the saved choice, else the system's -->
     <script>
         try {
-            // Embedded in the overview: always dark, under its sky
-            document.documentElement.dataset.theme = /[?&]embed/.test(location.search) ? 'dark'
+            const q = new URLSearchParams(location.search).get('theme');
+            document.documentElement.dataset.theme = q === 'light' || q === 'dark' ? q
                 : localStorage.getItem('sref-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
         } catch { document.documentElement.dataset.theme = 'dark'; }
-        if (document.documentElement.dataset.theme === 'light') document.getElementById('themeColor').content = '#f2f4f8';
+        if (document.documentElement.dataset.theme === 'light') document.getElementById('themeColor').content = '#f3f0e8';
     </script>
     <script>
         if ('serviceWorker' in navigator) {
@@ -42,7 +42,8 @@
     <div id="map"></div>
 
     <header class="radar-header">
-        <a href="/" class="nav-link back-link"><span class="caret" data-dir="left"></span>Plumes</a>
+        <a href="/" class="nav-link back-link"><span class="caret" data-dir="left"></span>Weather</a>
+        <a href="/plumes" class="nav-link plumes-link">Plumes</a>
         <div class="radar-title">Radar</div>
         <div class="radar-updated" id="radarUpdated"></div>
         <button id="themeBtn" class="nav-link theme-btn" aria-label="Switch theme"></button>
@@ -92,7 +93,7 @@
 
     <div class="radar-controls">
         <button id="playBtn" class="play-btn" title="Play/pause animation" aria-label="Play animation"></button>
-        <button id="speedBtn" class="speed-btn" title="Animation speed" aria-label="Animation speed">1&times;</button>
+        <button id="speedBtn" class="speed-btn" title="Animation speed" aria-label="Animation speed">1x</button>
         <button id="rangeBtn" class="speed-btn range-btn" aria-label="Time range">Now</button>
         <div class="scrubber-wrap">
             <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="Radar frame time">

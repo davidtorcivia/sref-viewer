@@ -124,16 +124,12 @@ const assert = require('node:assert/strict');
     assert.equal(u.precip(0.254, u.DEFAULT_UNITS), '0.25"');
     assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), C), '15:05');
     assert.equal(u.clock(Date.parse('2026-09-28T19:05:00Z'), u.DEFAULT_UNITS, false), '3PM');
-    // Signal layout: ramp, certainty weight, quantiles, the spiral
+    // Signal layout: ramp, quantiles, the spiral
     const sg = await import('./js/signal.js');
     assert.match(sg.rampColor(63), /^oklch\(/);
     assert.equal(sg.rampColor(-100), sg.rampColor(-10));
     assert.equal(sg.rampColor(200), sg.rampColor(110));
     assert.equal(sg.rampColor(NaN), sg.rampColor(-10));
-    assert.equal(sg.certaintyWeight(1), 850);
-    assert.equal(sg.certaintyWeight(2.8), 690);
-    assert.equal(sg.certaintyWeight(20), 300);
-    assert.equal(sg.certaintyWeight(null), 820);
     const qrow = { y: 60, p10: 56, p25: 58, p75: 62, p90: 64 };
     assert.equal(sg.quantile(qrow, 0.1), 56);
     assert.equal(sg.quantile(qrow, 0.5), 60);
@@ -161,14 +157,9 @@ const assert = require('node:assert/strict');
         assert.ok(Math.abs(sp.table.nextRain - 0.02) < 1e-9);
         assert.equal(sp.table.nextHigh, 67);                     // the hour starting 24 h out still counts
         assert.equal(sp.table.nextLowAt, h0);
-        // possible paths stay inside the p10..p90 range and repeat for a seed
-        const rows = [0, 1, 2, 3].map(i => ({ x: i * 3 * H, y: 60 + i, p10: 56 + i, p25: 58 + i, p75: 62 + i, p90: 64 + i }));
-        const ps = sg.samplePaths(rows, 30, 7);
-        assert.equal(ps.length, 30);
-        assert.ok(ps.every(path => path.every((p, i) => p.v >= rows[i].p10 - 1e-9 && p.v <= rows[i].p90 + 1e-9)));
-        assert.deepEqual(sg.samplePaths(rows, 3, 7), sg.samplePaths(rows, 3, 7));
-        assert.notDeepEqual(sg.samplePaths(rows, 3, 7), sg.samplePaths(rows, 3, 8));
         assert.equal(sp.wind.length, 12);
+        assert.equal(sp.caps.length, 2);
+        assert.equal(sp.caps[0].x, '260.0');                     // both ends sit at the top
         // the current hour's report not in yet: the lap still reaches now, no gap
         const gap = past.map((h, i) => (i === past.length - 1 ? { ...h, tmp: null } : h));
         const sp2 = sg.spiral({ past: gap, future, now, nowTemp: 63 });

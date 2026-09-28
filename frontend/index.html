@@ -17,15 +17,23 @@
     <script defer src="/vendor/chartjs-plugin-annotation.min.js"></script>
 
     <!-- Styles -->
-    <link rel="stylesheet" href="css/styles.css?v=__V__">
+    <link rel="preload" href="/fonts/anybody-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/css/styles.css?v=__V__">
 
     <!-- PWA Manifest -->
     <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" content="#07090f" media="(prefers-color-scheme: dark)">
-    <meta name="theme-color" content="#f2f4f8" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" id="themeColor" content="#f3f0e8">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
+    <!-- Theme before first paint: saved choice, else the system's -->
+    <script>
+        try {
+            document.documentElement.dataset.theme = localStorage.getItem('sref-theme')
+                || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        } catch { document.documentElement.dataset.theme = 'light'; }
+        if (document.documentElement.dataset.theme === 'dark') document.getElementById('themeColor').content = '#151413';
+    </script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js?v=__V__').catch(() => { }));
@@ -38,7 +46,9 @@
         <div class="header-top">
             <h1 class="title" id="pageTitle">NYC SREF Ensemble Plumes</h1>
             <nav class="header-nav">
+                <a href="/" class="nav-link nav-home" title="Weather overview"><span class="nav-text">Weather</span></a>
                 <a href="/radar" class="nav-link" title="Live radar map" aria-label="Radar"><span class="nav-text">Radar</span></a>
+                <button class="btn btn-ghost theme-btn" id="themeBtn" title="Switch light / dark" aria-label="Switch to dark theme"></button>
                 <button class="btn btn-ghost help-btn" id="helpBtn" title="What is this?" aria-label="Help">?</button>
             </nav>
         </div>
@@ -103,10 +113,11 @@
 
             <h3>Reading the charts</h3>
             <ul>
-                <li><strong>Lines</strong> are individual members. SREF has two cores: <strong>ARW</strong>
-                    (red) and <strong>NMB</strong> (blue); when both agree, confidence is higher.</li>
-                <li><strong>Bands</strong> show the middle 50% (dark) and 80% (light) of outcomes.</li>
-                <li>The thick line is the <strong>ensemble mean</strong>, usually the best single guess.</li>
+                <li><strong>Thin lines</strong> are individual members. SREF has two cores: <strong>ARW</strong>
+                    (solid) and <strong>NMB</strong> (dashed); when both agree, confidence is higher.</li>
+                <li><strong>Bands</strong> show the middle 50% (darker) and 80% (lighter) of outcomes.</li>
+                <li>The heavy line is the <strong>ensemble mean</strong>, usually the best single guess. In REFS
+                    the dashed line is the deterministic <strong>RRFS</strong> run.</li>
                 <li><strong>Compare</strong> overlays the means of the three previous runs, so you can see
                     whether the forecast is trending up or down.</li>
             </ul>
@@ -121,7 +132,7 @@
         </div>
     </dialog>
 
-    <script type="module" src="js/app.js?v=__V__"></script>
+    <script type="module" src="/js/app.js?v=__V__"></script>
 </body>
 
 </html>

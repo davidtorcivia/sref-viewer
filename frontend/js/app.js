@@ -37,11 +37,10 @@ const state = {
 const COMPARE_CYCLES = 3;
 const isRunVisible = run => state.visibleRuns[run] ?? !isMobile();
 
-// Comparison overlay colors by cycle slot (SREF and REFS cycle times)
-const RUN_COLORS = {
-    '03': '#ff9f43', '09': '#10ac84', '15': '#ee5a24', '21': '#8854d0',
-    '00': '#ff9f43', '06': '#10ac84', '12': '#ee5a24', '18': '#8854d0',
-};
+// Comparison overlays in ink, fading with age: --run-1 is the most recent
+// previous cycle. Canvas needs the resolved color, the DOM takes the var().
+const runToken = i => `--run-${i + 1}`;
+const runColor = i => getComputedStyle(document.documentElement).getPropertyValue(runToken(i)).trim() || '#888';
 
 const $ = id => document.getElementById(id);
 const elements = {};
@@ -118,8 +117,14 @@ function init() {
             rebuildCharts();
         }, 250);
     });
-    // Chart colors are baked in at creation: redraw on theme switch
-    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', rebuildCharts);
+    // Chart colors are baked in at creation: redraw on theme switch. The
+    // system setting only applies while no choice is saved.
+    $('themeBtn').addEventListener('click', () =>
+        setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true));
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+        if (!store.get('sref-theme')) setTheme(e.matches ? 'dark' : 'light');
+    });
+    setTheme(document.documentElement.dataset.theme);
 
     // Settings only affect chrome: don't hold the first data fetch for them
     applySiteSettings().then(s => {
@@ -132,6 +137,15 @@ function init() {
     });
 
     loadAllCharts();
+}
+
+function setTheme(theme, save = false) {
+    const changed = document.documentElement.dataset.theme !== theme;
+    document.documentElement.dataset.theme = theme;
+    if (save) store.set('sref-theme', theme);
+    $('themeColor').content = theme === 'dark' ? '#151413' : '#f3f0e8';
+    $('themeBtn').setAttribute('aria-label', `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`);
+    if (changed) rebuildCharts();
 }
 
 function renderStationButtons(stations) {
@@ -278,11 +292,11 @@ function buildLayout() {
 
     const sections = [];
     if (state.hasSnow) {
-        sections.push({ id: 'snow-section', title: 'SNOWFALL', featured: true, params: ['Total-SNO', '3hrly-SNO'], viewType: 'snow' });
+        sections.push({ id: 'snow-section', title: 'Snowfall', featured: true, params: ['Total-SNO', '3hrly-SNO'], viewType: 'snow' });
     }
-    sections.push({ id: 'temp-section', title: 'TEMPERATURE', params: ['3hrly-TMP'] });
-    sections.push({ id: 'precip-section', title: 'PRECIPITATION', params: ['Total-QPF', '3hrly-QPF'], viewType: 'precip' });
-    sections.push({ id: 'wind-section', title: 'WIND', params: ['3h-10mWND'] });
+    sections.push({ id: 'temp-section', title: 'Temperature', params: ['3hrly-TMP'] });
+    sections.push({ id: 'precip-section', title: 'Precipitation', params: ['Total-QPF', '3hrly-QPF'], viewType: 'precip' });
+    sections.push({ id: 'wind-section', title: 'Wind', params: ['3h-10mWND'] });
 
     const model = MODELS[state.model];
     // REFS stats come from the mean +/- spread band, not member extremes
@@ -320,7 +334,7 @@ function buildLayout() {
                                 </div>
                                 <div class="chart-actions">
                                     ${model.cores.map(core => `
-                                        <button class="active tooltip-trigger" aria-pressed="true" data-core="${core.key}" data-param="${param}" data-tooltip="${core.tooltip}">${core.label || core.key}</button>
+                                        <button class="active tooltip-trigger" aria-pressed="true" data-core="${core.key}" data-param="${param}" data-tooltip="${core.tooltip.replace('red lines', 'solid lines').replace('blue lines', 'dashed lines')}">${core.label || core.key}</button>
                                     `).join('')}
                                 </div>
                             </div>
@@ -550,10 +564,10 @@ function comparisonCycles() {
 
 function getOverlayData(param) {
     const overlays = [];
-    for (const { run } of comparisonCycles()) {
+    for (const [i, { run }] of comparisonCycles().entries()) {
         const mean = state.previousRuns[run]?.[param]?.['Mean'];
         if (isRunVisible(run) && mean) {
-            overlays.push({ label: `${run}Z Mean`, data: mean, color: RUN_COLORS[run] || '#888' });
+            overlays.push({ label: `${run}Z Mean`, data: mean, color: runColor(i) });
         }
     }
     return overlays;
@@ -573,8 +587,8 @@ function renderComparisonControls() {
     ];
     controls.innerHTML = `
         <span class="comp-label">Compare</span>
-        ${comparisonCycles().map(({ run, date }) => `
-            <label class="run-toggle" style="color: ${RUN_COLORS[run]}" title="${date} ${run}Z run">
+        ${comparisonCycles().map(({ run, date }, i) => `
+            <label class="run-toggle" style="--dot: var(${runToken(i)})" title="${date} ${run}Z run">
                 <input type="checkbox" value="${run}" ${isRunVisible(run) ? 'checked' : ''}>
                 ${run}Z
             </label>
@@ -696,10 +710,12 @@ function updateTrendText() {
 
 // ============ Precip Type (REFS) ============
 const PTYPE_DEFS = [
-    { key: 'snow', label: 'Snow', color: '#a5d8ff' },
-    { key: 'rain', label: 'Rain', color: '#51cf66' },
-    { key: 'zr', label: 'Frz rain', color: '#ff8787' },
-    { key: 'ip', label: 'Sleet', color: '#da77f2' },
+    // Rain in ink like the overview; frozen types from the cold end of the
+    // temperature ramp (signal.js) so they read as colder than rain
+    { key: 'snow', label: 'Snow', color: 'oklch(0.55 0.10 262)' },
+    { key: 'rain', label: 'Rain', color: 'var(--ink)' },
+    { key: 'zr', label: 'Frz rain', color: 'oklch(0.63 0.09 238)' },
+    { key: 'ip', label: 'Sleet', color: 'oklch(0.50 0.11 272)' },
 ];
 
 /**

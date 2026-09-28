@@ -1,11 +1,11 @@
 {
-    "name": "SREF Ensemble Plumes",
-    "short_name": "SREF Viewer",
-    "description": "Interactive ensemble forecast plumes from NOAA SREF and REFS models",
+    "name": "Weather",
+    "short_name": "Weather",
+    "description": "Hyperlocal weather: observed conditions, hourly and 11-day forecasts, radar and ensemble plumes",
     "start_url": "/",
     "display": "standalone",
-    "background_color": "#07090f",
-    "theme_color": "#07090f",
+    "background_color": "#f3f0e8",
+    "theme_color": "#f3f0e8",
     "icons": [
         {
             "src": "/icons/icon-192.png",

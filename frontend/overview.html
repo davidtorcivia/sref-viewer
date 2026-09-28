@@ -11,6 +11,14 @@
     <link rel="stylesheet" href="/css/overview.css?v=__V__">
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#f3f0e8">
+    <!-- Theme before first paint: saved choice, else the system's -->
+    <script>
+        try {
+            document.documentElement.dataset.theme = localStorage.getItem('sref-theme')
+                || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        } catch { document.documentElement.dataset.theme = 'light'; }
+        if (document.documentElement.dataset.theme === 'dark') document.querySelector('meta[name="theme-color"]').content = '#151413';
+    </script>
     <link rel="preload" href="/fonts/anybody-latin.woff2" as="font" type="font/woff2" crossorigin>
     <script>
         if ('serviceWorker' in navigator) {
@@ -31,6 +39,7 @@
             <a href="/radar" class="wx-icon-btn" aria-label="Radar map">
                 <svg class="ic" aria-hidden="true"><use href="#i-radar" /></svg>
             </a>
+            <button class="wx-icon-btn" id="themeBtn" aria-label="Switch theme"></button>
             <button class="wx-icon-btn" id="settingsBtn" aria-label="Settings">
                 <svg class="ic" aria-hidden="true"><use href="#i-gear" /></svg>
             </button>
@@ -134,6 +143,12 @@
         </symbol>
         <symbol id="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14.5 4.5h5v5M9.5 19.5h-5v-5M19.5 4.5l-6 6M4.5 19.5l6-6" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4.2" /><path d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5l1.5 1.5M17 17l1.5 1.5M5.5 18.5L7 17M17 7l1.5-1.5" />
+        </symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round">
+            <path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z" />
         </symbol>
         <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 4v16M6 14l6 6 6-6" />

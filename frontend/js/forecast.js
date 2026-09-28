@@ -335,7 +335,7 @@ export function nbmDays(daily) {
         const c = d.cloud ?? 50;
         const cond = wet ? (d.ptype === 'snow' ? { key: 'snow', label: 'Snow' } : { key: 'rain', label: d.ptype === 'ice' ? 'Freezing rain' : 'Rain' })
             : c < 25 ? { key: 'clear', label: 'Sunny' } : c < 60 ? { key: 'partly', label: 'Partly cloudy' } : { key: 'cloudy', label: 'Cloudy' };
-        return { key: dayKey(t), t, hi: d.hi, lo: d.lo, pop: d.pop_day, qpf: d.qpf ?? 0, snow: d.snow ?? 0, gust: d.gust, cond };
+        return { key: dayKey(t), t, hi: d.hi, lo: d.lo, pop: d.pop_day, qpf: d.qpf ?? 0, snow: d.snow ?? 0, gust: d.gust, wind: d.wind, cloud: d.cloud, cond };
     });
 }
 

@@ -32,6 +32,7 @@ if (EMBED) {
         if (e.origin !== location.origin || e.data?.type !== 'wx-radar') return;
         if ('view' in e.data) {
             document.body.classList.toggle('embed-mini', e.data.view === 'mini');
+            if (e.data.view === 'mini') els.legend.open = true;   // the mini bar's picker and scale live in it
             setGestures(e.data.view === 'mini');
             if (map) map.resize();
         }
@@ -65,9 +66,9 @@ const LOAD_STALL_MS = 10000;        // Give up waiting on a cold frame, move on
 
 // Radar is only ever useful slower, never faster
 const SPEEDS = [
-    { mult: 1, label: '1×' },
-    { mult: 0.5, label: '½×' },
-    { mult: 0.25, label: '¼×' },
+    { mult: 1, label: '1x' },
+    { mult: 0.5, label: '½x' },
+    { mult: 0.25, label: '¼x' },
 ];
 
 const NYC = { center: [-73.95, 40.75], zoom: 8.2 };
@@ -950,7 +951,6 @@ function init() {
         cooperativeGestures: EMBED,
     });
     setGestures = on => map.cooperativeGestures?.[on ? 'enable' : 'disable']?.();
-    if (EMBED) els.legend.open = false;
 
     // Remember where the user left the map
     map.on('moveend', () => {

@@ -20,7 +20,7 @@ import {
     hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
     comfort, compass, monotonePath, dayKey, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex,
 } from './forecast.js?v=__V__';
-import { rampColor, certaintyWeight, windArrow, spiral, spiralTimeAt, samplePaths, SPIRAL } from './signal.js?v=__V__';
+import { rampColor, windArrow, spiral, spiralTimeAt, SPIRAL } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
 
 const PLACES_KEY = 'wx-places';
@@ -348,10 +348,8 @@ async function renderPlace(place) {
     if (seq !== renderSeq) return;   // another render started meanwhile (navigation, refresh)
     num.classList.remove('sg-skeleton');
     const next24 = f.upcoming.slice(0, 25);
-    if (next24.length > 1) {
-        top.style.background = `linear-gradient(90deg, ${next24.map((r, i) => `${rampColor(r.tmp)} ${(i / (next24.length - 1) * 100).toFixed(1)}%`).join(', ')})`;
-    } else if (f.temp != null) top.style.background = rampColor(f.temp);
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', f.temp != null ? rampColor(f.temp) : PAPER);
+    top.style.background = fieldGradient(next24, f.temp);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--paper').trim() || PAPER);
     top.prepend(skyTicks(next24));
     const strip = hourStrip(next24);
 
@@ -370,7 +368,7 @@ async function renderPlace(place) {
     const radar = radarPanel(place);
     const plume = plumePanel(f);
     more.append(radar, ...(plume ? [plume] : []));
-    view.append(cells.sec, cells.detail, ...(hours ? [hours.sec] : []), ...(daysSec ? [daysSec] : []), more, placeFooter(place, f));
+    view.append(cells.sec, ...(hours ? [hours.sec] : []), ...(daysSec ? [daysSec] : []), more, placeFooter(place, f));
 
     let ens = null, hist = null;
     // a redraw keeps keyboard focus on the spiral
@@ -388,7 +386,6 @@ async function renderPlace(place) {
         if (!e || seq !== renderSeq) return;
         ens = e;
         cells.update(cursor.t, ens);
-        strip.update(ens);
         hours?.setEnsemble(ens);
     });
     // A new region's days are cut after its hourly series: ask again until they land
@@ -412,6 +409,20 @@ async function renderPlace(place) {
     }
 }
 
+// The color field: the next 24 hours, smoothed over three hours so it reads as weather
+// rather than stripes, and softened toward the paper
+function fieldGradient(rows, temp) {
+    const soft = t => `color-mix(in oklch, ${rampColor(t)} 74%, var(--paper))`;
+    if (rows.length < 2) return temp != null ? soft(temp) : '';
+    const n = rows.length - 1;
+    const stops = [];
+    for (let i = 0; i <= n; i += 2) {
+        const win = rows.slice(Math.max(0, i - 1), i + 2).map(r => r.tmp);
+        stops.push(`${soft(win.reduce((a, b) => a + b, 0) / win.length)} ${(i / n * 100).toFixed(1)}%`);
+    }
+    return `linear-gradient(90deg, ${stops.join(', ')})`;
+}
+
 // Cloud cover along the top edge of the color field: ink density per hour
 function skyTicks(rows) {
     const strip = el('div', 'sg-sky');
@@ -424,24 +435,30 @@ function skyTicks(rows) {
     return strip;
 }
 
-// The next 24 hours as blocks along the bottom of the color field: the time and the temperature,
-// set lighter where the ensemble disagrees
+// The next 24 hours as blocks along the bottom of the color field, time and temperature;
+// pointing at one moves the cursor there
 function hourStrip(rows) {
     const box = el('div', 'sg-strip');
-    const cells = rows.slice(0, 24).map(r => {
+    const cells = rows.slice(0, 24).map((r, i) => {
         const c = el('div', 'sg-strip-h');
-        const v = el('b', null, deg(r.tmp));
-        c.append(el('span', null, hourOf(r.t)), v);
+        c.append(el('span', null, hourOf(r.t)), el('b', null, deg(r.tmp)));
+        const t = i ? r.t : null;   // the first block is the current hour: now
+        c.tabIndex = 0;
+        c.setAttribute('role', 'button');
+        c.setAttribute('aria-label', `${hourOf(r.t)}, ${deg(r.tmp)}`);
+        c.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse') setCursor(t); });
+        // a mouse already moved the cursor on the way in; a tap or a key toggles it
+        c.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') setCursor(cursor.t === t ? null : t); });
+        c.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCursor(cursor.t === t ? null : t); } });
         box.append(c);
-        return [r, v];
+        return [r, c];
     });
-    return {
-        el: box,
-        update: ens => { for (const [r, v] of cells) { const rg = rangeAt(ens, r.t); v.style.fontWeight = certaintyWeight(rg ? rg.hi - rg.lo : null); } },
-    };
+    box.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') setCursor(null); });
+    onCursor(box, t => { for (const [r, c] of cells) c.classList.toggle('on', t != null && r.t <= t && r.t + HOUR > t); });
+    return { el: box };
 }
 
-// The hero number: the observation at rest, the forecast at the cursor (set lighter where the ensemble disagrees)
+// The hero number: the observation at rest, the forecast at the cursor
 function showHero({ label, num, place, f }, t, ens) {
     if (t == null) {
         const age = f.obs?.time ? Math.round((Date.now() - f.obs.time * 1000) / 60000) : null;
@@ -449,7 +466,6 @@ function showHero({ label, num, place, f }, t, ens) {
             ? `Now · observed ${timeOf(f.obs.time * 1000)}${age != null && age >= 2 ? `, ${age} min ago` : ''} · ${place.name}`
             : `Now · ${place.name}`;
         num.textContent = deg(f.temp);
-        num.style.fontWeight = 820;
         return;
     }
     const r = rowAt(f, t);
@@ -457,7 +473,6 @@ function showHero({ label, num, place, f }, t, ens) {
     const rg = rangeAt(ens, t);
     label.textContent = `${weekday(t)} ${timeOf(t)} · forecast`;
     num.textContent = deg(r.tmp);
-    num.style.fontWeight = certaintyWeight(rg ? rg.hi - rg.lo : null);
 }
 
 // One sentence: the sky now, the next 12 hours, and the next rain in the days
@@ -499,11 +514,11 @@ function spiralSvg(place, f, hist) {
     svgEl('path', { d: sp.track, class: 'sp-sweep', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
     const g = svgEl('g', { mask: `url(#${id})` }, s);
     for (const seg of sp.segs) {
-        const c = seg.tmp == null ? '#dcd7cb' : rampColor(seg.tmp);
-        const p = svgEl('path', { d: seg.d, fill: c, stroke: c, 'stroke-width': 0.6 }, g);
+        const p = seg.tmp == null ? svgEl('path', { d: seg.d, class: 'sp-missing' }, g)
+            : svgEl('path', { d: seg.d, fill: rampColor(seg.tmp), stroke: rampColor(seg.tmp), 'stroke-width': 0.6 }, g);
         svgTitle(p, `${weekday(seg.t)} ${timeOf(seg.t)} · ${seg.tmp == null ? 'no observation' : deg(seg.tmp)}${seg.observed ? `, observed${hist?.station ? ` at ${hist.station.id}` : ''}` : ''}`);
     }
-    svgEl('path', { d: sp.tip, fill: sp.end != null ? rampColor(sp.end) : PAPER }, g);
+    for (const c of sp.caps) svgEl('circle', { cx: c.x, cy: c.y, r: c.r, ...(c.tmp == null ? { class: 'sp-missing' } : { fill: rampColor(c.tmp) }) }, g);
     for (const r of sp.rain) svgTitle(svgEl('path', { d: r.d, class: 'sp-drop' }, s), `${weekday(r.t)} ${timeOf(r.t)} · ${rain(r.inches)} of rain${r.t < now ? ' observed' : ' forecast'}`);
 
     for (const w of sp.wind) {
@@ -626,21 +641,34 @@ function readouts(place, f) {
     const inner = el('div', 'sg-detail-inner');
     detail.append(inner);
     let open = null;
+    // The detail sits in the grid right after the row of the card that opened it
+    const place_ = btn => {
+        const cols = getComputedStyle(sec).gridTemplateColumns.split(' ').length;
+        const cards = [...sec.querySelectorAll('.sg-cell')];
+        const last = cards[Math.min(cards.length - 1, (Math.floor(cards.indexOf(btn) / cols) + 1) * cols - 1)];
+        if (last.nextElementSibling !== detail) last.after(detail);
+    };
     const toggle = (key, btn) => {
         const closing = open === key;
         sec.querySelectorAll('[aria-expanded]').forEach(b => b.setAttribute('aria-expanded', 'false'));
         if (closing) { open = null; detail.classList.remove('open'); return; }
         open = key;
         btn.setAttribute('aria-expanded', 'true');
+        place_(btn);
         detail.classList.add('open');
         renderDetail(inner, key, place, f);
-        drawnW = Math.round(inner.clientWidth - 40);   // content width, as the observer reports it (20 px padding a side)
+        drawnW = Math.round(contentWidth(inner));   // as the observer reports it
     };
     // an open detail redraws when it has grown or shrunk 8 px from the width it was drawn at
     let drawnW = 0;
     new ResizeObserver(([e]) => {
         const w = Math.round(e.contentRect.width);
-        if (open && Math.abs(w - drawnW) > 8) { renderDetail(inner, open, place, f); drawnW = w; }
+        if (open && Math.abs(w - drawnW) > 8) {
+            const btn = sec.querySelector('[aria-expanded="true"]');
+            if (btn) place_(btn);
+            renderDetail(inner, open, place, f);
+            drawnW = w;
+        }
     }).observe(inner);
     const keys = ['feels', 'dew', 'wind', 'sky', 'rain', 'later3', 'later12', 'sun'];
     const cells = Object.fromEntries(keys.map(k => {
@@ -655,11 +683,10 @@ function readouts(place, f) {
         sec.append(c);
         return [k, parts];
     }));
-    const put = (k, key, value, sub, mini, weight = 820) => {
+    const put = (k, key, value, sub, mini) => {
         const c = cells[k];
         c.k.textContent = key;
         c.v.textContent = value;
-        c.v.style.fontWeight = weight;
         c.sub.textContent = sub;
         c.mini.replaceChildren(...(mini ? [mini] : []));
     };
@@ -689,7 +716,7 @@ function readouts(place, f) {
             const at = tt + h * HOUR, rr = rowAt(f, at), rg = rangeAt(ens, at);
             if (!rr || rr.t + HOUR < at) { put(key, `In ${h} hours`, '--', '', null); return; }
             put(key, `In ${h} hours`, deg(rr.tmp), rg ? `8 in 10 outcomes between these, ${weekday(at).toLowerCase() === 'today' ? '' : `${weekday(at)} `}${hourOf(at)}.` : `${weekday(at)} ${hourOf(at)}.`,
-                band(rg?.lo, rg?.hi, rr.tmp), certaintyWeight(rg ? rg.hi - rg.lo : null));
+                band(rg?.lo, rg?.hi, rr.tmp));
         };
         ahead(3, 'later3');
         ahead(12, 'later12');
@@ -702,7 +729,8 @@ function readouts(place, f) {
         }
     };
     update(null, null);
-    return { sec, detail, update };
+    sec.append(detail);
+    return { sec, update };
 }
 
 // ============ 48 hours ============
@@ -724,8 +752,9 @@ function hoursSection(place, f, ens0) {
     const draw = () => {
         const W = Math.max(300, wrap.clientWidth);
         const narrow = W < 700;
-        const L = 40, Rm = narrow ? 30 : 64, HT = narrow ? 220 : 340, STRIP = 22, WIND = narrow ? 72 : 96, HRS = 26;
-        const H = HT + STRIP + 26 + WIND + HRS;
+        const L = 40, Rm = narrow ? 30 : 64, HT = narrow ? 220 : 340, STRIP = 22, CLOUD = narrow ? 36 : 44, WIND = narrow ? 72 : 96, HRS = 26;
+        const C0 = HT + STRIP + 26, W0 = C0 + CLOUD + 26;   // tops of the cloud and wind lanes
+        const H = W0 + WIND + HRS;
         const x0 = rows[0].t, x1 = rows[rows.length - 1].t;
         const X = t => L + (t - x0) / (x1 - x0) * (W - L - Rm);
         const ensIn = ens ? ens.filter(m => m.x >= x0 - 3 * HOUR && m.x <= x1 + 3 * HOUR) : [];
@@ -754,14 +783,18 @@ function hoursSection(place, f, ens0) {
             const rect = svgEl('rect', { x: X(r.t) - bw / 2, y: HT, width: bw + 0.5, height: STRIP, fill: rampColor(r.tmp) }, s);
             svgTitle(rect, `${weekday(r.t)} ${timeOf(r.t)} · ${deg(r.tmp)}`);
         }
-        // possible temperatures within the ensemble spread, drawn once and left still
+        // the ensemble's spread as a band: 8 in 10 outcomes, and the middle half darker
         if (ensIn.length > 1) {
             const clipId = `hc${Math.random().toString(36).slice(2, 8)}`;
             svgEl('rect', { x: L, y: 0, width: W - L - Rm, height: HT }, svgEl('clipPath', { id: clipId }, svgEl('defs', {}, s)));
-            const paths = svgEl('g', { 'clip-path': `url(#${clipId})`, class: 'g-paths' }, s);
-            for (const path of samplePaths(ensIn, 18, Math.round(ensIn[0].x / HOUR))) {
-                svgEl('path', { d: monotonePath(path.map(p => [X(p.t), Y(p.v)])), class: 'g-path' }, paths);
-            }
+            const g = svgEl('g', { 'clip-path': `url(#${clipId})` }, s);
+            const area = (a, b, cls) => {
+                const top = ensIn.map(m => [X(m.x), Y(m[b])]);
+                const bot = ensIn.map(m => [X(m.x), Y(m[a])]).reverse();
+                svgEl('path', { d: `${monotonePath(top)}L${monotonePath(bot).slice(1)}Z`, class: cls }, g);
+            };
+            area('p10', 'p90', 'g-band');
+            area('p25', 'p75', 'g-band g-band-mid');
         }
         // rain and snow, hourly
         for (const r of rows) {
@@ -778,13 +811,22 @@ function hoursSection(place, f, ens0) {
             svgEl('text', { x: X(lastR.t) + 8, y: Y(lastR.tmp) + 4, class: 'g-end' }, s).textContent = 'forecast';
             if (ensIn.length > 1) {
                 const lm = ensIn[ensIn.length - 1];
-                if (lm.x <= x1 + 3 * HOUR) svgEl('text', { x: Math.min(X(lm.x), W - Rm) + 8, y: Y(lm.p10) + 16, class: 'g-end g-end-soft' }, s).textContent = 'possible';
+                if (lm.x <= x1 + 3 * HOUR) svgEl('text', { x: Math.min(X(lm.x), W - Rm) + 8, y: Y(lm.p10) + 16, class: 'g-end g-end-soft' }, s).textContent = '8 in 10';
             }
         }
+        // cloud cover lane: a column per hour, as tall as the sky is covered
+        svgEl('text', { x: 0, y: C0 - 4, class: 'g-lane' }, s).textContent = 'Cloud cover';
+        svgEl('rect', { x: L, y: C0, width: W - L - Rm, height: CLOUD, class: 'g-lane-bg' }, s);
+        for (const r of rows) {
+            if (r.cloud == null) continue;
+            const h = CLOUD * Math.min(100, r.cloud) / 100;
+            svgTitle(svgEl('rect', { x: X(r.t) - bw / 2, y: C0 + CLOUD - h, width: bw + 0.5, height: h, class: 'g-cloud' }, s),
+                `${weekday(r.t)} ${timeOf(r.t)} · ${Math.round(r.cloud)}% cloud cover`);
+        }
         // wind lane
-        const wy = HT + STRIP + 26 + WIND / 2 - 8;
-        svgEl('text', { x: 0, y: HT + STRIP + 22, class: 'g-lane' }, s).textContent = `Wind, ${U.windUnit(units)}`;
-        const every = bw < 12 ? 2 : 1;
+        const wy = W0 + WIND / 2 - 8;
+        svgEl('text', { x: 0, y: W0 - 4, class: 'g-lane' }, s).textContent = `Wind, ${U.windUnit(units)}`;
+        const every = narrow ? 3 : bw < 12 ? 2 : 1;
         rows.forEach((r, i) => {
             if (i % every) return;
             const len = 4 + Math.min(r.wind, 30) * (narrow ? 1.1 : 1.6);
@@ -797,7 +839,7 @@ function hoursSection(place, f, ens0) {
         });
         rows.forEach((r, i) => {
             if (i % (narrow ? 6 : 3)) return;
-            svgEl('text', { x: X(r.t), y: HT + STRIP + 26 + WIND - 2, class: `g-speed${r.wind >= 15 ? ' strong' : ''}`, 'text-anchor': 'middle' }, s).textContent = Math.round(U.toWind(r.wind, units));
+            svgEl('text', { x: X(r.t), y: W0 + WIND - 2, class: `g-speed${r.wind >= 15 ? ' strong' : ''}`, 'text-anchor': 'middle' }, s).textContent = Math.round(U.toWind(r.wind, units));
             svgEl('text', { x: X(r.t), y: H - 6, class: 'g-hour', 'text-anchor': 'middle' }, s).textContent = hourOf(r.t);
         });
         // now, and the cursor
@@ -818,7 +860,7 @@ function hoursSection(place, f, ens0) {
             const rg = rangeAt(ens, r.t);
             card.hidden = false;
             card.replaceChildren(el('div', 'sg-card-k', `${weekday(r.t)} ${timeOf(r.t)}`),
-                Object.assign(el('div', 'sg-card-v', deg(r.tmp)), { style: `font-weight:${certaintyWeight(rg ? rg.hi - rg.lo : null)}` }),
+                el('div', 'sg-card-v', deg(r.tmp)),
                 el('div', 'sg-card-sub', [rg ? `${deg(rg.lo)} to ${deg(rg.hi)} in 8 of 10 outcomes.` : null,
                     `${condition(r, sunAltitude(r.t, place.lat, place.lon) < -0.8).label}, wind ${compass(r.dir)} ${windStr(r.wind)}.`].filter(Boolean).join(' ')));
             const cw = Math.min(260, W * 0.45);
@@ -903,24 +945,61 @@ function daysSection(f) {
     return sec;
 }
 
-// The day opened: its sky, wind and rain in words, and its hours where the hourly forecast reaches
+// The day opened: hour by hour where the hourly forecast reaches (temperature, cloud cover, rain),
+// else the NBM day's cloud cover, wind and rain
 function dayMore(d, f) {
     const box = el('div', 'sg-day-more');
     const inner = el('div', 'sg-day-more-inner');
-    const bits = [d.cond?.label, d.gust != null ? `gusts to ${windStr(d.gust)}` : null,
-        d.pop != null ? `${d.pop}% chance of rain${d.qpf >= 0.01 ? `, about ${rain(d.snow >= 0.1 ? d.snow : d.qpf, d.snow >= 0.1)}${d.snow >= 0.1 ? ' snow' : ''}` : ''}` : null].filter(Boolean);
-    inner.append(el('p', 'sg-day-words', bits.join(' · ')));
-    const hrs = f.rows.filter(r => dayKey(r.t) === d.key && new Date(r.t).getHours() % 3 === 0);
-    if (hrs.length) {
-        const strip = el('div', 'sg-day-hours');
-        for (const r of hrs) {
-            const c = el('div', 'sg-strip-h');
+    const hrs = f.rows.filter(r => dayKey(r.t) === d.key);
+    const snow = d.snow >= 0.1;
+    if (hrs.length >= 6) {
+        const grid = el('div', 'sg-ribbon');
+        grid.style.setProperty('--hrs', hrs.length);
+        const lane = (name, make) => {
+            grid.append(el('span', 'sg-ribbon-k', name));
+            hrs.forEach((r, i) => grid.append(make(r, i)));
+        };
+        lane('Temperature', (r, i) => {
+            const c = el('div', 'sg-rb-t', i % 3 === 0 ? deg(r.tmp) : '');
             c.style.background = rampColor(r.tmp);
-            c.append(el('span', null, hourOf(r.t)), el('b', null, deg(r.tmp)));
-            if (r.qpf >= 0.01) c.append(el('i', 'sg-wet', rain(r.qpf, r.snowy)));
-            strip.append(c);
-        }
-        inner.append(strip);
+            c.title = `${hourOf(r.t)} · ${deg(r.tmp)}`;
+            return c;
+        });
+        lane('Cloud cover', r => {
+            const c = el('div', 'sg-rb-c');
+            const i = el('i');
+            i.style.height = `${Math.round(r.cloud ?? 0)}%`;
+            c.append(i);
+            c.title = `${hourOf(r.t)} · ${Math.round(r.cloud ?? 0)}% cloud cover`;
+            return c;
+        });
+        lane(snow ? 'Snow' : 'Rain', r => {
+            const c = el('div', 'sg-rb-r');
+            const amt = r.snowy ? r.snow : r.qpf;
+            if (r.qpf >= 0.01) {
+                const i = el('i');
+                i.style.height = `${Math.min(100, 20 + r.qpf * 400)}%`;
+                c.append(i);
+            }
+            c.title = `${hourOf(r.t)} · ${r.qpf >= 0.01 ? rain(amt, r.snowy) : 'dry'}`;
+            return c;
+        });
+        lane('', (r, i) => el('span', 'sg-rb-h', i % 3 === 0 ? hourOf(r.t) : ''));
+        inner.append(grid);
+    } else {
+        const stats = el('div', 'sg-day-stats');
+        const stat = (k, v, pct) => {
+            const e = el('div', 'sg-stat');
+            e.append(el('span', null, k), el('b', null, v));
+            if (pct != null) { const bar = el('i'); const fill = el('i'); fill.style.width = `${Math.max(0, Math.min(100, pct))}%`; bar.append(fill); e.append(bar); }
+            stats.append(e);
+        };
+        if (d.cloud != null) stat('Cloud cover', `${Math.round(d.cloud)}%`, d.cloud);
+        if (d.wind != null) stat('Wind', windStr(d.wind));
+        if (d.gust != null) stat('Gusts', windStr(d.gust));
+        if (d.pop != null) stat('Chance of rain', `${d.pop}%`, d.pop);
+        stat(snow ? 'Snow' : 'Rain', d.qpf >= 0.01 || snow ? rain(snow ? d.snow : d.qpf, snow) : 'none');
+        inner.append(stats);
     }
     box.append(inner);
     return box;
@@ -956,7 +1035,7 @@ function plumePanel(f) {
     const legend = el('div', 'plume-legend');
     const foot = el('div', 'panel-foot');
     const more = el('a', 'text-link', `Full plumes for ${st.id}`);
-    more.href = `/?station=${encodeURIComponent(st.id)}`;
+    more.href = `/plumes?station=${encodeURIComponent(st.id)}&model=refs`;
     foot.append(el('span', null, `REFS ensemble at ${st.id}, ${st.km} km away`), more);
     sec.append(head, trend, readout, chart, legend, foot);
 
@@ -1103,19 +1182,13 @@ function radarPanel(place) {
     const sec = el('section', 'radar-panel');
     sec.setAttribute('aria-label', 'Map');
     const frame = el('div', 'radar-frame');
-    // Map type, passed to the embedded page
-    const pick = el('select', 'radar-pick');
-    pick.setAttribute('aria-label', 'Map type');
-    for (const [v, text] of [['radar', 'Radar'], ['satellite', 'Satellite'], ['temp', 'Temperature'], ['wind', 'Wind'], ['gust', 'Wind gusts'], ['clouds', 'Clouds'], ['precip', 'Rain total'], ['snow', 'Snow total'], ['dewpoint', 'Dew point']]) {
-        pick.append(Object.assign(el('option', null, text), { value: v }));
-    }
     const open = el('button', 'wx-icon-btn radar-expand');
     open.setAttribute('aria-label', 'Open the radar full screen');
     open.append(icon('expand'));
     const close = el('button', 'wx-icon-btn radar-close');
     close.setAttribute('aria-label', 'Close the radar');
     close.append(icon('close'));
-    frame.append(pick, open, close);
+    frame.append(open, close);
     sec.append(frame);
 
     let iframe = null;
@@ -1125,9 +1198,7 @@ function radarPanel(place) {
         iframe = el('iframe');
         iframe.title = 'Radar map';
         iframe.loading = 'lazy';
-        iframe.src = `/radar?embed=1&layer=${pick.value}#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
-        // a pick made while the page loaded went to the blank document: send the current one now
-        iframe.addEventListener('load', () => post({ layer: pick.value }));
+        iframe.src = `/radar?embed=1&theme=${document.documentElement.dataset.theme}#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
         frame.prepend(iframe);
     };
     new IntersectionObserver(([e]) => {
@@ -1141,7 +1212,6 @@ function radarPanel(place) {
         post({ view: full ? 'full' : 'mini', play: true });
         if (full) close.focus();
     };
-    pick.addEventListener('change', () => { if (iframe) post({ layer: pick.value }); });
     open.addEventListener('click', () => { load(); setFull(true); });
     // Escape pressed inside the map arrives as a message from the iframe
     radarEscape = source => { if (source === iframe?.contentWindow && sec.classList.contains('full')) setFull(false); };
@@ -1216,9 +1286,10 @@ function rowsList(rows) {
     return dl;
 }
 
+const contentWidth = node => node.clientWidth - 2 * parseFloat(getComputedStyle(node).paddingLeft || 0);
 let detailWidth = 520;   // the open detail's inner width; its charts fill it
 function renderDetail(body, key, place, f) {
-    detailWidth = body.clientWidth - 40;
+    detailWidth = contentWidth(body);
     const hrs = f.upcoming.slice(0, 48);
     const T = v => U.toTemp(v, units);
     const content = {
@@ -1471,6 +1542,31 @@ dialog.querySelector('form').addEventListener('submit', e => {
     clearTimeout(searchTimer);
     search();
 });
+
+// ============ Light and dark ============
+// data-theme is set before first paint (overview.html); the button saves a choice for every page
+const themeBtn = document.getElementById('themeBtn');
+function showTheme() {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    themeBtn.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+    themeBtn.replaceChildren(icon(dark ? 'sun' : 'moon'));
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#151413' : '#f3f0e8');
+}
+themeBtn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    store.set('sref-theme', next);
+    document.documentElement.dataset.theme = next;
+    showTheme();
+    route(true);   // the embedded map picks its basemap at load
+});
+// Following the system until the button is used
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', e => {
+    if (store.get('sref-theme')) return;
+    document.documentElement.dataset.theme = e.matches ? 'dark' : 'light';
+    showTheme();
+    route(true);
+});
+showTheme();
 
 // ============ Routing ============
 

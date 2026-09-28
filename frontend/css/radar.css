@@ -1,34 +1,39 @@
-/* Radar map page - full-viewport map with floating chrome */
+/* Radar map page - full-viewport map with floating chrome, in the Signal
+   look (overview.css): warm paper, near-black ink, Anybody, fills instead of
+   borders. Theme comes from data-theme on <html>, set before first paint. */
 
-/* Theme comes from data-theme on <html>, set before first paint by radar.html */
-:root {
-    color-scheme: dark;
-    --bg: #07090f;
-    /* Liquid glass: thin tint, strong blur + saturation, lit top edge */
-    --surface: rgba(16, 20, 30, 0.46);
-    --border: rgba(255, 255, 255, 0.13);
-    --text: #e9edf5;
-    --text-dim: #8b94a8;
-    --accent: #7ea6ff;
-    --accent-ink: #081022;
-    --nowcast: #ffd166;
-    --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 8px 28px -8px rgba(0, 0, 0, 0.55);
-    --blur: blur(20px) saturate(1.8);
-    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b94a8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+@font-face {
+    font-family: 'Anybody';
+    font-style: normal;
+    font-weight: 100 900;
+    font-stretch: 50% 150%;
+    font-display: swap;
+    src: url('/fonts/anybody-latin.woff2') format('woff2');
 }
 
-:root[data-theme="light"] {
+:root {
     color-scheme: light;
-    --bg: #f2f4f8;
-    --surface: rgba(255, 255, 255, 0.55);
-    --border: rgba(15, 23, 42, 0.1);
-    --text: #131722;
-    --text-dim: #5b6477;
-    --accent: #2f5bea;
-    --accent-ink: #ffffff;
-    --nowcast: #a86f00;
-    --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 8px 24px -10px rgba(15, 23, 42, 0.25);
-    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%235b6477' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --paper: #f3f0e8;
+    --ink: #141312;
+    --ink-2: #5b5750;
+    --wash: rgba(20, 19, 18, 0.06);
+    --wash-2: rgba(20, 19, 18, 0.11);
+    --track: rgba(20, 19, 18, 0.18);
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%235b5750' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --pad: 12px;
+    --bar-h: 40px;
+}
+
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: #151413;
+    --ink: #efebe2;
+    --ink-2: #a8a397;
+    --wash: rgba(239, 235, 226, 0.08);
+    --wash-2: rgba(239, 235, 226, 0.14);
+    --track: rgba(239, 235, 226, 0.22);
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23a8a397' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 * {
@@ -41,9 +46,25 @@ html,
 body {
     height: 100%;
     overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
-    background: var(--bg);
-    color: var(--text);
+    font-family: 'Anybody', system-ui, sans-serif;
+    font-variation-settings: 'wdth' 96;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    background: var(--paper);
+    color: var(--ink);
+}
+
+button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    cursor: pointer;
+}
+
+:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
 }
 
 #map {
@@ -51,7 +72,7 @@ body {
     inset: 0;
 }
 
-/* ============ Floating Header ============ */
+/* ============ Floating header ============ */
 .radar-header {
     position: fixed;
     top: 0;
@@ -60,8 +81,8 @@ body {
     z-index: 10;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: max(0.6rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-left));
+    gap: 8px;
+    padding: max(var(--pad), env(safe-area-inset-top)) max(var(--pad), env(safe-area-inset-right)) 0 max(var(--pad), env(safe-area-inset-left));
     pointer-events: none;
     /* Let map gestures pass between elements */
 }
@@ -70,41 +91,46 @@ body {
     pointer-events: auto;
 }
 
-.nav-link {
-    color: var(--accent);
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 0.9rem;
-    padding: 0.45rem 0.8rem;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--surface);
-    box-shadow: var(--shadow);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+.nav-link,
+.radar-title,
+.radar-updated {
     display: inline-flex;
     align-items: center;
-    min-height: 40px;
+    height: 40px;
+    padding: 0 16px;
+    border-radius: 999px;
+    background: var(--paper);
+    color: var(--ink);
+    font-size: 14px;
+    white-space: nowrap;
 }
 
-.radar-title {
-    font-weight: 700;
-    font-size: 1rem;
-    background: var(--surface);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: var(--shadow);
-    padding: 0.45rem 0.9rem;
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-    letter-spacing: -0.01em;
+.nav-link {
+    text-decoration: none;
+    font-weight: 500;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+
+.nav-link:hover {
+    background: var(--ink);
+    color: var(--paper);
+}
+
+.back-link {
+    padding-left: 14px;
 }
 
 .radar-title {
     margin-right: auto;
+    font-size: 19px;
+    font-weight: 800;
+    font-variation-settings: 'wdth' 70;
+    letter-spacing: 0.01em;
+}
+
+.radar-updated {
+    color: var(--ink-2);
+    font-size: 13px;
 }
 
 /* Icon shows the theme a click switches to */
@@ -112,8 +138,6 @@ body {
     width: 40px;
     justify-content: center;
     padding: 0;
-    cursor: pointer;
-    font: inherit;
 }
 
 .theme-btn::before {
@@ -130,22 +154,6 @@ body {
     --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a8.5 8.5 0 1 0 11.1 11.1z'/%3E%3C/svg%3E");
 }
 
-.radar-updated {
-    font-size: 0.8rem;
-    color: var(--text-dim);
-    background: var(--surface);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: var(--shadow);
-    font-variant-numeric: tabular-nums;
-    padding: 0.45rem 0.8rem;
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-}
-
 /* Caret: the one directional mark (matches styles.css) */
 .caret {
     display: inline-block;
@@ -157,47 +165,42 @@ body {
     transform: rotate(135deg);
 }
 
-/* ============ Bottom Controls ============ */
+/* ============ Bottom controls ============ */
 .radar-controls {
     position: fixed;
     left: 50%;
     transform: translateX(-50%);
-    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    bottom: max(var(--pad), env(safe-area-inset-bottom));
     z-index: 10;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    width: min(560px, calc(100% - 1.5rem));
-    background: var(--surface);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 0.6rem 0.9rem 0.6rem 0.6rem;
-    box-shadow: var(--shadow);
+    gap: 6px;
+    width: min(600px, calc(100% - 2 * var(--pad)));
+    padding: 6px 18px 6px 6px;
+    border-radius: 999px;
+    background: var(--paper);
 }
 
 .play-btn {
-    background: var(--accent);
-    color: var(--accent-ink);
-    border: none;
-    box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 70%, transparent);
+    flex: none;
     width: 44px;
     height: 44px;
-    min-width: 44px;
     border-radius: 50%;
-    font-size: 1rem;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: opacity 0.15s;
+    background: var(--ink);
+    color: var(--paper);
+    display: grid;
+    place-items: center;
+    transition: transform 0.15s var(--ease);
+}
+
+.play-btn:active {
+    transform: scale(0.94);
 }
 
 .play-btn::before {
     content: '';
-    width: 16px;
-    height: 16px;
+    width: 15px;
+    height: 15px;
     margin-left: 2px;
     background: currentColor;
     -webkit-mask: var(--icon) center / contain no-repeat;
@@ -210,42 +213,28 @@ body {
     --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='2' width='3.6' height='12' rx='1'/%3E%3Crect x='9.4' y='2' width='3.6' height='12' rx='1'/%3E%3C/svg%3E");
 }
 
-.play-btn:hover {
-    opacity: 0.9;
-}
-
 .speed-btn {
-    background: transparent;
-    color: var(--text);
-    border: 1px solid var(--border);
+    flex: none;
     min-width: 48px;
     height: 44px;
-    border-radius: 12px;
-    font-family: inherit;
-    font-size: 0.9rem;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: var(--wash);
+    font-size: 16px;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: border-color 0.15s, color 0.15s;
-}
-
-.speed-btn:hover,
-.range-btn[data-forecast="true"] {
-    border-color: var(--accent);
-    color: var(--accent);
-}
-
-.range-btn {
-    padding: 0 0.6rem;
+    font-variation-settings: 'wdth' 70;
     white-space: nowrap;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease);
 }
 
+.speed-btn:hover {
+    background: var(--wash-2);
+}
+
+/* Forecast ranges read as the active state */
 .range-btn[data-forecast="true"] {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--ink);
+    color: var(--paper);
 }
 
 .scrubber-wrap {
@@ -253,70 +242,104 @@ body {
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 1px;
+    margin-left: 8px;
 }
 
+/* Slim ink track, round ink thumb */
 #scrubber {
+    -webkit-appearance: none;
+    appearance: none;
     width: 100%;
-    accent-color: var(--accent);
+    height: 22px;
+    background: transparent;
     cursor: pointer;
-    height: 28px;
-    /* Bigger touch target */
+}
+
+#scrubber::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--track);
+}
+
+#scrubber::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--track);
+}
+
+#scrubber::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    border-radius: 50%;
+    background: var(--ink);
+    border: 3px solid var(--paper);
+}
+
+#scrubber::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--ink);
+    border: 3px solid var(--paper);
 }
 
 .scrubber-labels {
     display: flex;
-    gap: 0.6rem;
+    gap: 10px;
     justify-content: space-between;
-    align-items: center;
-    font-size: 0.8rem;
-    min-height: 1.1rem;
+    align-items: baseline;
+    min-height: 18px;
 }
 
 .frame-time {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-variant-numeric: tabular-nums;
-    color: var(--text);
-    font-weight: 600;
+    font-size: 16px;
+    line-height: 1;
+    font-weight: 700;
+    font-variation-settings: 'wdth' 82;
 }
 
 .frame-badge {
+    flex: none;
     white-space: nowrap;
-    flex-shrink: 0;
-    font-size: 0.68rem;
-    color: var(--text-dim);
+    font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.06em;
+    color: var(--ink-2);
 }
 
+/* Future frames: ink tag, the one emphasis the chrome allows itself */
 .frame-badge.nowcast {
-    color: var(--nowcast);
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--ink);
+    color: var(--paper);
 }
 
 /* ============ Legend + overlay picker ============ */
 .radar-legend {
     position: fixed;
-    top: calc(max(0.6rem, env(safe-area-inset-top)) + 40px + 0.6rem);
-    left: max(0.75rem, env(safe-area-inset-left));
+    top: calc(max(var(--pad), env(safe-area-inset-top)) + 48px);
+    left: max(var(--pad), env(safe-area-inset-left));
     z-index: 10;
-    width: 200px;
-    padding: 0.55rem 0.7rem 0.6rem;
-    font-size: 0.68rem;
-    color: var(--text-dim);
-    background: var(--surface);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: var(--shadow);
+    width: 224px;
+    padding: 10px 12px 12px;
+    font-size: 11px;
+    color: var(--ink-2);
+    background: var(--paper);
+    border-radius: 10px;
 }
 
 /* Collapsed: a pill with the overlay name. Open: a caret beside the picker */
 .radar-legend:not([open]) {
     width: auto;
     padding: 0;
+    border-radius: 999px;
 }
 
 .legend-toggle {
@@ -324,12 +347,12 @@ body {
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 0.55rem;
-    min-height: 40px;
-    padding: 0 0.85rem;
-    font-size: 0.85rem;
+    gap: 10px;
+    height: 40px;
+    padding: 0 16px;
+    font-size: 14px;
     font-weight: 600;
-    color: var(--text);
+    color: var(--ink);
 }
 
 .legend-toggle::-webkit-details-marker {
@@ -343,13 +366,18 @@ body {
 
 .radar-legend[open] .legend-toggle {
     position: absolute;
-    top: 0.55rem;
-    right: 0.7rem;
-    min-height: 32px;
+    top: 10px;
+    right: 10px;
     width: 32px;
+    height: 32px;
     padding: 0;
     justify-content: center;
-    color: var(--text-dim);
+    border-radius: 50%;
+    color: var(--ink-2);
+}
+
+.radar-legend[open] .legend-toggle:hover {
+    background: var(--wash);
 }
 
 .radar-legend[open] .legend-toggle .caret {
@@ -364,46 +392,50 @@ body {
 .legend-body {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 8px;
 }
 
-/* Borderless tinted pill; native select chrome draws a hard white outline in dark mode */
 .overlay-select {
-    appearance: none;
     -webkit-appearance: none;
-    width: calc(100% - 36px);
+    appearance: none;
+    width: calc(100% - 40px);
+    height: 32px;
+    padding: 0 28px 0 12px;
+    border: 0;
+    border-radius: 999px;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: 14px;
     font-weight: 600;
-    color: var(--text);
-    background: color-mix(in srgb, var(--text) 8%, transparent) var(--chevron) no-repeat right 0.6rem center / 10px 6px;
-    border: none;
-    border-radius: 8px;
-    padding: 0.3rem 1.8rem 0.3rem 0.6rem;
-    min-height: 32px;
+    color: var(--ink);
+    background: var(--wash) var(--chevron) no-repeat right 11px center / 10px 6px;
     cursor: pointer;
 }
 
-.overlay-select:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
+.overlay-select:hover {
+    background-color: var(--wash-2);
 }
 
 .overlay-select option {
-    background: var(--bg);
-    color: var(--text);
+    background: var(--paper);
+    color: var(--ink);
 }
 
 .legend-grid {
     display: grid;
     grid-template-columns: auto 1fr;
     align-items: center;
-    gap: 0.3rem 0.5rem;
+    gap: 3px 8px;
+    margin-top: 2px;
+}
+
+.legend-grid>span {
+    font-weight: 600;
+    color: var(--ink);
 }
 
 .legend-bar {
     height: 8px;
-    border-radius: 2px;
+    border-radius: 4px;
 }
 
 .legend-bar.rain {
@@ -416,8 +448,8 @@ body {
 
 .legend-axis {
     position: relative;
-    height: 0.9em;
-    font-variant-numeric: tabular-nums;
+    height: 1.1em;
+    font-size: 10px;
 }
 
 .legend-axis span {
@@ -426,7 +458,11 @@ body {
 }
 
 .legend-grid .legend-axis {
-    margin-top: -0.15rem;
+    margin-top: -1px;
+}
+
+.legend-caption {
+    line-height: 1.35;
 }
 
 .radar-legend[data-overlay="satellite"] .legend-precip,
@@ -437,96 +473,140 @@ body {
     display: none;
 }
 
-/* Zoom/locate controls start below the floating header */
+/* ============ MapLibre chrome ============ */
 .maplibregl-ctrl-top-right {
-    top: calc(max(0.6rem, env(safe-area-inset-top)) + 40px);
+    top: calc(max(var(--pad), env(safe-area-inset-top)) + 40px);
+    right: max(0px, calc(env(safe-area-inset-right) - 10px));
+}
+
+.maplibregl-ctrl-top-right .maplibregl-ctrl {
+    margin: 8px 12px 0 0;
 }
 
 .maplibregl-ctrl-group {
-    background: var(--surface) !important;
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    box-shadow: var(--shadow) !important;
-    border-radius: 12px !important;
+    background: var(--paper) !important;
+    border-radius: 999px !important;
+    box-shadow: none !important;
+    overflow: hidden;
 }
 
-/* MapLibre control tweaks for dark mode */
-:root[data-theme="dark"] .maplibregl-ctrl-attrib {
-    background: var(--surface) !important;
+.maplibregl-ctrl-group button {
+    width: 40px !important;
+    height: 40px !important;
+}
+
+.maplibregl-ctrl-group button+button {
+    border-top: 0 !important;
+}
+
+.maplibregl-ctrl-group button:not(:disabled):hover {
+    background: var(--wash) !important;
 }
 
 :root[data-theme="dark"] .maplibregl-ctrl-group button span {
-    filter: invert(0.85);
+    filter: invert(0.92);
 }
 
-:root[data-theme="dark"] .maplibregl-ctrl-attrib,
-:root[data-theme="dark"] .maplibregl-ctrl-attrib a {
-    color: var(--text-dim) !important;
-}
-
-/* Scale bar - restyle MapLibre's default (white box, heavy black border)
-   to match the app chrome in both themes */
-.maplibregl-ctrl-scale {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-top: none !important;
-    border-radius: 0 0 6px 6px;
-    color: var(--text-dim) !important;
-    font-family: inherit !important;
-    font-size: 0.7rem !important;
-    font-variant-numeric: tabular-nums;
-    padding: 0.1rem 0.45rem !important;
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    box-sizing: border-box;
-}
-
-/* Alert popups */
-.maplibregl-popup-content {
-    background: var(--surface) !important;
-    color: var(--text) !important;
-    border: 1px solid var(--border);
-    border-radius: 10px !important;
-    padding: 0.75rem 1rem !important;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3) !important;
+.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-attrib.maplibregl-compact {
+    background: var(--paper) !important;
+    color: var(--ink-2) !important;
     font-family: inherit;
 }
 
-.maplibregl-popup-tip {
-    border-top-color: var(--surface) !important;
-    border-bottom-color: var(--surface) !important;
+.maplibregl-ctrl-attrib a {
+    color: var(--ink-2) !important;
+}
+
+:root[data-theme="dark"] .maplibregl-ctrl-attrib-button {
+    filter: invert(0.92);
+}
+
+/* Scale bar: MapLibre draws a white box with a heavy rule; a paper tab instead */
+.maplibregl-ctrl-scale {
+    background: var(--paper) !important;
+    border: 0 !important;
+    border-radius: 6px;
+    color: var(--ink-2) !important;
+    font-family: inherit !important;
+    font-size: 11px !important;
+    padding: 2px 8px !important;
+    box-sizing: border-box;
+}
+
+/* Popups: paper cards, no rule */
+.maplibregl-popup-content {
+    background: var(--paper) !important;
+    color: var(--ink) !important;
+    border-radius: 10px !important;
+    padding: 12px 16px !important;
+    box-shadow: none !important;
+    font-family: inherit;
+}
+
+.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+    border-bottom-color: var(--paper) !important;
+}
+
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+    border-top-color: var(--paper) !important;
+}
+
+.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+    border-right-color: var(--paper) !important;
+}
+
+.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+    border-left-color: var(--paper) !important;
 }
 
 .maplibregl-popup-close-button {
-    color: var(--text-dim) !important;
-    font-size: 1.1rem;
-    padding: 0.2rem 0.5rem;
+    color: var(--ink-2) !important;
+    font-size: 18px;
+    width: 28px;
+    height: 28px;
+    top: 4px !important;
+    right: 4px !important;
+    border-radius: 50%;
+}
+
+.maplibregl-popup-close-button:hover {
+    background: var(--wash) !important;
 }
 
 .alert-popup-title {
     font-weight: 700;
-    font-size: 0.9rem;
+    font-size: 15px;
+    font-variation-settings: 'wdth' 80;
     margin-right: 1rem;
 }
 
 .alert-popup-until {
-    color: var(--text-dim);
-    font-size: 0.8rem;
-    margin-top: 0.25rem;
+    color: var(--ink-2);
+    font-size: 13px;
+    margin-top: 4px;
 }
 
-/* Bottom panel spans the width on phones - lift scale bar and
-   attribution above it instead of hiding them underneath */
-@media (max-width: 640px) {
+/* Until the centered bar clears them, lift scale bar and attribution
+   above it instead of hiding them underneath */
+@media (max-width: 1400px) {
     .maplibregl-ctrl-bottom-left,
     .maplibregl-ctrl-bottom-right {
-        bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 72px);
+        bottom: calc(max(var(--pad), env(safe-area-inset-bottom)) + 60px);
     }
 }
 
 @media (max-width: 480px) {
-    .radar-updated {
+    .radar-updated,
+    .plumes-link {
         display: none;
+    }
+    .radar-controls {
+        padding-right: 14px;
     }
 }
 
@@ -543,50 +623,227 @@ body {
 .inspect {
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
-    font-size: 0.85rem;
+    gap: 2px;
+    font-size: 13px;
     margin-right: 0.8rem;
-    font-variant-numeric: tabular-nums;
 }
 
 .inspect-temp {
-    font-size: 1.05rem;
-    font-weight: 700;
+    font-size: 26px;
+    line-height: 1.05;
+    font-weight: 800;
+    font-variation-settings: 'wdth' 60;
 }
 
 .inspect-src {
-    margin-top: 0.25rem;
-    color: var(--text-dim);
-    font-size: 0.72rem;
+    margin-top: 4px;
+    color: var(--ink-2);
+    font-size: 11px;
 }
 
-/* Tap pin: accent dot, white rim, soft halo so it reads on any overlay */
+/* Tap pin: ink dot with a paper rim so it reads on any overlay */
 .inspect-pin {
-    width: 12px;
-    height: 12px;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
-    background: var(--accent);
-    border: 2px solid #fff;
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 28%, transparent), 0 1px 4px rgba(0, 0, 0, 0.45);
+    background: var(--ink);
+    border: 3px solid var(--paper);
     pointer-events: none;
 }
 
-/* Embedded in the overview page (radar.js EMBED). The overview supplies the
-   close button top-right; in the mini view only the map shows. */
+/* ============ Embedded in the overview (radar.js EMBED) ============
+   The overview supplies the close button top-right and no header. */
 body.embed .radar-header {
     display: none;
 }
 
 body.embed .radar-legend {
-    top: max(0.6rem, env(safe-area-inset-top));
+    top: max(var(--pad), env(safe-area-inset-top));
 }
 
 body.embed .maplibregl-ctrl-top-right {
-    top: calc(max(0.6rem, env(safe-area-inset-top)) + 52px);
+    top: calc(max(var(--pad), env(safe-area-inset-top)) + 44px);
+}
+
+/* Mini: one compact bar along the bottom, legend on the left, playback on
+   the right; the map keeps the rest. MapLibre's chrome stays out. */
+body.embed-mini {
+    --mini-gap: 8px;
+    --mini-legend: 300px;
+}
+
+body.embed-mini .maplibregl-control-container {
+    display: none;
 }
 
 body.embed-mini .radar-legend,
-body.embed-mini .radar-controls,
-body.embed-mini .maplibregl-control-container {
+body.embed-mini .radar-controls {
+    top: auto;
+    bottom: var(--mini-gap);
+    height: var(--bar-h);
+    border-radius: 999px;
+}
+
+body.embed-mini .radar-legend {
+    left: var(--mini-gap);
+    width: var(--mini-legend);
+    padding: 4px 14px 4px 4px;
+}
+
+body.embed-mini .legend-toggle,
+body.embed-mini .legend-caption {
     display: none;
+}
+
+body.embed-mini .legend-body {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    height: 100%;
+}
+
+body.embed-mini .overlay-select {
+    flex: none;
+    width: auto;
+    field-sizing: content;   /* the full name; without it the select sizes to its widest option */
+    height: 32px;
+    font-size: 13px;
+    padding: 0 24px 0 11px;
+    background-position: right 9px center;
+    text-overflow: ellipsis;
+}
+
+body.embed-mini .legend-grid {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    gap: 0 6px;
+    font-size: 9px;
+}
+
+body.embed-mini .legend-grid>span {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+body.embed-mini .legend-bar {
+    height: 5px;
+    border-radius: 3px;
+}
+
+body.embed-mini .legend-axis {
+    font-size: 9px;
+    height: 11px;
+    margin-top: 1px;
+}
+
+/* Rain over snow would stack four rows: the mini bar keeps the rain scale */
+body.embed-mini .legend-precip .legend-axis:last-child,
+body.embed-mini .legend-precip>span:nth-of-type(n+3) {
+    display: none;
+}
+
+body.embed-mini .legend-precip .legend-bar.snow {
+    display: none;
+}
+
+body.embed-mini .radar-controls {
+    left: calc(var(--mini-gap) * 2 + var(--mini-legend));
+    right: var(--mini-gap);
+    width: auto;
+    transform: none;
+    gap: 4px;
+    padding: 4px 16px 4px 4px;
+}
+
+body.embed-mini .play-btn {
+    width: 32px;
+    height: 32px;
+}
+
+body.embed-mini .play-btn::before {
+    width: 12px;
+    height: 12px;
+}
+
+body.embed-mini .speed-btn {
+    min-width: 40px;
+    height: 32px;
+    padding: 0 10px;
+    font-size: 14px;
+}
+
+/* Scrubber and time on one line */
+body.embed-mini .scrubber-wrap {
+    order: -1;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    margin: 0 6px 0 10px;
+}
+
+body.embed-mini .play-btn {
+    order: -2;
+}
+
+body.embed-mini #scrubber {
+    flex: 1;
+    min-width: 60px;
+    height: 20px;
+}
+
+body.embed-mini #scrubber::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+}
+
+body.embed-mini .scrubber-labels {
+    flex: none;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
+    min-height: 0;
+}
+
+body.embed-mini .frame-time {
+    font-size: 14px;
+}
+
+body.embed-mini .frame-badge {
+    font-size: 9px;
+    letter-spacing: 0.05em;
+}
+
+body.embed-mini .frame-badge.nowcast {
+    padding: 1px 5px;
+}
+
+/* Narrow: legend row on top, playback below; speed goes first */
+@media (max-width: 620px) {
+    body.embed-mini .radar-legend {
+        bottom: calc(var(--mini-gap) * 2 + var(--bar-h));
+        right: var(--mini-gap);
+        width: auto;
+    }
+
+    body.embed-mini .radar-controls {
+        left: var(--mini-gap);
+    }
+
+    body.embed-mini .speed-btn:not(.range-btn) {
+        display: none;
+    }
+}
+
+@media (max-width: 400px) {
+    body.embed-mini {
+        --mini-gap: 6px;
+    }
+
+    body.embed-mini .frame-badge {
+        display: none;
+    }
 }

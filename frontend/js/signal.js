@@ -26,10 +26,6 @@ export function rampColor(f) {
     return fmt(l[1], l[2], l[3]);
 }
 
-// Forecast numbers carry less ink where the ensemble disagrees: weight 850 at
-// a p10–p90 spread of 1.8 °F or less, 160 lighter per extra degree, floor 300
-export const certaintyWeight = spreadF => (spreadF == null ? 820 : Math.round(Math.max(300, Math.min(850, 850 - (spreadF - 1.8) * 160))));
-
 // Quantile q (0.1..0.9) of one REFS row {y (mean), p10, p25, p75, p90},
 // linear between the published levels; the mean stands in for the median
 const QL = [0.1, 0.25, 0.5, 0.75, 0.9];
@@ -111,9 +107,8 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     }
     const track = [];
     for (let q = 0; q <= 192; q++) { const s = q / 4, m = P(R(s), s); track.push(`${f1(m[0])},${f1(m[1])}`); }
-    // the end: an arrowhead pointing on, clockwise
-    const e1 = P(R(48) + W + 4, 48), e2 = P(R(48) - W - 4, 48), ta = A(48) + Math.PI / 2;
-    const tip = [C + R(48) * Math.cos(A(48)) + Math.cos(ta) * 20, C + R(48) * Math.sin(A(48)) + Math.sin(ta) * 20];
+    // round ends: the start turns in, the end turns out
+    const cap = s => { const [x, y] = P(R(s), s); return { x: f1(x), y: f1(y), r: W, tmp: temp(Math.min(47.9, Math.max(0.05, s))) }; };
 
     // rain: a drop on the band for each wet hour, sized by the amount (0.01 in to 0.25 in and up)
     const rain = [];
@@ -152,8 +147,7 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     const pastTemps = past.map(h => h.tmp).filter(v => v != null);
     return {
         segs, rain, wedges, wind, track: `M${track.join('L')}`,
-        tip: `M${f1(e1[0])},${f1(e1[1])} L${f1(tip[0])},${f1(tip[1])} L${f1(e2[0])},${f1(e2[1])} Z`,
-        end: future.length ? future[Math.min(future.length - 1, 24)].tmp : null,
+        caps: [cap(0), cap(48)],
         now: { x: f1(nowPt[0]), y: f1(nowPt[1]) },
         table: {
             pastRain: past.length ? pastRain : null, nextRain: ahead.reduce((a, r) => a + (r.qpf || 0), 0),
@@ -168,31 +162,6 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
 export function dropPath(x, y, r) {
     const p = (dx, dy) => `${f1(x + dx * r)},${f1(y + dy * r)}`;
     return `M${p(0, -1.75)} C${p(0.55, -0.95)} ${p(1, -0.35)} ${p(1, 0.15)} A${f1(r)},${f1(r)} 0 1 1 ${p(-1, 0.15)} C${p(-1, -0.35)} ${p(-0.55, -0.95)} ${p(0, -1.75)} Z`;
-}
-
-/**
- * Possible temperature paths inside the ensemble's spread: each path wanders
- * through quantile levels (an AR(1) walk in normal space, 0.8 correlation per
- * 3-hour step), so every path is a plausible trace and together they keep the
- * spread's p10–p90 range. Quantile levels outside 0.1..0.9 are clipped to
- * the published range. Deterministic for a given seed.
- *   rows: REFS rows {x (ms), y, p10, p25, p75, p90}; returns [[{t, v}]]
- */
-export function samplePaths(rows, n = 16, seed = 1) {
-    let a = seed >>> 0;
-    const rand = () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
-    const phi = z => 0.5 * (1 + Math.tanh(0.7978845608 * (z + 0.044715 * z * z * z)));   // normal CDF, tanh approximation
-    const rho = 0.8;
-    const out = [];
-    for (let k = 0; k < n; k++) {
-        let z = gauss();
-        out.push(rows.map((row, i) => {
-            if (i) z = rho * z + Math.sqrt(1 - rho * rho) * gauss();
-            return { t: row.x, v: quantile(row, Math.min(0.9, Math.max(0.1, phi(z)))) };
-        }));
-    }
-    return out;
 }
 
 // Angle-to-time for a pointer on the spiral: the lap is picked by radius
