@@ -186,10 +186,11 @@ export function sunPosition(ms, lat, lon) {
 export function sunTimes(ms, lat, lon) {
     const day = new Date(ms);
     day.setHours(0, 0, 0, 0);
+    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
     const f = t => sunAltitude(t, lat, lon) + 0.833;
     let rise = null, set = null;
     const step = 10 * 60000;
-    for (let t = day.getTime(); t < day.getTime() + 86400000; t += step) {
+    for (let t = day.getTime(); t < end; t += step) {
         const a = f(t), b = f(t + step);
         if (a < 0 && b >= 0 && rise === null) rise = t + step * a / (a - b);
         if (a >= 0 && b < 0 && set === null) set = t + step * a / (a - b);
@@ -347,10 +348,11 @@ export function nbmDays(daily) {
 export function sunCross(ms, lat, lon, h) {
     const day = new Date(ms);
     day.setHours(0, 0, 0, 0);
+    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
     const f = t => sunAltitude(t, lat, lon) - h;
     let up = null, down = null;
     const step = 10 * 60000;
-    for (let t = day.getTime(); t < day.getTime() + 86400000; t += step) {
+    for (let t = day.getTime(); t < end; t += step) {
         const a = f(t), b = f(t + step);
         if (a < 0 && b >= 0 && up === null) up = t + step * a / (a - b);
         if (a >= 0 && b < 0 && down === null) down = t + step * a / (a - b);
@@ -362,8 +364,9 @@ export function sunCross(ms, lat, lon, h) {
 export function solarNoon(ms, lat, lon) {
     const day = new Date(ms);
     day.setHours(0, 0, 0, 0);
+    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
     let best = { t: day.getTime(), alt: -90 };
-    for (let t = day.getTime(); t < day.getTime() + 86400000; t += 5 * 60000) {
+    for (let t = day.getTime(); t < end; t += 5 * 60000) {
         const alt = sunAltitude(t, lat, lon);
         if (alt > best.alt) best = { t, alt };
     }
@@ -417,10 +420,11 @@ export function moonAltitude(ms, lat, lon) {
 export function moonTimes(ms, lat, lon) {
     const day = new Date(ms);
     day.setHours(0, 0, 0, 0);
+    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
     const f = t => moonAltitude(t, lat, lon) - 0.125;
     let rise = null, set = null;
     const step = 10 * 60000;
-    for (let t = day.getTime(); t < day.getTime() + 86400000; t += step) {
+    for (let t = day.getTime(); t < end; t += step) {
         const a = f(t), b = f(t + step);
         if (a < 0 && b >= 0 && rise === null) rise = t + step * a / (a - b);
         if (a >= 0 && b < 0 && set === null) set = t + step * a / (a - b);

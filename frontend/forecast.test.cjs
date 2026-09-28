@@ -94,6 +94,13 @@ const assert = require('node:assert/strict');
     assert.ok(elong < 2, `full moon elongation off by ${elong.toFixed(2)} degrees`);
     const mt = f.moonTimes(Date.parse('2026-09-28T16:00:00Z'), 40.71, -74.0);
     assert.ok(mt.rise && mt.set, 'moon rises and sets on an ordinary day');
+    // DST days (run with TZ=America/New_York): the 23h day ends before the Mar 9 00:42 EDT moonrise,
+    // the 25h day keeps its last hour for the 23:14 EST one
+    if (new Date(2026, 2, 8, 12).getTimezoneOffset() === 240) {
+        assert.equal(f.moonTimes(new Date(2026, 2, 8, 12).getTime(), 40.71, -74.0).rise, null);
+        const nov = f.moonTimes(new Date(2026, 10, 1, 12).getTime(), 40.71, -74.0).rise;
+        assert.ok(nov && new Date(nov).getDate() === 1 && new Date(nov).getHours() === 23, 'Nov 1 moonrise in its last hour');
+    }
     assert.deepEqual(f.nextPhases(Date.parse('2026-09-28T00:00:00Z')).map(p => p.name), ['Last quarter', 'New moon', 'First quarter', 'Full moon']);
 
     // UV estimate: clear summer noon ~11, overcast cuts it, night is 0

@@ -264,7 +264,7 @@ document.addEventListener('click', e => {
     navigate(a.getAttribute('href'));
 });
 // Back/forward and a typed #hash both arrive as popstate
-window.addEventListener('popstate', route);
+window.addEventListener('popstate', () => route());
 
 // Header: transparent at the top of the page; scrolling down it gets out of
 // the way, scrolling up it comes back as a compact floating capsule. On a
@@ -737,7 +737,13 @@ function plumePanel(f) {
         chart.replaceChildren();
         trend.textContent = '';
         if (!d) { readout.textContent = 'Ensemble not available right now'; legend.replaceChildren(); return; }
-        const prevs = prev.map((p, k) => p && { label: `${cycles[k + 1].run}Z`, mean: p.Mean }).filter(Boolean);
+        // A total counts from each run's own start: older runs rebased to this run's first point, to compare
+        const since = p => {
+            if (!PLUMES[i].total) return p.Mean;
+            const at = interp(p.Mean, d.Mean[0].x);
+            return at == null ? null : p.Mean.map(m => ({ ...m, y: m.y - at + d.Mean[0].y }));
+        };
+        const prevs = prev.map((p, k) => { const mean = p && since(p); return mean && { label: `${cycles[k + 1].run}Z`, mean }; }).filter(Boolean);
         drawPlume(chart, readout, d, PLUMES[i], prevs);
         legend.replaceChildren(...[['mean', `${latest.run}Z mean`], ['det', 'RRFS'], ...prevs.map((p, k) => [`prev prev${k}`, p.label])]
             .map(([cls, text]) => { const e = el('span', `key key-${cls.split(' ')[0]} ${cls}`); e.append(el('i'), el('span', null, text)); return e; }));
@@ -763,7 +769,7 @@ function plumePanel(f) {
     // Snow: shown when the ensemble or the RRFS run has any; opened first when a real snowfall is on the way
     const snowBtn = tabs.children[3];
     snowBtn.hidden = true;
-    requestAnimationFrame(() => show(0));
+    requestAnimationFrame(() => { if (active < 0) show(0); });   // unless snow already opened first
     // Redraw at the new width after a resize or rotation
     let lastW = 0, timer = 0;
     new ResizeObserver(([e]) => {
@@ -775,7 +781,7 @@ function plumePanel(f) {
         if (!d || !sec.isConnected) return;
         const most = Math.max(...d.Mean.map(m => m.p90), ...d.RRFS.map(p => p.y ?? 0));
         if (most >= 0.1) snowBtn.hidden = false;
-        if (Math.max(...d.Mean.map(m => m.y)) >= 1 && active === 0) show(3);
+        if (Math.max(...d.Mean.map(m => m.y)) >= 1 && active <= 0) show(3);
     });
     return sec;
 }
@@ -1130,7 +1136,7 @@ function openDetail(key, place, f) {
                 ['Solar noon', `${t(noon.t)} · ${Math.round(noon.alt)}° high`],
                 ['Evening golden hour begins', t(gold.down)], ['Sunset', t(rs.down)], ['Civil dusk', t(civ.down)],
                 ['Nautical dusk', t(nau.down)], ['Astronomical dusk', t(ast.down)],
-                ['Daylight', len ? `${Math.floor(len / 3600000)}h ${Math.round(len % 3600000 / 60000)}m` : '--'],
+                ['Daylight', len ? `${Math.floor(Math.round(len / 60000) / 60)}h ${Math.round(len / 60000) % 60}m` : '--'],
                 ['Change from yesterday', change == null ? null : `${change < 0 ? '−' : '+'}${Math.floor(Math.abs(change) / 60)}m ${Math.abs(change) % 60}s`],
             ])];
         },
@@ -1441,9 +1447,10 @@ function route(keepScroll = false) {
     document.body.classList.remove('no-scroll');   // a full-screen radar left by back or refresh
     const y = scrollY;
     const m = location.hash.match(/^#p=(.+)$/);
-    if (m) renderPlace(decodeURIComponent(m[1]));
-    else renderHome();
-    if (keepScroll) requestAnimationFrame(() => window.scrollTo(0, y));   // once the redraw is in
+    const done = m ? renderPlace(decodeURIComponent(m[1])) : renderHome();
+    // once the redraw is in: a place page waits on its forecast before its sections exist
+    const seq = renderSeq;
+    if (keepScroll) Promise.resolve(done).then(() => { if (seq === renderSeq) requestAnimationFrame(() => window.scrollTo(0, y)); });
     else window.scrollTo(0, 0);
 }
 

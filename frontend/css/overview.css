@@ -1577,7 +1577,9 @@ body.editing .place-card > * {
     pointer-events: none;
 }
 
-body.editing .lifted {
+/* Its own card selector to outweigh the jiggle rule's */
+body.editing .lifted,
+body.editing .place-card.lifted:not([data-place="here"]) {
     cursor: grabbing;
     animation: none;
     transform: scale(1.02);
@@ -1661,7 +1663,8 @@ body.editing .lifted {
     }
 
     .place-view [data-section="daily"] .day {
-        grid-template-columns: 3.4rem 1.6rem 3.8rem 2.3rem minmax(60px, 1fr) 2.6rem;
+        /* The phone tracks: a 296px column 2 or 3 still fits the row */
+        grid-template-columns: 2.9rem 1.5rem 3.6rem 2.1rem minmax(0, 1fr) 2.1rem;
         gap: var(--s2);
         padding: var(--s3) var(--s4);
     }
@@ -1670,7 +1673,7 @@ body.editing .lifted {
 @media (prefers-reduced-motion: reduce) {
     body.editing [data-section],
     body.editing .tile,
-    body.editing .place-card {
+    body.editing .place-card:not([data-place="here"]) {
         animation: none;
     }
 }
