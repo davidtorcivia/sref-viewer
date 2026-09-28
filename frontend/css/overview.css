@@ -221,6 +221,8 @@ body { -webkit-tap-highlight-color: transparent; }
 }
 
 .sg-spiral { width: 100%; max-width: 700px; justify-self: end; padding-bottom: 12px; }
+/* the spiral's space is held while it waits for the observed lap, so nothing below moves */
+.sg-spiral:empty::before { content: ''; display: block; aspect-ratio: 600 / 612; }
 .spiral { display: block; width: 100%; height: auto; touch-action: pan-y; cursor: crosshair; user-select: none; }
 .spiral .sp-disk { fill: var(--paper); }
 :root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
@@ -239,6 +241,9 @@ body { -webkit-tap-highlight-color: transparent; }
 .spiral .sp-cursor { fill: var(--ink); stroke: var(--paper); stroke-width: 3; }
 
 @keyframes sp-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+/* the wind outside the lap arrives as the band finishes growing */
+.spiral .sp-late { animation: sp-late 0.6s ease-out 1.8s both; }
+@keyframes sp-late { from { opacity: 0; } }
 
 /* ============ Readouts ============ */
 .sg-cells {
@@ -623,6 +628,6 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .spiral .sp-sweep, .wx-sheet[open] { animation: none; }
+    .spiral .sp-sweep, .spiral .sp-late, .wx-sheet[open] { animation: none; }
     .sg-detail, .sg-day-more, .sg-strip-h { transition: none; }
 }

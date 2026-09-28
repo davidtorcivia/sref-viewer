@@ -425,17 +425,17 @@ async function renderPlace(place) {
         spiralBox.replaceChildren(spiralSvg(place, f, hist, !spiralBox.firstChild));
         if (hadFocus) spiralBox.firstChild.focus();
     };
-    drawSpiral();
+    // The spiral grows in its colors: its first drawing waits briefly for the observed lap;
+    // a history later than that fills in without growing again
+    const history = historyFor(place).then(h => { if (h && seq === renderSeq) hist = h; return h; });
+    Promise.race([history, new Promise(r => setTimeout(r, 1500))]).then(() => {
+        if (seq !== renderSeq) return;
+        drawSpiral();
+        history.then(h => { if (h && seq === renderSeq && !spiralBox.firstChild?.hasHistory) drawSpiral(); });
+    });
     onCursor(top, t => { showHero(hero, t, ens); });
     onCursor(cells.sec, t => cells.update(t, ens));
     alertsFor(place).then(al => { if (seq === renderSeq) alerts.replaceChildren(...al.map(alertRow)); });
-    // a history that lands mid-sweep waits for the sweep to finish
-    historyFor(place).then(async h => {
-        if (!h || seq !== renderSeq) return;
-        hist = h;
-        await spiralBox.firstChild?.swept;
-        if (seq === renderSeq) drawSpiral();
-    });
     ensembleFor(f).then(e => {
         if (!e || seq !== renderSeq) return;
         ens = e;
@@ -584,11 +584,11 @@ function spiralSvg(place, f, hist, sweep = true) {
     for (const r of sp.rain) {
         const fr = r.t < now ? null : f.upcoming.find(x => x.t === r.t);
         const amount = fr?.snowy && fr.snow >= 0.05 ? `${rain(fr.snow, true)} snow` : `${rain(r.inches)} ${snowAt(r.t) ? 'snow' : 'rain'}`;
-        svgTitle(svgEl('path', { d: r.d, class: 'sp-drop' }, s), `${dayName(r.t)} ${hourText(r.t)} · ${amount}${r.t < now ? ', observed' : ', forecast'}`);
+        svgTitle(svgEl('path', { d: r.d, class: 'sp-drop' }, g), `${dayName(r.t)} ${hourText(r.t)} · ${amount}${r.t < now ? ', observed' : ', forecast'}`);
     }
 
     for (const w of sp.wind) {
-        const a = svgEl('g', { class: 'sp-wind' }, s);
+        const a = svgEl('g', { class: sweep ? 'sp-wind sp-late' : 'sp-wind' }, s);
         svgEl('line', { x1: w.x, y1: w.y, x2: w.x2.toFixed(1), y2: w.y2.toFixed(1) }, a);
         svgEl('path', { d: w.head }, a);
         const fr = f.upcoming.find(x => x.t === w.t);
@@ -629,21 +629,7 @@ function spiralSvg(place, f, hist, sweep = true) {
         mark.setAttribute('cy', (C + R(sv) * Math.sin(a)).toFixed(1));
         mark.setAttribute('visibility', 'visible');
     });
-    // on first drawing the whole dial sweeps in clockwise from the top: a pie mask, a circle stroked as wide as the dial
-    if (sweep) {
-        const fid = `sf${Math.random().toString(36).slice(2, 8)}`, r = 150, C = SPIRAL.C;
-        const fm = svgEl('mask', { id: fid }, svgEl('defs', {}, s));
-        svgEl('path', { d: `M${C},${C - r} A${r},${r} 0 1 1 ${C - 0.01},${C - r}`, class: 'sp-sweep', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 2 * r + 4 }, fm);
-        const all = svgEl('g', { mask: `url(#${fid})` });
-        // done: the sweep ended (or never runs); a slow device gets 5 s at most
-        s.swept = new Promise(done => {
-            fm.firstChild.addEventListener('animationend', done);
-            if (matchMedia('(prefers-reduced-motion: reduce)').matches) done();
-            setTimeout(done, 5000);
-        }).then(() => all.removeAttribute('mask'));
-        for (const n of [...s.childNodes]) if (n.nodeName !== 'defs') all.append(n);
-        s.append(all);
-    }
+    s.hasHistory = !!hist;
     const last = f.upcoming[Math.min(f.upcoming.length - 1, 24)]?.t ?? now;
     if (f.upcoming.length) keyScrub(s, f.upcoming[0].t, last);
     scrubSurface(s, e => {
@@ -803,7 +789,8 @@ function readouts(place, f) {
         const feels = tmp != null && dpt != null ? feelsLike(tmp, dpt, wind ?? 0) : null;
         const diff = feels != null ? feels - tmp : 0;
         put('feels', 'Feels like', deg(feels), diff <= -2 ? 'The wind makes it feel colder.' : diff >= 2 ? 'Humidity makes it feel hotter.' : 'Same as the air temperature.', feels != null ? gauge(feels, 0, 110, [32, 80]) : null);
-        put('dew', 'Dew point', deg(dpt), dpt != null ? `Feels ${comfort(dpt).toLowerCase()}.` : '', dpt != null ? gauge(dpt, 30, 80, [55, 65]) : null);
+        const rh = tmp != null && dpt != null ? Math.round(humidity(tmp, dpt)) : null;
+        put('dew', 'Dew point', deg(dpt), dpt != null ? `Feels ${comfort(dpt).toLowerCase()}.${rh != null ? ` Relative humidity ${rh}%.` : ''}` : '', dpt != null ? gauge(dpt, 30, 80, [55, 65]) : null);
         const gustN = gusty(wind, gust) ? `gusts ${Math.round(U.toWind(gust, units))}` : '';
         if (Math.round(U.toWind(wind ?? 0, units)) === 0) put('wind', 'Wind', 'Calm', gustN ? `${gustN} ${U.windUnit(units)}` : '', null);
         else put('wind', dir != null ? `Wind, from ${compass(dir)}` : 'Wind', String(Math.round(U.toWind(wind, units))),
