@@ -1492,13 +1492,42 @@ def serving_run(src, tile):
     return None, True
 
 
+_now_pool = ThreadPoolExecutor(max_workers=6)   # RTMA downloads, apart from the preload queue
+
+
+def now_frame():
+    """The RTMA analysis to read "now" from without waiting on S3: the newest
+    one once its messages are on disk; until then the latest one that is,
+    while the newest downloads in the background (all messages at once). With
+    nothing cached at all, the newest is fetched in parallel and waited for."""
+    rtma = rtma_frames()
+    if not rtma:
+        return None
+    msgs = [m for n in NOW_FIELDS for m in FIELDS[n]['grib']]
+    ready = lambda d, c: all(os.path.exists(msg_path('rtma', d, c, 0, m)) for m in msgs)
+    newest = rtma[-1]
+    if ready(*newest):
+        return ('rtma', *newest, 0)
+    fetches = []
+    for m in msgs:
+        key = ('rtma', *newest, 0, m)
+        if key not in _warming:
+            _warming.add(key)
+            fetches.append(_now_pool.submit(warm_one, key))
+    cached = next((f for f in reversed(rtma[:-1]) if ready(*f)), None)
+    if cached:
+        return ('rtma', *cached, 0)
+    for fut in fetches:
+        fut.result()
+    return ('rtma', *newest, 0)
+
+
 def forecast(lat, lon):
     """Overview payload: observed now (RTMA), hourly RRFS series, daily NBM
     rows from today (New York), nearest plume station."""
-    rtma = rtma_frames()
+    frame = now_frame()
     now = None
-    if rtma:
-        frame = ('rtma', *rtma[-1], 0)
+    if frame:
         vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
         now = {**vals, 'time': frame_time(*frame)} if vals else None
     tile = forecast_tile(lat, lon)
