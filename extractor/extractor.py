@@ -592,10 +592,12 @@ def maybe_start_index_build():
     threading.Thread(target=build_station_index, daemon=True).start()
 
 
-# ============ Map fields (RRFS 2D grids -> Web Mercator tiles) ============
-# Deterministic RRFS fields fetched by .idx byte range from the 2dfld files
-# and cached as the original GRIB messages (already compressed, ~1-1.8MB
-# each), decoded on demand through a small in-memory LRU. Tiles are
+# ============ Map fields (RRFS / RTMA 2D grids -> Web Mercator tiles) ============
+# Deterministic RRFS forecasts (2dfld files) and RTMA rapid-update analyses
+# (observations, every 15 minutes) fetched by .idx byte range and cached as
+# the original GRIB messages (already compressed, ~1-6MB each), decoded on
+# demand through a small in-memory LRU. A frame is (source, date, cycle, fh):
+# RRFS cycles are 'HH', RTMA-RU analyses 'HHMM' with fh 0. Tiles are
 # rendered per request: every pixel bilinearly samples the raw messages on
 # the Lambert conformal grid, then the field's value() is applied and
 # banded into an indexed PNG (palette alpha included). A coarse lat/lon
@@ -605,9 +607,17 @@ def maybe_start_index_build():
 FIELD_URL = os.environ.get(
     'RRFS_FIELD_URL',
     'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.3km.f{fh}.conus.grib2')
+RTMA_URL = os.environ.get(
+    'RTMA_RU_URL',
+    'https://noaa-rtma-pds.s3.amazonaws.com/rtma2p5_ru.{date}/rtma2p5_ru.t{cycle}z.2dvaranl_ndfd.grb2')
 # 2dfld exists for 3-hourly cycles only: 00/06/12/18Z reach 84h, 03/09/15/21Z 18h.
-# mode -> forecast hour whose publication makes a cycle usable
-FIELD_MODES = {'now': 6, 'hourly': 36, 'extended': 84}
+# RRFS mode -> forecast hour whose publication makes a cycle usable ('now' is RTMA)
+FIELD_MODES = {'hourly': 36, 'extended': 84}
+RTMA_FRAMES = 9                             # 15-minute analyses: the last two hours
+RTMA_TTL_S = 120
+# Download every RRFS field's hours for the live cycles in the background, so
+# any overlay opens without waiting on S3 (~1GB per 6-hourly cycle); 0 = on demand
+FIELD_PRELOAD = os.environ.get('FIELD_PRELOAD', '1') == '1'
 FIELD_BBOX = (-134.0, 21.0, -61.0, 53.0)   # west, south, east, north: covers the CONUS grid
 FIELD_TILE = 512
 FIELD_MAXZOOM = 9                           # ~0.25km/px at 40N; MapLibre overzooms past this
@@ -615,9 +625,28 @@ FIELD_GRID_STEP = 0.1                       # degrees, numbers/particles grid
 FIELD_CYCLE_TTL_S = 600
 FIELD_DIR = os.path.join(CACHE_DIR, 'fields')
 CLOUD_LEVEL = 'entire atmosphere (considered as a single layer)'
-GRIB_LEVELS = {'TMP': '2 m above ground', 'DPT': '2 m above ground', 'UGRD': '10 m above ground',
-               'VGRD': '10 m above ground', 'TCDC': CLOUD_LEVEL, 'REFC': CLOUD_LEVEL,
-               'CSNOW': 'surface', 'SBTA1613': 'top of atmosphere'}
+ACCUMULATED = ('APCP', 'ASNOW')             # run totals from the cycle start
+
+
+def rrfs_step(msg, fh):
+    """The .idx step text: run totals read '0-N hour acc fcst', except whole
+    days, which read '0-1 day acc fcst' (instantaneous fields stay in hours)."""
+    if msg in ACCUMULATED:
+        return f'0-{fh // 24} day acc fcst' if fh % 24 == 0 else f'0-{fh} hour acc fcst'
+    return 'anl' if fh == 0 else f'{fh} hour fcst'
+# source -> URL template, GRIB level per message name, idx step for a message and hour
+SOURCES = {
+    'rrfs': {'url': FIELD_URL,
+             'levels': {'TMP': '2 m above ground', 'DPT': '2 m above ground', 'UGRD': '10 m above ground',
+                        'VGRD': '10 m above ground', 'TCDC': CLOUD_LEVEL, 'REFC': CLOUD_LEVEL,
+                        'CSNOW': 'surface', 'SBTA1613': 'top of atmosphere', 'GUST': 'surface',
+                        'APCP': 'surface', 'ASNOW': 'surface'},
+             'step': rrfs_step},
+    'rtma': {'url': RTMA_URL,
+             'levels': {'TMP': '2 m above ground', 'DPT': '2 m above ground', 'UGRD': '10 m above ground',
+                        'VGRD': '10 m above ground', 'GUST': '10 m above ground', 'TCDC': CLOUD_LEVEL},
+             'step': lambda m, fh: 'anl'},
+}
 K_TO_F = lambda k: (k - 273.15) * 9 / 5 + 32
 
 # TWC radar colors per 5 dBZ from 0 dBZ; radar.css draws the legend bars from the same hexes
@@ -639,20 +668,21 @@ def radar_stops():
 # interpolated into `band`-wide steps; legend unit/label/ticks; `grid` feeds
 # map numbers. `layers` composites the first field over the second.
 FIELDS = {
-    'tmp': {'grib': ['TMP'], 'value': K_TO_F, 'band': 2, 'grid': True,
+    'tmp': {'grib': ['TMP'], 'value': K_TO_F, 'band': 2, 'grid': {'scale': 1, 'suffix': '°'},
             'unit': '°F', 'label': '2 m temperature', 'ticks': [0, 32, 50, 70, 90],
             'stops': [(-40, (255, 255, 255, 255)), (-20, (227, 198, 247, 255)), (0, (123, 91, 214, 255)),
                       (10, (62, 70, 201, 255)), (20, (47, 127, 224, 255)), (32, (94, 198, 242, 255)),
                       (40, (111, 211, 168, 255)), (50, (127, 211, 90, 255)), (60, (216, 224, 74, 255)),
                       (70, (245, 197, 66, 255)), (80, (242, 139, 48, 255)), (90, (226, 74, 42, 255)),
                       (100, (179, 31, 54, 255)), (120, (122, 16, 48, 255))]},
-    'dpt': {'grib': ['DPT'], 'value': K_TO_F, 'band': 2, 'grid': True,
+    'dpt': {'grib': ['DPT'], 'value': K_TO_F, 'band': 2, 'grid': {'scale': 1, 'suffix': '°'},
             'unit': '°F', 'label': '2 m dew point', 'ticks': [10, 30, 50, 60, 70],
             'stops': [(-10, (120, 85, 55, 255)), (20, (160, 125, 85, 255)), (35, (195, 170, 120, 255)),
                       (45, (170, 200, 120, 255)), (55, (90, 190, 90, 255)), (60, (40, 160, 80, 255)),
                       (65, (30, 150, 150, 255)), (70, (40, 110, 200, 255)), (75, (100, 60, 190, 255)),
                       (80, (170, 50, 170, 255))]},
-    'wind': {'grib': ['UGRD', 'VGRD'], 'value': lambda u, v: np.hypot(u, v) * 2.23694, 'band': 2, 'grid': True,
+    'wind': {'grib': ['UGRD', 'VGRD'], 'value': lambda u, v: np.hypot(u, v) * 2.23694, 'band': 2,
+             'grid': {'scale': 1, 'suffix': '', 'peak': True},
              'unit': 'mph', 'label': '10 m wind speed', 'ticks': [10, 20, 30, 40, 50],
              'stops': [(0, (70, 110, 170, 0)), (5, (70, 110, 170, 70)), (10, (40, 150, 160, 150)),
                        (20, (80, 190, 90, 220)), (30, (230, 210, 50, 235)), (40, (240, 140, 40, 245)),
@@ -670,17 +700,43 @@ FIELDS = {
                       (260, (180, 186, 196, 160)), (275, (140, 146, 156, 90)), (285, (120, 125, 135, 0)),
                       (330, (120, 125, 135, 0))]},
     'both': {'layers': ['refc', 'sat']},
+    'gust': {'grib': ['GUST'], 'value': lambda g: g * 2.23694, 'band': 2,
+             'grid': {'scale': 1, 'suffix': '', 'peak': True},
+             'unit': 'mph', 'label': 'Wind gusts', 'ticks': [10, 20, 30, 40, 50],
+             'stops': [(0, (70, 110, 170, 0)), (10, (70, 110, 170, 70)), (20, (40, 150, 160, 150)),
+                       (30, (80, 190, 90, 220)), (40, (230, 210, 50, 235)), (50, (240, 140, 40, 245)),
+                       (60, (220, 50, 50, 255)), (80, (170, 30, 160, 255))]},
+    # Run totals since the cycle started, banded on sqrt(inches) so light amounts get resolution
+    'qpf': {'grib': ['APCP'], 'value': lambda a: a / 25.4, 'band': 0.02, 'sqrt': True, 'acc': True,
+            'grid': {'scale': 10, 'suffix': '"', 'peak': True},
+            'unit': 'in', 'label': 'Total precipitation since run start', 'ticks': [0.1, 1, 2, 4, 8],
+            'stops': [(0, (0, 0, 0, 0)), (0.0099, (164, 220, 160, 0)), (0.01, (164, 220, 160, 170)),
+                      (0.1, (100, 200, 110, 200)), (0.25, (40, 160, 80, 215)), (0.5, (20, 120, 70, 225)),
+                      (1, (245, 225, 60, 235)), (1.5, (245, 165, 40, 240)), (2, (230, 90, 40, 245)),
+                      (3, (195, 35, 60, 250)), (4, (150, 40, 160, 250)), (6, (110, 70, 205, 255)),
+                      (10, (225, 200, 255, 255))]},
+    'snowtot': {'grib': ['ASNOW'], 'value': lambda m: m * 39.37, 'band': 0.05, 'sqrt': True, 'acc': True,
+                'grid': {'scale': 1, 'suffix': '"', 'peak': True},
+                'unit': 'in', 'label': 'Total snowfall since run start', 'ticks': [1, 3, 6, 12, 24],
+                'stops': [(0, (0, 0, 0, 0)), (0.099, (200, 225, 255, 0)), (0.1, (200, 225, 255, 190)),
+                          (1, (130, 180, 240, 215)), (3, (70, 120, 220, 235)), (6, (90, 60, 200, 245)),
+                          (12, (170, 60, 190, 250)), (24, (230, 120, 200, 255)), (48, (255, 220, 245, 255))]},
 }
 
-_field_cycle = {}   # mode -> (checked at, (date, cycle))
-_field_cycle_lock = threading.Lock()
+_newest = {}        # probe key -> (checked at, (date, cycle))
+_newest_lock = threading.Lock()
 _warm_pool = ThreadPoolExecutor(max_workers=4)
-_warming = set()    # (date, cycle, fh, msg) already queued
+_warming = set()    # (src, date, cycle, fh, msg) already queued
+
+
+def band_axis(spec, v):
+    """Where a value sits on the field's banding axis: sqrt for totals, else the value."""
+    return np.sqrt(np.maximum(v, 0)) if spec.get('sqrt') else v
 
 
 def field_palette(spec):
     """RGBA per band from the first stop up."""
-    vs = [v for v, _ in spec['stops']]
+    vs = band_axis(spec, np.array([v for v, _ in spec['stops']], float))
     bands = np.arange(vs[0], vs[-1], spec['band']) + spec['band'] / 2
     return np.stack([np.interp(bands, vs, [c[k] for _, c in spec['stops']]) for k in range(4)], 1).astype(np.uint8)
 
@@ -753,7 +809,8 @@ def paint(spec, arrays, p, lat, lon):
     """(palette indices, palette) of a field at lat/lon; index 255 off the grid."""
     vals, inside = sample(arrays, p, lat, lon)
     palette = field_palette(spec)
-    band = np.clip((spec['value'](*vals) - spec['stops'][0][0]) // spec['band'], 0, len(palette) - 1)
+    lo = band_axis(spec, spec['stops'][0][0])
+    band = np.clip((band_axis(spec, spec['value'](*vals)) - lo) // spec['band'], 0, len(palette) - 1)
     return np.where(inside, band, 255).astype(np.uint8), palette
 
 
@@ -775,65 +832,105 @@ def indexed_png(pixels, palette):
     plte[:len(palette)] = palette
     return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 3, 0, 0, 0))
             + chunk(b'PLTE', plte[:, :3].tobytes()) + chunk(b'tRNS', plte[:, 3].tobytes())
-            + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
+            + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
 
-def field_cycle(mode):
-    """Newest cycle with the mode's marker hour published (cached). One
-    thread refreshes while the others keep the cached answer; a probe S3
-    could not answer keeps it too, since falling back a cycle would purge
-    the newer one."""
-    at, value = _field_cycle.get(mode, (0, (None, None)))
-    if time.time() - at < FIELD_CYCLE_TTL_S or not _field_cycle_lock.acquire(blocking=value[0] is None):
+def newest_published(key, candidates, ttl):
+    """First (date, cycle) of candidates [(date, cycle, url)] whose URL exists,
+    cached for ttl. One thread refreshes while the others keep the cached
+    answer; a probe S3 could not answer keeps it too, since falling back a
+    cycle would purge the newer one."""
+    at, value = _newest.get(key, (0, (None, None)))
+    if time.time() - at < ttl or not _newest_lock.acquire(blocking=value[0] is None):
         return value
     try:
         # Another thread may have refreshed while this one waited for the lock
-        at, value = _field_cycle.get(mode, (0, (None, None)))
-        if time.time() - at < FIELD_CYCLE_TTL_S:
+        at, value = _newest.get(key, (0, (None, None)))
+        if time.time() - at < ttl:
             return value
-        now = time.time()
         found = (None, None)
-        for back in range(1, 13):
-            t = time.gmtime(now - back * 3600)
-            if t.tm_hour % 3:
-                continue
-            date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-            ok = http_exists(FIELD_URL.format(date=date, cycle=cycle, fh=f'{FIELD_MODES[mode]:03d}') + '.idx')
+        for date, cycle, url in candidates:
+            ok = http_exists(url)
             if ok is None:
-                _field_cycle[mode] = (now - FIELD_CYCLE_TTL_S + 60, value)   # retry in a minute
+                _newest[key] = (time.time() - ttl + 60, value)   # retry in a minute
                 return value
             if ok:
                 found = (date, cycle)
                 break
-        _field_cycle[mode] = (time.time(), found)
+        _newest[key] = (time.time(), found)
         return found
     finally:
-        _field_cycle_lock.release()
+        _newest_lock.release()
 
 
-def cycle_age_h(date, cycle):
-    return int((time.time() - calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H'))) // 3600)
+def field_cycle(mode):
+    """Newest RRFS cycle with the mode's marker hour published."""
+    now = time.time()
+    cands = []
+    for back in range(1, 13):
+        t = time.gmtime(now - back * 3600)
+        if t.tm_hour % 3 == 0:
+            date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
+            cands.append((date, cycle, FIELD_URL.format(date=date, cycle=cycle, fh=f'{FIELD_MODES[mode]:03d}') + '.idx'))
+    return newest_published(mode, cands, FIELD_CYCLE_TTL_S)
 
 
-def mode_hours(mode, date, cycle):
-    if mode == 'hourly':
-        return list(range(0, 37))
-    if mode == 'extended':
-        return list(range(0, 85, 3))
-    # 'now' mirrors the radar loop: two hours back to one ahead
-    age = cycle_age_h(date, cycle)
-    return list(range(max(0, age - 2), min(age + 1, 18) + 1))
+def rtma_frames():
+    """(date, 'HHMM') of the last RTMA_FRAMES rapid-update analyses, oldest first."""
+    now = int(time.time()) // 900 * 900
+    cands = []
+    for back in range(0, 5):   # published ~17 minutes after valid time
+        t = time.gmtime(now - back * 900)
+        date, cycle = time.strftime('%Y%m%d', t), time.strftime('%H%M', t)
+        cands.append((date, cycle, RTMA_URL.format(date=date, cycle=cycle) + '.idx'))
+    date, cycle = newest_published('rtma', cands, RTMA_TTL_S)
+    if not date:
+        return []
+    t0 = calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H%M'))
+    return [(time.strftime('%Y%m%d', time.gmtime(t)), time.strftime('%H%M', time.gmtime(t)))
+            for t in range(t0 - (RTMA_FRAMES - 1) * 900, t0 + 1, 900)]
 
 
-def live_cycles():
-    return {c for c in map(field_cycle, FIELD_MODES) if c[0]}
+def frame_time(src, date, cycle, fh):
+    fmt = '%Y%m%d%H%M' if src == 'rtma' else '%Y%m%d%H'
+    return calendar.timegm(time.strptime(date + cycle, fmt)) + fh * 3600
+
+
+def field_msgs(name):
+    return [m for n in FIELDS[name].get('layers', [name]) for m in FIELDS[n]['grib']]
+
+
+def has_obs(name):
+    return all(m in SOURCES['rtma']['levels'] for m in field_msgs(name))
+
+
+def mode_frames(mode, name):
+    """[(src, date, cycle, fh)] a mode shows for a field, oldest first."""
+    if mode == 'now':
+        return [('rtma', d, c, 0) for d, c in rtma_frames()] if has_obs(name) else []
+    date, cycle = field_cycle(mode)
+    if not date:
+        return []
+    last = FIELD_MODES[mode]
+    return [('rrfs', date, cycle, fh) for fh in range(1 if FIELDS[name].get('acc') else 0, last + 1)]
+
+
+def live_frames():
+    """Every (src, date, cycle) some mode currently serves."""
+    live = {('rrfs', d, c) for d, c in map(field_cycle, FIELD_MODES) if d}
+    return live | {('rtma', d, c) for d, c in rtma_frames()}
+
+
+def frame_dir(src, date, cycle):
+    return os.path.join(FIELD_DIR, f'{src}{date}{cycle}')
 
 
 def purge_fields():
-    """Drop every cycle no mode serves, and anything but GRIB messages
-    (older cache formats, abandoned writes) inside the live ones."""
+    """Drop every cycle/analysis no mode serves, and anything but GRIB
+    messages (older cache formats, abandoned writes) inside the live ones."""
     global _warming
-    keep = {f'{d}{c}' for d, c in live_cycles()}
+    live = live_frames()
+    keep = {os.path.basename(frame_dir(*f)) for f in live}
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
         if old not in keep:
             shutil.rmtree(os.path.join(FIELD_DIR, old), ignore_errors=True)
@@ -845,26 +942,54 @@ def purge_fields():
                     os.remove(f.path)
             except FileNotFoundError:
                 pass   # renamed into place or removed by a concurrent purge
-    _warming = {k for k in list(_warming) if f'{k[0]}{k[1]}' in keep}
+    _warming = {k for k in list(_warming) if k[:3] in live}
 
 
-def fetch_msg(date, cycle, fh, msg):
-    """Path of one cached GRIB message; None if that hour is not published."""
-    path = os.path.join(FIELD_DIR, f'{date}{cycle}', f'{msg}_f{fh:03d}.grib2')
+def msg_path(src, date, cycle, fh, msg):
+    return os.path.join(frame_dir(src, date, cycle), f'{msg}_f{fh:03d}.grib2')
+
+
+def fetch_msg(src, date, cycle, fh, msg):
+    """Path of one cached GRIB message; None if that frame is not published."""
+    path = msg_path(src, date, cycle, fh, msg)
     with file_lock(path):
         if not os.path.exists(path):
-            raws = fetch_idx_fields(FIELD_URL.format(date=date, cycle=cycle, fh=f'{fh:03d}'),
-                                    [(msg, GRIB_LEVELS[msg])], 'anl' if fh == 0 else f'{fh} hour fcst')
+            s = SOURCES[src]
+            raws = fetch_idx_fields(s['url'].format(date=date, cycle=cycle, fh=f'{fh:03d}'),
+                                    [(msg, s['levels'][msg])], s['step'](msg, fh))
             if raws is None:
                 return None
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path + '.tmp', 'wb') as fp:
-                fp.write(raws[0])
+                fp.write(ccsds(raws[0]) if src == 'rtma' else raws[0])
             os.replace(path + '.tmp', path)
     return path
 
 
-@functools.lru_cache(maxsize=32)   # ~7.6MB each
+def ccsds(msg):
+    """RTMA ships simple-packed (~6MB a message); CCSDS repacking is lossless
+    and about half the size. Kept only if it decodes to identical values."""
+    g = ec.codes_new_from_message(msg)
+    try:
+        h = ec.codes_clone(g)
+        try:
+            ec.codes_set(h, 'packingType', 'grid_ccsds')
+            out = ec.codes_get_message(h)
+        finally:
+            ec.codes_release(h)
+        back = ec.codes_new_from_message(out)
+        try:
+            same = np.array_equal(ec.codes_get_values(back), ec.codes_get_values(g))
+        finally:
+            ec.codes_release(back)
+        return out if same and len(out) < len(msg) else msg
+    except ec.GribInternalError:
+        return msg
+    finally:
+        ec.codes_release(g)
+
+
+@functools.lru_cache(maxsize=24)   # 7.6MB (RRFS) to 15MB (RTMA) each
 def decoded(path):
     with open(path, 'rb') as fp:
         g = ec.codes_new_from_message(fp.read())
@@ -879,20 +1004,25 @@ class NotPublished(Exception):
     pass
 
 
-def field_arrays(name, date, cycle, fh):
-    paths = [fetch_msg(date, cycle, fh, m) for m in FIELDS[name]['grib']]
+def field_arrays(name, frame, cached_only=False):
+    """Decoded messages of one field for a frame, fetching unless cached_only."""
+    if cached_only:
+        paths = [msg_path(*frame, m) for m in FIELDS[name]['grib']]
+        if not all(map(os.path.exists, paths)):
+            raise NotPublished
+    else:
+        paths = [fetch_msg(*frame, m) for m in FIELDS[name]['grib']]
     if None in paths:
         raise NotPublished
     got = [decoded(path) for path in paths]
     return [a for a, _ in got], got[0][1]
 
 
-def tile_png(name, date, cycle, fh, z, x, y):
+def tile_png(name, frame, z, x, y):
     t = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
     lon = ((x + t) / 2 ** z * 360 - 180)[None, :]
     lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + t) / 2 ** z))))[:, None]
-    parts = [paint(FIELDS[n], *field_arrays(n, date, cycle, fh), lat, lon)
-             for n in FIELDS[name].get('layers', [name])]
+    parts = [paint(FIELDS[n], *field_arrays(n, frame), lat, lon) for n in FIELDS[name].get('layers', [name])]
     return indexed_png(*(composite(*parts) if len(parts) > 1 else parts[0]))
 
 
@@ -902,30 +1032,79 @@ def grid_axes():
 
 
 @functools.lru_cache(maxsize=24)
-def field_grid(name, date, cycle, fh):
-    """gzip'd int8 lat/lon grid (rows north to south), -128 off the grid:
-    the field value (°F), or for wind earth-relative u then v in 0.5 m/s."""
-    arrays, p = field_arrays(name, date, cycle, fh)
+def field_grid(name, frame):
+    """int8 lat/lon grid (rows north to south), -128 off the grid: the field
+    value times its grid scale, or for wind earth-relative u then v in 0.5 m/s.
+    Sent as pack_grid bytes."""
+    arrays, p = field_arrays(name, frame)
     lat, lon = grid_axes()
     vals, inside = sample(arrays, p, lat[:, None], lon[None, :])
     if name == 'wind':
         out, scale = earth_winds(p, *vals, lon[None, :]), 2
     else:
-        out, scale = [FIELDS[name]['value'](*vals)], 1
+        out, scale = [FIELDS[name]['value'](*vals)], FIELDS[name]['grid']['scale']
     q = [np.where(inside, np.clip(np.rint(a * scale), -127, 127), -128).astype(np.int8) for a in out]
-    return gzip.compress(np.concatenate([a.ravel() for a in q]).tobytes(), 6)
+    return pack_grid(np.concatenate([a.ravel() for a in q]))
 
 
-def warm_field(name, date, cycle, hours):
-    """Queue every hour's messages in the background, nearest to now first,
+def pack_grid(flat):
+    """gzip of successive int8 differences (wrapping): smooth fields become
+    runs of small numbers, ~10% smaller than gzip alone. radar.js loadGrid undoes it."""
+    return gzip.compress(np.diff(flat, prepend=np.int8(0)).astype(np.int8).tobytes(), 9)
+
+
+# Tap-to-inspect: these always (fetched if needed), the rest only when cached
+POINT_BASE = ('tmp', 'dpt', 'wind')
+POINT_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud', 'refc', 'qpf', 'snowtot')
+
+
+def point_values(frame, lat, lon, overlay):
+    """Every inspectable field's value at one point, for the popup."""
+    out = {}
+    for name in POINT_FIELDS:
+        if not all(m in SOURCES[frame[0]]['levels'] for m in FIELDS[name]['grib']) \
+                or FIELDS[name].get('acc') and frame[3] == 0:
+            continue
+        try:
+            arrays, p = field_arrays(name, frame, cached_only=name not in POINT_BASE and name != overlay)
+        except NotPublished:
+            continue
+        vals, inside = sample(arrays, p, np.array([lat]), np.array([lon]))
+        if not inside[0]:
+            return {}
+        if name == 'wind':
+            u, v = earth_winds(p, *vals, lon)
+            out['wind'] = {'mph': round(float(np.hypot(u, v)[0]) * 2.23694, 1),
+                           'from': round(float(np.degrees(np.arctan2(-u, -v))[0]) % 360)}
+        elif name == 'refc':
+            out['refc'] = {'dbz': round(float(vals[0][0]), 1), 'snow': bool(vals[1][0] >= 0.5)}
+        else:
+            out[name] = round(float(FIELDS[name]['value'](*vals)[0]), 2)
+    return out
+
+
+def warm_field(name, frames):
+    """Queue every frame's messages in the background, nearest to now first,
     so tiles for the rest of the loop render without waiting on S3."""
-    msgs = [m for n in FIELDS[name].get('layers', [name]) for m in FIELDS[n]['grib']]
-    age = cycle_age_h(date, cycle)
-    for fh in sorted(hours, key=lambda h: abs(h - age)):
-        for m in msgs:
-            if (date, cycle, fh, m) not in _warming:
-                _warming.add((date, cycle, fh, m))
-                _warm_pool.submit(fetch_msg, date, cycle, fh, m)
+    now = time.time()
+    for frame in sorted(frames, key=lambda f: abs(frame_time(*f) - now)):
+        for m in field_msgs(name):
+            if frame + (m,) not in _warming:
+                _warming.add(frame + (m,))
+                _warm_pool.submit(fetch_msg, *frame, m)
+
+
+def preload_fields():
+    """Keep every RRFS field of the live cycles downloaded (FIELD_PRELOAD)."""
+    while True:
+        try:
+            purge_fields()
+            for name in FIELDS:
+                if 'layers' not in FIELDS[name]:
+                    warm_field(name, sorted({f for mode in FIELD_MODES for f in mode_frames(mode, name)}))
+        except Exception as err:  # noqa: BLE001 - keep the loop alive
+            print(f'[PRELOAD] {err}', flush=True)
+        time.sleep(FIELD_CYCLE_TTL_S)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -966,45 +1145,54 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == '/fields':
             q = parse_qs(url.query)
             mode, field = q.get('mode', ['hourly'])[0], q.get('field', [''])[0]
-            if mode not in FIELD_MODES:
-                return self.send_json(400, {'error': 'Invalid mode'})
-            date, cycle = field_cycle(mode)
-            if not date:
-                return self.send_json(503, {'error': 'No RRFS cycle available'})
-            hours = mode_hours(mode, date, cycle)
+            if mode not in ('now', *FIELD_MODES) or field not in FIELDS:
+                return self.send_json(400, {'error': 'Invalid mode/field'})
+            frames = mode_frames(mode, field)
+            if not frames:
+                return self.send_json(503, {'error': 'No frames available'})
             purge_fields()
-            if field in FIELDS:
-                warm_field(field, date, cycle, hours)
-            legends = {k: {'stops': v['stops'], 'unit': v['unit'], 'label': v['label'], 'ticks': v['ticks']}
-                       for k, v in FIELDS.items() if 'ticks' in v}
+            warm_field(field, frames)
+            legends = {k: {'stops': v['stops'], 'unit': v['unit'], 'label': v['label'], 'ticks': v['ticks'],
+                           'sqrt': bool(v.get('sqrt'))} for k, v in FIELDS.items() if 'ticks' in v}
             lat, lon = grid_axes()
-            return self.send_json(200, {'date': date, 'cycle': cycle, 'hours': hours,
-                                        'bounds': FIELD_BBOX, 'tile': FIELD_TILE, 'maxzoom': FIELD_MAXZOOM,
-                                        'grid': {'west': FIELD_BBOX[0], 'north': FIELD_BBOX[3], 'step': FIELD_GRID_STEP,
-                                                 'nx': len(lon), 'ny': len(lat),
-                                                 'fields': [k for k, v in FIELDS.items() if v.get('grid')]},
-                                        'fields': legends})
-        m = re.fullmatch(r'/fields/([a-z]+)\.(png|grid)', url.path)
+            return self.send_json(200, {
+                'frames': [{'src': f[0], 'date': f[1], 'cycle': f[2], 'fh': f[3], 'time': frame_time(*f)} for f in frames],
+                'bounds': FIELD_BBOX, 'tile': FIELD_TILE, 'maxzoom': FIELD_MAXZOOM,
+                'grid': {'west': FIELD_BBOX[0], 'north': FIELD_BBOX[3], 'step': FIELD_GRID_STEP,
+                         'nx': len(lon), 'ny': len(lat),
+                         'fields': {k: v['grid'] for k, v in FIELDS.items() if v.get('grid')}},
+                'fields': legends})
+        m = re.fullmatch(r'/fields/([a-z]+)\.(png|grid|point)', url.path)
         if m and m.group(1) in FIELDS:
             name, kind = m.groups()
             q = parse_qs(url.query)
-            date, cycle, fh, z, x, y = (q.get(k, ['0'])[0] for k in ('date', 'cycle', 'fh', 'z', 'x', 'y'))
-            if not re.fullmatch(r'\d{8}', date) or not re.fullmatch(r'\d{2}', cycle) \
+            src, date, cycle, fh, z, x, y = (q.get(k, ['0'])[0] for k in ('src', 'date', 'cycle', 'fh', 'z', 'x', 'y'))
+            if src not in SOURCES or not re.fullmatch(r'\d{8}', date) or not re.fullmatch(r'\d{2}|\d{4}', cycle) \
                     or not all(v.isdigit() for v in (fh, z, x, y)) or int(fh) > 84 or int(z) > FIELD_MAXZOOM \
                     or int(x) >= 2 ** int(z) or int(y) >= 2 ** int(z) or (kind == 'grid' and not FIELDS[name].get('grid')):
                 return self.send_json(400, {'error': 'Invalid request'})
-            # Live cycles only: purge_fields drops the rest
-            if (date, cycle) not in live_cycles():
-                return self.send_json(404, {'error': 'Not a live cycle'})
+            frame = (src, date, cycle, int(fh))
+            # Live frames only: purge_fields drops the rest
+            if frame[:3] not in live_frames():
+                return self.send_json(404, {'error': 'Not a live frame'})
+            if kind == 'point':
+                try:
+                    lat, lon = float(q.get('lat', ['nan'])[0]), float(q.get('lon', ['nan'])[0])
+                except ValueError:
+                    lat = lon = math.nan
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    return self.send_json(400, {'error': 'Invalid lat/lon'})
             try:
+                if kind == 'point':
+                    return self.send_json(200, point_values(frame, lat, lon, name))
                 if kind == 'png':
-                    body, ctype = tile_png(name, date, cycle, int(fh), int(z), int(x), int(y)), 'image/png'
+                    body, ctype = tile_png(name, frame, int(z), int(x), int(y)), 'image/png'
                 else:
-                    body, ctype = field_grid(name, date, cycle, int(fh)), 'application/octet-stream'
+                    body, ctype = field_grid(name, frame), 'application/octet-stream'
             except NotPublished:
                 return self.send_json(404, {'error': 'Not published'})
             except Exception as err:  # noqa: BLE001 - report any failure upstream
-                print(f'[FIELD] {name} {date}{cycle} f{fh}: {err}', flush=True)
+                print(f'[FIELD] {name} {frame}: {err}', flush=True)
                 return self.send_json(502, {'error': str(err)})
             self.send_response(200)
             self.send_header('Content-Type', ctype)
@@ -1043,5 +1231,5 @@ if __name__ == '__main__':
     print(f'RRFS/REFS extractor on :{PORT}', flush=True)
     print(f'Soundings: {TAR_URL}\nEnsemble:  {GRIB_URL}', flush=True)
     maybe_start_index_build()
-    threading.Thread(target=purge_fields, daemon=True).start()
+    threading.Thread(target=preload_fields if FIELD_PRELOAD else purge_fields, daemon=True).start()
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()

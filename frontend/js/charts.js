@@ -320,11 +320,16 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
     chart.$param = param;
     chart.$theme = theme;
 
-    // Lifting the finger returns the readout to "now"
+    // Lifting the finger returns the readout to "now" after a short hold
+    canvas.ontouchstart = () => clearTimeout(chart.$hold);
     canvas.ontouchend = canvas.ontouchcancel = () => {
-        chart.$scrubX = null;
-        renderReadout(chart);
-        chart.draw();
+        clearTimeout(chart.$hold);
+        chart.$hold = setTimeout(() => {
+            if (!chart.canvas) return;   // destroyed meanwhile (station/model switch)
+            chart.$scrubX = null;
+            renderReadout(chart);
+            chart.draw();
+        }, HOLD_MS);
     };
     chart.draw();
     return chart;
@@ -380,6 +385,11 @@ const clampTo = (x, [lo, hi]) => Math.min(Math.max(x, lo), hi);
 /** Rest state shows the forecast at "now" (clamped into the run) */
 const restX = chart => clampTo(snap(Date.now()), dataRange(chart));
 
+// Radar page overlay for each plume chart (3-hour precip maps best to simulated radar)
+const MAP_LAYER = { 'Total-SNO': 'snow', '3hrly-SNO': 'snow', 'Total-QPF': 'precip', '3hrly-QPF': 'radar',
+    '3hrly-TMP': 'temp', '3h-10mWND': 'wind' };
+const HOLD_MS = 3000;   // readout stays on the scrubbed time after a touch, so its map link can be tapped
+
 const fmtReadoutTime = x => new Date(x).toLocaleString('en-US', {
     weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
 });
@@ -404,8 +414,10 @@ function renderReadout(chart) {
     for (const o of v.overlays) items.push(item(o.label, f(o.p.y), o.color));
 
     el.classList.toggle('live', live);
+    const layer = MAP_LAYER[chart.$param] || 'radar';
     el.innerHTML = `<div class="ro-time"><span class="ro-when">${when}</span><span class="ro-at">${fmtReadoutTime(x)}</span></div>
-        <div class="ro-items">${items.join('')}</div>`;
+        <div class="ro-items">${items.join('')}</div>
+        <a class="ro-map" href="/radar?layer=${layer}&t=${Math.round(x / 1000)}" title="Open the map at this time">Map<span class="caret" data-dir="right"></span></a>`;
 }
 
 /** Pointer-driven scrub on a 30-min grid, with a vertical crosshair and a
@@ -416,7 +428,8 @@ const crosshairPlugin = {
         const e = args.event;
         let x = chart.$scrubX;
         // Chart.js reports touchstart/touchmove as mousedown/mousemove
-        if (e.type === 'mouseout') x = null;
+        // Leaving for the readout (to click its map link) keeps the scrubbed time
+        if (e.type === 'mouseout') x = e.native?.relatedTarget?.closest?.('.chart-readout') ? x : null;
         else if (e.type === 'mousemove' || e.type === 'mousedown') {
             x = clampTo(snap(chart.scales.x.getValueForPixel(e.x)), dataRange(chart));
         } else return;

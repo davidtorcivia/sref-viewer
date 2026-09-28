@@ -866,23 +866,33 @@ app.get('/api/radar/field', async (req, res) => {
 // One loop is ~37 frames x ~12 visible tiles, re-requested on every zoom
 const fieldBuckets = new Map();
 
-// Tiles and the numbers/particles grid for one field and hour; a cycle's output never changes
-app.get('/api/radar/field/:name/:date/:cycle/:fh/:z/:x/:y.png', (req, res) =>
-    proxyField(req, res, 'png', `&z=${req.params.z}&x=${req.params.x}&y=${req.params.y}`));
-app.get('/api/radar/field/:name/:date/:cycle/:fh/grid.bin', (req, res) => proxyField(req, res, 'grid', ''));
+// Tiles, the numbers/particles grid and tap-to-inspect values for one field
+// and frame. src is rrfs (cycle HH, forecast hour fh) or rtma (analysis HHMM, fh 0).
+const FIELD_FRAME = '/api/radar/field/:name/:src/:date/:cycle/:fh';
+app.get(`${FIELD_FRAME}/:z/:x/:y.png`, (req, res) =>
+    proxyField(req, res, 'png', `&z=${req.params.z}&x=${req.params.x}&y=${req.params.y}`, true));
+app.get(`${FIELD_FRAME}/grid.bin`, (req, res) => proxyField(req, res, 'grid', '', true));
+app.get(`${FIELD_FRAME}/point`, (req, res) => {
+    const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+    if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).end();
+    proxyField(req, res, 'point', `&lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`, false);
+});
 
-async function proxyField(req, res, kind, extra) {
-    const { name, date, cycle, fh } = req.params;
-    if (!/^[a-z]{1,10}$/.test(name) || !/^\d{8}$/.test(date) || !/^\d{2}$/.test(cycle)
-        || !Object.values(req.params).slice(3).every(v => /^\d{1,4}$/.test(v))) return res.status(400).end();
+async function proxyField(req, res, kind, extra, immutable) {
+    const { name, src, date, cycle, fh } = req.params;
+    if (!/^[a-z]{1,10}$/.test(name) || !/^(rrfs|rtma)$/.test(src) || !/^\d{8}$/.test(date)
+        || !/^\d{2}(\d{2})?$/.test(cycle) || !Object.values(req.params).slice(4).every(v => /^\d{1,4}$/.test(v))) {
+        return res.status(400).end();
+    }
     // ponytail: every miss renders in the extractor (~20ms warm); wrap in tileCache if extractor CPU bites
     if (!takeToken(req.ip, fieldBuckets, 1500, 60)) return res.status(429).end();
     try {
-        const up = await fetch(`${EXTRACTOR_URL}/fields/${name}.${kind}?date=${date}&cycle=${cycle}&fh=${fh}${extra}`,
+        const up = await fetch(`${EXTRACTOR_URL}/fields/${name}.${kind}?src=${src}&date=${date}&cycle=${cycle}&fh=${fh}${extra}`,
             { signal: AbortSignal.timeout(60000) });
         if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).end();
         res.set('Content-Type', up.headers.get('content-type'));
-        res.set('Cache-Control', 'public, max-age=86400, immutable');
+        // A frame's data never changes; a point's answer grows as more fields get cached
+        res.set('Cache-Control', immutable ? 'public, max-age=86400, immutable' : 'no-store');
         res.send(Buffer.from(await up.arrayBuffer()));
     } catch {
         res.status(502).end();

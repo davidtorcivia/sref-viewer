@@ -29,8 +29,8 @@ const SAT_OPACITY = 0.8;
 // Radar colors changed with the backend TILE_STYLE: a new value keeps browsers
 // from mixing hour-cached tiles of the old scheme into the loop
 const TILE_STYLE_V = 'twc';
-// Field tiles are cached immutable per URL: bump with any extractor palette/rendering change
-const FIELD_STYLE_V = '1';
+// Field tiles and grids are cached immutable per URL: bump with any extractor palette/format change
+const FIELD_STYLE_V = '2';
 const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past this instead of fetching
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
@@ -52,19 +52,22 @@ const OVERLAY_KEY = 'sref-radar-overlay';
 const RANGE_KEY = 'sref-radar-range';
 const LEGEND_KEY = 'sref-radar-legend';
 // Overlay -> extractor field name, and how opaque each field draws
-const FIELD_OVERLAYS = { temp: 'tmp', dewpoint: 'dpt', wind: 'wind', clouds: 'cloud' };
-const FIELD_OPACITY = { tmp: 0.6, dpt: 0.6, wind: 0.75, cloud: 0.9 };
+const FIELD_OVERLAYS = { temp: 'tmp', dewpoint: 'dpt', wind: 'wind', gust: 'gust', clouds: 'cloud', precip: 'qpf', snow: 'snowtot' };
+const FIELD_OPACITY = { tmp: 0.6, dpt: 0.6, wind: 0.75, gust: 0.75, cloud: 0.9, qpf: 0.8, snowtot: 0.85 };
+// Run totals have no observed "Now": that range shows them from the 36h run
+const NO_NOW = new Set(['precip', 'snow']);
 // Radar/satellite past 'now' come from RRFS simulated reflectivity and IR
 const MODEL_OVERLAYS = { radar: 'refc', satellite: 'sat', both: 'both' };
 const OVERLAYS = ['radar', 'satellite', 'both', ...Object.keys(FIELD_OVERLAYS)];
-// Time range: observations (model fields: short-range RRFS) ~2h back to 1h
-// ahead, then RRFS hourly to 36h, then 3-hourly to 84h
+// Time range: observed (radar with its 1h nowcast; fields from RTMA
+// analyses) for the last ~2h, then RRFS hourly to 36h, then hourly to 84h
 const RANGES = [
-    { mode: 'now', label: 'Now', title: 'Last 2 hours to 1 hour ahead' },
+    { mode: 'now', label: 'Now', title: 'Observed, last 2 hours' },
     { mode: 'hourly', label: '36h', title: 'RRFS forecast, hourly to 36 hours' },
-    { mode: 'extended', label: '3½d', title: 'RRFS forecast, 3-hourly to 3½ days' },
+    { mode: 'extended', label: '3½d', title: 'RRFS forecast, hourly to 3½ days' },
 ];
 const fieldFor = (which, mode) => FIELD_OVERLAYS[which] || (mode === 'now' ? null : MODEL_OVERLAYS[which]);
+const rangeMode = () => RANGES[rangeIdx].mode === 'now' && NO_NOW.has(overlay) ? 'hourly' : RANGES[rangeIdx].mode;
 
 function savedPosition() {
     try {
@@ -142,7 +145,7 @@ function layerId(frame) {
 // Animated frames for the chosen overlay, plus the static satellite
 // backdrop shown under the radar in 'both'
 async function fetchFrames(which) {
-    const field = fieldFor(which, RANGES[rangeIdx].mode);
+    const field = fieldFor(which, rangeMode());
     if (field) return { ...await fetchFieldFrames(field), backdrop: null };
     const res = await fetch('/api/radar/frames');
     if (!res.ok) throw new Error(`Frame index HTTP ${res.status}`);
@@ -155,24 +158,26 @@ async function fetchFrames(which) {
     return { frames: past.concat(nowcast), backdrop: which === 'both' ? sat[sat.length - 1] || null : null };
 }
 
-// RRFS field, extractor-rendered tiles per forecast hour
-async function fetchFieldFrames(name) {
-    const res = await fetch(`/api/radar/field?mode=${RANGES[rangeIdx].mode}&field=${name}`);
+// Extractor-rendered field frames: RRFS forecast hours, or RTMA analyses (observed) for 'now'
+async function fetchFieldFrames(name, mode = rangeMode()) {
+    const res = await fetch(`/api/radar/field?mode=${mode}&field=${name}`);
     if (!res.ok) throw new Error(`Field index HTTP ${res.status}`);
     const d = await res.json();
-    const run = Date.UTC(+d.date.slice(0, 4), +d.date.slice(4, 6) - 1, +d.date.slice(6, 8), +d.cycle) / 1000;
     const now = Date.now() / 1000;
-    return { legend: d.fields[name], frames: d.hours.map(h => ({
-        time: run + h * 3600, basis: run, fh: h, cycle: d.cycle, bounds: d.bounds, tile: d.tile, maxzoom: d.maxzoom,
-        grid: d.grid.fields.includes(name) ? d.grid : null,
-        name, field: `${name}/${d.date}/${d.cycle}/${h}`, nowcast: run + h * 3600 > now,
+    const fmt = d.grid.fields[name];
+    return { legend: d.fields[name], frames: d.frames.map(f => ({
+        time: f.time, basis: f.time - f.fh * 3600, fh: f.fh, src: f.src, cycle: f.cycle,
+        bounds: d.bounds, tile: d.tile, maxzoom: d.maxzoom, grid: fmt ? { ...d.grid, fmt } : null,
+        name, field: `${name}/${f.src}/${f.date}/${f.cycle}/${f.fh}`, nowcast: f.time > now,
     })) };
 }
 
 // Legend bar and ticks from the same stops the extractor paints with
-function renderFieldLegend({ stops, unit, label, ticks }) {
-    const lo = stops[0][0];
-    const pct = v => `${((v - lo) / (stops[stops.length - 1][0] - lo) * 100).toFixed(2)}%`;
+function renderFieldLegend({ stops, unit, label, ticks, sqrt }) {
+    // Totals band on sqrt(value) in the extractor; the bar follows
+    const axis = v => sqrt ? Math.sqrt(Math.max(v, 0)) : v;
+    const lo = axis(stops[0][0]), hi = axis(stops[stops.length - 1][0]);
+    const pct = v => `${((axis(v) - lo) / (hi - lo) * 100).toFixed(2)}%`;
     els.fieldBar.style.background = 'linear-gradient(to right, ' + stops.map(([v, [r, g, b, a]]) =>
         `rgba(${r},${g},${b},${(a / 255).toFixed(2)}) ${pct(v)}`).join(', ') + ')';
     // Match the map's light-mode cloud dimming
@@ -184,13 +189,13 @@ function renderFieldLegend({ stops, unit, label, ticks }) {
         return span;
     }));
     els.fieldUnit.textContent = unit;
-    els.fieldCaption.textContent = `${label}, RRFS 3 km model`;
+    els.fieldCaption.textContent = rangeMode() === 'now' ? `${label}, observed (RTMA 2.5 km analysis)` : `${label}, RRFS 3 km model`;
 }
 
 function sourceFor(frame) {
     if (frame.field) {
         return { type: 'raster', tiles: [tileUrl(frame)], tileSize: frame.tile, maxzoom: frame.maxzoom,
-            bounds: frame.bounds, attribution: 'Model &copy; NOAA RRFS' };
+            bounds: frame.bounds, attribution: frame.src === 'rtma' ? 'Analysis &copy; NOAA RTMA' : 'Model &copy; NOAA RRFS' };
     }
     return frame.sat
         ? { type: 'raster', tiles: [tileUrl(frame)], tileSize: TILE_SIZE, maxzoom: SAT_MAXZOOM,
@@ -339,7 +344,8 @@ function updateFrameLabel() {
     }) + ' ET';
 
     if (frame.field) {
-        els.frameBadge.textContent = `+${frame.fh}h`;   // cycle is in the header pill
+        // The RRFS cycle is in the header pill
+        els.frameBadge.textContent = frame.src === 'rtma' ? 'OBSERVED' : `+${frame.fh}h`;
         els.frameBadge.classList.toggle('nowcast', frame.nowcast);
     } else if (frame.nowcast) {
         const minsAhead = Math.round((frame.time * 1000 - Date.now()) / 60000);
@@ -478,13 +484,21 @@ function syncBackdrop(frame) {
         firstRadar?.id ?? (map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId()));
 }
 
+function showRange() {
+    const r = RANGES.find(r => r.mode === rangeMode());
+    els.rangeBtn.textContent = r.label;
+    els.rangeBtn.title = r.title;
+    els.rangeBtn.dataset.forecast = String(r.mode !== 'now');
+}
+
 function setOverlay(which) {
     overlay = which;
     store.set(OVERLAY_KEY, which);
     els.overlay.value = which;
     els.overlayName.textContent = els.overlay.selectedOptions[0].text;
     els.legend.dataset.overlay = FIELD_OVERLAYS[which] ? 'field' : which;
-    els.legend.dataset.model = String(!FIELD_OVERLAYS[which] && !!fieldFor(which, RANGES[rangeIdx].mode));
+    els.legend.dataset.model = String(!FIELD_OVERLAYS[which] && !!fieldFor(which, rangeMode()));
+    showRange();
     if (!mapReady) return;   // map 'load' picks it up
     pause();
     for (const id of [...loadedLayerIds]) removeLayer(id);
@@ -519,7 +533,9 @@ async function refreshFrames({ initial = false } = {}) {
         showFrame(currentFrame);
 
         const latest = frames[latestPastIdx];
-        if (frames[0].field) {
+        if (frames[0].src === 'rtma') {
+            els.updated.textContent = 'Observed, RTMA';
+        } else if (frames[0].field) {
             els.updated.textContent = `RRFS ${frames[0].cycle}Z run`;
         } else if (latest) {
             const d = new Date(latest.time * 1000);
@@ -557,7 +573,7 @@ let particleRaf = 0;
 let particleCanvas = null;
 
 function loadGrid(frame) {
-    const url = `/api/radar/field/${frame.field}/grid.bin`;
+    const url = `/api/radar/field/${frame.field}/grid.bin?v=${FIELD_STYLE_V}`;
     if (!gridCache.has(url)) {
         if (gridCache.size >= 48) gridCache.delete(gridCache.keys().next().value);
         gridCache.set(url, fetch(url)
@@ -565,7 +581,12 @@ function loadGrid(frame) {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
             })
-            .then(b => new Int8Array(b))
+            // Undo the extractor's pack_grid: cumulative sum, wrapping like int8
+            .then(b => {
+                const a = new Int8Array(b);
+                for (let i = 1; i < a.length; i++) a[i] += a[i - 1];
+                return a;
+            })
             .catch(() => { gridCache.delete(url); return null; }));
     }
     return gridCache.get(url);
@@ -585,13 +606,20 @@ function gridValue(lng, lat, k = 0) {
     return (q[0] * (1 - fx) + q[1] * fx) * (1 - fy) + (q[2] * (1 - fx) + q[3] * fx) * fy;
 }
 
+// fmt (from the extractor): grid value = scale x unit value; peak fields
+// (winds, totals) skip zeros and label each fill cell at its maximum
 function numberText(lng, lat) {
-    if (grid.name !== 'wind') {
-        const v = gridValue(lng, lat);
-        return v === null ? null : `${Math.round(v)}°`;
+    const { scale, suffix, peak } = grid.meta.fmt;
+    let v;
+    if (grid.name === 'wind') {
+        const u = gridValue(lng, lat, 0), vv = gridValue(lng, lat, 1);
+        v = u === null || vv === null ? null : Math.hypot(u, vv) / 2 * 2.23694;
+    } else {
+        v = gridValue(lng, lat);
+        v = v === null ? null : v / scale;
     }
-    const u = gridValue(lng, lat, 0), v = gridValue(lng, lat, 1);
-    return u === null || v === null ? null : String(Math.round(Math.hypot(u, v) / 2 * 2.23694));
+    if (v === null || peak && v < 0.5 / scale) return null;
+    return (scale > 1 ? v.toFixed(1).replace(/^0\./, '.') : Math.round(v)) + suffix;
 }
 
 function updateNumbers() {
@@ -647,7 +675,7 @@ function standoutPoint(lng0, lat0, s) {
         }
     }
     if (!pts.length) return null;
-    const mean = grid.name === 'wind' ? 0 : pts.reduce((a, p) => a + p[2], 0) / pts.length;
+    const mean = meta.fmt.peak ? 0 : pts.reduce((a, p) => a + p[2], 0) / pts.length;
     const [c, r] = pts.reduce((best, p) => Math.abs(p[2] - mean) > Math.abs(best[2] - mean) ? p : best);
     return [meta.west + c * meta.step, meta.north - r * meta.step];
 }
@@ -784,6 +812,67 @@ function syncGrid(frame) {
     });
 }
 
+// ============ Tap to inspect ============
+const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+// Every field the extractor has at the tapped point for the frame on screen.
+// Radar/satellite observation frames have no model data: the nearest RTMA
+// analysis stands in.
+async function inspectAt(lngLat) {
+    const cur = frames[currentFrame];
+    if (!cur) return;
+    // A pin marks the exact spot; the card sits just above it and takes the pin with it on close
+    const pin = document.createElement('div');
+    pin.className = 'inspect-pin';
+    const marker = new maplibregl.Marker({ element: pin }).setLngLat(lngLat).addTo(map);
+    const popup = new maplibregl.Popup({ maxWidth: '260px', offset: 14, className: 'inspect-popup' })
+        .setLngLat(lngLat).setText('Loading\u2026').addTo(map);
+    popup.on('close', () => marker.remove());
+    try {
+        let frame = cur;
+        if (!frame.field) {
+            const obs = (await fetchFieldFrames('tmp', 'now')).frames;
+            frame = obs.reduce((a, f) => Math.abs(f.time - cur.time) < Math.abs(a.time - cur.time) ? f : a);
+        }
+        const res = await fetch(`/api/radar/field/${frame.field}/point?lat=${lngLat.lat.toFixed(4)}&lon=${lngLat.lng.toFixed(4)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        popup.setDOMContent(inspectContent(await res.json(), frame));
+    } catch (err) {
+        console.error('[INSPECT]', err);
+        popup.setText('No data here');
+    }
+}
+
+function inspectContent(v, frame) {
+    const wrap = document.createElement('div');
+    wrap.className = 'inspect';
+    const line = (cls, text) => {
+        const el = document.createElement('div');
+        el.className = cls;
+        el.textContent = text;
+        wrap.appendChild(el);
+    };
+    if (!Object.keys(v).length) {
+        line('inspect-row', 'Outside the model area');
+        return wrap;
+    }
+    if (v.tmp != null) line('inspect-temp', `${Math.round(v.tmp)}°F` + (v.dpt != null ? `  dew point ${Math.round(v.dpt)}°` : ''));
+    if (v.wind) {
+        const calm = v.wind.mph < 1;
+        line('inspect-row', calm ? 'Wind calm' : `Wind ${COMPASS[Math.round(v.wind.from / 22.5) % 16]} ${Math.round(v.wind.mph)} mph`
+            + (v.gust != null && v.gust > v.wind.mph + 3 ? `, gusts ${Math.round(v.gust)}` : ''));
+    }
+    if (v.cloud != null) line('inspect-row', `Clouds ${Math.round(v.cloud)}%`);
+    if (v.refc && v.refc.dbz >= 10) line('inspect-row', `Radar ${Math.round(v.refc.dbz)} dBZ ${v.refc.snow ? 'snow' : 'rain'} (simulated)`);
+    if (v.qpf >= 0.01) line('inspect-row', `Precip ${v.qpf.toFixed(2)}" since run start`);
+    if (v.snowtot >= 0.1) line('inspect-row', `Snow ${v.snowtot.toFixed(1)}" since run start`);
+    const at = new Date(frame.time * 1000).toLocaleString('en-US', {
+        weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+    });
+    line('inspect-src', `${at} ET \u00b7 ${frame.src === 'rtma' ? 'observed (RTMA)' : `RRFS ${frame.cycle}Z +${frame.fh}h`}`);
+    return wrap;
+}
+
 function init() {
     applySiteSettings().then(s => {
         if (s.siteName) document.title = `Radar - ${s.siteName}`;
@@ -836,10 +925,21 @@ function init() {
         loadAlerts();
         setInterval(() => !document.hidden && loadAlerts(), ALERTS_REFRESH_MS);
         await refreshFrames({ initial: true });
-        // Playback only steps over frames whose tiles have arrived, so it
-        // can start immediately and grow as frames trickle in.
-        play();
+        if (linkTime && frames.length) {
+            // Opened from a plume chart: hold on the frame nearest that time
+            showFrame(frames.reduce((best, f, i) =>
+                Math.abs(f.time - linkTime) < Math.abs(frames[best].time - linkTime) ? i : best, 0));
+        } else {
+            // Playback only steps over frames whose tiles have arrived, so it
+            // can start immediately and grow as frames trickle in.
+            play();
+        }
         setInterval(() => !document.hidden && refreshFrames(), REFRESH_MS);
+    });
+
+    map.on('click', (e) => {
+        if (map.getLayer('alerts-fill') && map.queryRenderedFeatures(e.point, { layers: ['alerts-fill'] }).length) return;
+        inspectAt(e.lngLat);
     });
 
     map.on('movestart', stopParticles);
@@ -858,20 +958,25 @@ function init() {
 
     els.playBtn.addEventListener('click', () => playing ? pause() : play());
 
+    // Deep link from a plume chart: /radar?layer=temp&t=<unix seconds>. The
+    // range is chosen to cover t; the query is dropped so a reload resumes normally.
+    const link = new URLSearchParams(location.search);
+    const linkTime = Number(link.get('t')) || 0;
+    if (OVERLAYS.includes(link.get('layer'))) overlay = link.get('layer');
+    if (linkTime) {
+        const ahead = (linkTime - Date.now() / 1000) / 3600;
+        rangeIdx = RANGES.findIndex(r => r.mode === (ahead <= 0.5 ? 'now' : ahead <= 26 ? 'hourly' : 'extended'));
+    }
+    if (location.search) history.replaceState(null, '', location.pathname + location.hash);
+
     setOverlay(overlay);
     els.overlay.addEventListener('change', () => setOverlay(els.overlay.value));
 
-    const showRange = () => {
-        const r = RANGES[rangeIdx];
-        els.rangeBtn.textContent = r.label;
-        els.rangeBtn.title = r.title;
-        els.rangeBtn.dataset.forecast = String(r.mode !== 'now');
-    };
-    showRange();
     els.rangeBtn.addEventListener('click', () => {
-        rangeIdx = (rangeIdx + 1) % RANGES.length;
+        // Step from what is shown (run totals show 'now' as 36h)
+        rangeIdx = (RANGES.findIndex(r => r.mode === rangeMode()) + 1) % RANGES.length;
+        if (RANGES[rangeIdx].mode === 'now' && NO_NOW.has(overlay)) rangeIdx = (rangeIdx + 1) % RANGES.length;
         store.set(RANGE_KEY, RANGES[rangeIdx].mode);
-        showRange();
         setOverlay(overlay);
     });
 

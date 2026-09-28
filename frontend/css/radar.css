@@ -538,3 +538,35 @@ body {
     height: 100%;
     pointer-events: none;
 }
+
+/* Tap-to-inspect card */
+.inspect {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.85rem;
+    margin-right: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.inspect-temp {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.inspect-src {
+    margin-top: 0.25rem;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+}
+
+/* Tap pin: accent dot, white rim, soft halo so it reads on any overlay */
+.inspect-pin {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 28%, transparent), 0 1px 4px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+}

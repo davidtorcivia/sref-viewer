@@ -69,4 +69,24 @@ top = (np.array([[band(0, 0), band(40, 0)]], np.uint8), pal)
 base = (np.array([[3, 3]], np.uint8), X.field_palette(X.FIELDS['sat']))
 px, joint = X.composite(top, base)
 assert px.tolist() == [[len(pal) + 3, band(40, 0)]] and len(joint) == len(pal) + len(base[1])
+# Totals band on sqrt(inches): a trace stays clear, a hundredth shows, heavy amounts stay distinct
+qpf = X.FIELDS['qpf']
+qpal = X.field_palette(qpf)
+qband = lambda inches: int((X.band_axis(qpf, inches) - X.band_axis(qpf, 0)) // qpf['band'])
+assert qpal[qband(0.005)][3] == 0 and qpal[qband(0.012)][3] > 0, 'trace vs hundredth'
+assert qband(2) != qband(2.5) and qband(5) < len(qpal), 'heavy totals need their own bands'
+
+# RTMA analyses are 'HHMM' at fh 0; RRFS cycles 'HH' plus forecast hours
+assert X.frame_time('rtma', '20260928', '1615', 0) == X.frame_time('rrfs', '20260928', '16', 0) + 900
+assert X.frame_time('rrfs', '20260928', '12', 30) == X.frame_time('rrfs', '20260929', '18', 0)
+# .idx step text, as published: whole-day totals switch to days
+assert [X.rrfs_step('APCP', h) for h in (23, 24, 48, 84)] == \
+    ['0-23 hour acc fcst', '0-1 day acc fcst', '0-2 day acc fcst', '0-84 hour acc fcst']
+assert X.rrfs_step('TMP', 0) == 'anl' and X.rrfs_step('TMP', 24) == '24 hour fcst'
+
+# pack_grid round trip, including the -128 sentinel and wrapping differences
+flat = np.array([-128, -128, 127, -127, 0, 5, 6, -128], np.int8)
+d = np.frombuffer(X.gzip.decompress(X.pack_grid(flat)), np.int8)
+assert np.array_equal(np.cumsum(d, dtype=np.int8), flat), 'pack_grid round trip'
+
 print(f'fields: ok (grid round trip within {err:.4f} cells)')
