@@ -787,6 +787,10 @@ def field_cycle(mode):
     if time.time() - at < FIELD_CYCLE_TTL_S or not _field_cycle_lock.acquire(blocking=value[0] is None):
         return value
     try:
+        # Another thread may have refreshed while this one waited for the lock
+        at, value = _field_cycle.get(mode, (0, (None, None)))
+        if time.time() - at < FIELD_CYCLE_TTL_S:
+            return value
         now = time.time()
         found = (None, None)
         for back in range(1, 13):

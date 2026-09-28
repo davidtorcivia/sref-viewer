@@ -575,7 +575,8 @@ function loadGrid(frame) {
 function gridValue(lng, lat, k = 0) {
     const { meta, data } = grid;
     const x = (lng - meta.west) / meta.step, y = (meta.north - lat) / meta.step;
-    const c = Math.floor(x), r = Math.floor(y);
+    // Epsilon: grid points given back as west + c * step land on c, not c - 1e-14
+    const c = Math.floor(x + 1e-9), r = Math.floor(y + 1e-9);
     if (c < 0 || r < 0 || c >= meta.nx - 1 || r >= meta.ny - 1) return null;
     const o = k * meta.nx * meta.ny + r * meta.nx + c;
     const q = [data[o], data[o + 1], data[o + meta.nx], data[o + meta.nx + 1]];
@@ -628,19 +629,20 @@ function updateNumbers() {
 
 // Grid point in the cell [lng0, lng0+s) x [lat0, lat0+s) furthest from the
 // cell's mean (wind: the strongest, which is what matters offshore); null if
-// the cell has no model data
+// the cell has no model data. Only points gridValue can interpolate (all four
+// corners on the model grid) qualify, so the cell's label never comes back null.
 function standoutPoint(lng0, lat0, s) {
     const { meta, data } = grid;
     const n = meta.nx * meta.ny;
     const c0 = Math.max(0, Math.ceil((lng0 - meta.west) / meta.step));
-    const c1 = Math.min(meta.nx - 1, Math.floor((lng0 + s - meta.west) / meta.step - 1e-9));
+    const c1 = Math.min(meta.nx - 2, Math.floor((lng0 + s - meta.west) / meta.step - 1e-9));
     const r0 = Math.max(0, Math.ceil((meta.north - lat0 - s) / meta.step + 1e-9));
-    const r1 = Math.min(meta.ny - 1, Math.floor((meta.north - lat0) / meta.step));
+    const r1 = Math.min(meta.ny - 2, Math.floor((meta.north - lat0) / meta.step));
     const pts = [];
     for (let r = r0; r <= r1; r++) {
         for (let c = c0; c <= c1; c++) {
             const o = r * meta.nx + c;
-            if (data[o] === -128) continue;
+            if (data[o] === -128 || data[o + 1] === -128 || data[o + meta.nx] === -128 || data[o + meta.nx + 1] === -128) continue;
             pts.push([c, r, grid.name === 'wind' ? Math.hypot(data[o], data[o + n]) : data[o]]);
         }
     }
