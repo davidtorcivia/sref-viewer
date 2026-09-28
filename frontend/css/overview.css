@@ -5,16 +5,21 @@
    highlight rather than backdrop blur (which re-renders every scroll frame
    on Android). The living sky sits behind everything (sky.js). */
 
+/* Set on :root by overview.js showSky; the sky and the header scrim both read them */
 @property --sky-a {
     syntax: '<color>';
-    inherits: false;
+    inherits: true;
     initial-value: #0b1430;
 }
 
 @property --sky-b {
     syntax: '<color>';
-    inherits: false;
+    inherits: true;
     initial-value: #1d2b52;
+}
+
+:root {
+    transition: --sky-a 1.4s cubic-bezier(0.2, 0.8, 0.2, 1), --sky-b 1.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 :root {
@@ -92,7 +97,6 @@ button {
     background:
         radial-gradient(130% 70% at 80% -15%, rgba(255, 255, 255, 0.14), transparent 60%),
         linear-gradient(180deg, var(--sky-a), var(--sky-b));
-    transition: --sky-a 1.4s var(--ease), --sky-b 1.4s var(--ease);
 }
 
 .sky-canvas {
@@ -139,11 +143,40 @@ button {
     transition: background 0.3s var(--ease), box-shadow 0.3s var(--ease);
 }
 
-.wx-header.scrolled {
-    background: linear-gradient(180deg, rgba(10, 16, 32, 0.46), rgba(10, 16, 32, 0.22));
-    backdrop-filter: blur(18px) saturate(1.5);
-    -webkit-backdrop-filter: blur(18px) saturate(1.5);
-    box-shadow: 0 10px 30px -22px rgba(0, 0, 0, 0.8);
+/* Scrolling down tucks the header away; scrolling up brings it back as a
+   floating glass capsule that never spans the page */
+.wx-header {
+    transition: transform 0.35s var(--ease), background 0.3s var(--ease), box-shadow 0.3s var(--ease),
+        margin 0.35s var(--ease), border-radius 0.35s var(--ease), max-width 0.35s var(--ease), padding 0.35s var(--ease);
+}
+
+.wx-header.tucked {
+    transform: translateY(calc(-100% - 12px));
+}
+
+.wx-header.floating {
+    max-width: 560px;
+    margin: max(8px, env(safe-area-inset-top)) auto 0;
+    padding: 6px 6px;
+    border-radius: 999px;
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05)), rgba(12, 18, 32, 0.62);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 14px 34px -18px rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.wx-header.floating .wx-icon-btn {
+    width: 36px;
+    height: 36px;
+    box-shadow: none;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.wx-header.floating .wx-header-title {
+    padding: 0;
+    background: none;
+    box-shadow: none;
 }
 
 .wx-header-side {
@@ -168,8 +201,12 @@ button {
 
 .wx-header-title {
     font-weight: 650;
-    font-size: 0.98rem;
+    font-size: 0.95rem;
     white-space: pre;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: rgba(12, 18, 32, 0.45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
     opacity: 0;
     transform: translateY(6px);
     transition: opacity 0.25s var(--ease), transform 0.25s var(--ease);
@@ -600,7 +637,16 @@ button {
 }
 
 .day-name {
+    display: flex;
+    flex-direction: column;
     font-weight: 650;
+    line-height: 1.15;
+}
+
+.day-date {
+    font-size: 0.7rem;
+    font-weight: 550;
+    color: var(--text-faint);
 }
 
 .day-precip {
@@ -698,7 +744,7 @@ button {
 /* ============ Radar panel ============ */
 .radar-frame {
     position: relative;
-    height: 260px;
+    height: 300px;
     margin: 0 var(--s3);
     border-radius: var(--radius-sm);
     overflow: hidden;
@@ -711,14 +757,14 @@ button {
     width: 100%;
     height: 100%;
     border: 0;
-    pointer-events: none;   /* the page scrolls over the mini map; a tap opens it */
 }
 
-.radar-open {
+.radar-expand {
     position: absolute;
-    inset: 0;
-    z-index: 1;
-    cursor: zoom-in;
+    z-index: 2;
+    top: var(--s2);
+    right: var(--s2);
+    background: rgba(12, 18, 34, 0.72);
 }
 
 .radar-close {
@@ -749,11 +795,7 @@ button {
     border-radius: 0;
 }
 
-.radar-panel.full iframe {
-    pointer-events: auto;
-}
-
-.radar-panel.full .radar-open {
+.radar-panel.full .radar-expand {
     display: none;
 }
 
@@ -892,23 +934,25 @@ body.no-scroll {
 .sun-arc {
     width: 100%;
     height: auto;
-    aspect-ratio: 160 / 74;
     overflow: visible;
 }
 
-.sun-arc .arc {
+.sun-arc .sun-night {
     fill: none;
-    stroke: rgba(255, 255, 255, 0.28);
-    stroke-width: 1.4;
-    stroke-dasharray: 2 4;
+    stroke: rgba(255, 255, 255, 0.22);
+    stroke-width: 1.6;
+}
+
+.sun-arc .sun-day {
+    fill: none;
+    stroke: var(--sun);
+    stroke-width: 2.2;
     stroke-linecap: round;
 }
 
-.sun-arc .arc-done {
-    fill: none;
-    stroke: var(--sun);
-    stroke-width: 2.4;
-    stroke-linecap: round;
+.sun-arc .sun-below {
+    fill: rgba(255, 255, 255, 0.45);
+    stroke: none;
 }
 
 .sun-arc .horizon {
@@ -928,10 +972,12 @@ body.no-scroll {
 
 .sun-times {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
-    gap: var(--s2);
-    font-size: 0.86rem;
+    gap: 0 var(--s2);
+    font-size: 0.8rem;
     font-weight: 600;
+    white-space: nowrap;
 }
 
 .moon {
@@ -1339,4 +1385,301 @@ body.no-scroll {
 .settings-note {
     font-size: 0.76rem;
     color: var(--text-faint);
+}
+
+/* ============ Tiles: tappable ============ */
+.tile {
+    cursor: pointer;
+    transition: transform 0.2s var(--ease), background 0.2s;
+}
+
+.tile:hover {
+    transform: translateY(-2px);
+}
+
+.meter-uv i {
+    background: linear-gradient(90deg, #6fd46f, #f3d34a 30%, #f39a3d 55%, #e4543c 75%, #b44fd1);
+}
+
+/* ============ Detail sheet ============ */
+.wx-detail[open] {
+    justify-content: flex-start;
+    overflow-y: auto;
+}
+
+.detail-card {
+    margin: 6vh 0 var(--s6);
+}
+
+.detail-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    min-height: 120px;
+}
+
+.detail-rows {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--s2) var(--s4);
+    font-size: 0.92rem;
+}
+
+.detail-rows dt {
+    color: var(--text-dim);
+}
+
+.detail-rows dd {
+    font-weight: 620;
+    text-align: right;
+}
+
+.detail-moon {
+    display: flex;
+    justify-content: center;
+}
+
+.series-readout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1) var(--s4);
+    font-size: 0.84rem;
+    color: var(--text-dim);
+    min-height: 1.4em;
+    margin-bottom: var(--s1);
+}
+
+.series-readout b {
+    color: var(--text);
+}
+
+.series-line {
+    fill: none;
+    stroke-width: 2.2;
+    stroke-linecap: round;
+}
+
+.line-main {
+    stroke: #fff;
+    color: #fff;
+}
+
+.line-alt {
+    stroke: var(--drop);
+    color: var(--drop);
+}
+
+.line-gust {
+    stroke: rgba(255, 207, 90, 0.9);
+    color: #ffd98a;
+    stroke-dasharray: 4 4;
+}
+
+.line-uv {
+    stroke: #f3b34a;
+    color: #f3c46a;
+}
+
+/* ============ Plume extras ============ */
+.plume-prev {
+    fill: none;
+    stroke: #ffffff;
+    stroke-width: 1.4;
+}
+
+.plume-prev.prev0 {
+    stroke-opacity: 0.42;
+}
+
+.plume-prev.prev1 {
+    stroke-opacity: 0.22;
+}
+
+.plume-readout .prev {
+    color: var(--text-faint);
+}
+
+.plume-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1) var(--s4);
+    padding: var(--s2) var(--s5) 0;
+    font-size: 0.72rem;
+    color: var(--text-faint);
+}
+
+.plume-legend .key {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.plume-legend .key i {
+    width: 16px;
+    height: 0;
+    border-top: 2px solid #fff;
+}
+
+.plume-legend .key-det i {
+    border-top: 2px dashed var(--drop);
+}
+
+.plume-legend .key-prev i {
+    border-top-width: 1.5px;
+    opacity: 0.45;
+}
+
+.plume-legend .prev1 i {
+    opacity: 0.25;
+}
+
+.plume-trend {
+    padding: var(--s1) var(--s5) 0;
+    font-size: 0.84rem;
+    font-weight: 600;
+}
+
+.plume-trend:empty {
+    display: none;
+}
+
+/* ============ Edit mode ============ */
+.home-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+}
+
+.text-btn {
+    font-weight: 650;
+    color: var(--text-dim);
+    padding: var(--s1) var(--s2);
+}
+
+.text-btn:hover {
+    color: var(--text);
+}
+
+body.editing [data-section],
+body.editing .tile,
+body.editing .place-card:not([data-place="here"]) {
+    cursor: grab;
+    touch-action: none;
+    outline: 1.5px dashed rgba(255, 255, 255, 0.45);
+    outline-offset: 3px;
+    animation: jiggle 0.9s ease-in-out infinite alternate;
+}
+
+/* While editing, the insides (links, iframe, scroller) never take the drag */
+body.editing [data-section]:not(.tiles) > *,
+body.editing .tile > *,
+body.editing .place-card > * {
+    pointer-events: none;
+}
+
+body.editing .lifted {
+    cursor: grabbing;
+    animation: none;
+    transform: scale(1.02);
+    box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.7);
+    z-index: 3;
+}
+
+@keyframes jiggle {
+    from { transform: rotate(-0.25deg); }
+    to { transform: rotate(0.25deg); }
+}
+
+.edit-done {
+    position: fixed;
+    z-index: 15;
+    left: 50%;
+    bottom: calc(var(--s5) + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    padding: var(--s3) var(--s6);
+    border-radius: 999px;
+    font-weight: 700;
+    background: var(--glass-strong);
+}
+
+.edit-done[hidden] {
+    display: none;
+}
+
+/* ============ Desktop: a dashboard, not a column ============
+   Sections keep the user's order; each takes a width by kind and dense
+   packing fills the gaps (the 10-day spans two rows beside the plumes and tiles). */
+@media (min-width: 1100px) {
+    .wx-main {
+        max-width: 1400px;
+        padding-left: var(--s6);
+        padding-right: var(--s6);
+    }
+
+    .places {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .wx-main.place-view {
+        display: grid;
+        /* The first column keeps room for the daily rows' bars */
+        grid-template-columns: minmax(400px, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+        grid-auto-flow: row dense;
+        align-items: start;
+        gap: var(--s4);
+    }
+
+    .place-view > .hero {
+        grid-column: span 1;
+        align-self: center;
+        padding: var(--s5) 0;
+    }
+
+    .place-view > [data-section="radar"],
+    .place-view > [data-section="plumes"],
+    .place-view > [data-section="tiles"] {
+        grid-column: span 2;
+    }
+
+    .place-view > [data-section="hourly"],
+    .place-view > .actions,
+    .place-view > .sources {
+        grid-column: 1 / -1;
+    }
+
+    .place-view > [data-section="daily"] {
+        grid-column: span 1;
+        grid-row: span 2;
+    }
+
+    .place-view .radar-frame {
+        height: 420px;
+    }
+
+    .place-view .tiles {
+        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    }
+
+    .place-view [data-section="daily"] .day {
+        grid-template-columns: 3.4rem 1.6rem 3.8rem 2.3rem minmax(60px, 1fr) 2.6rem;
+        gap: var(--s2);
+        padding: var(--s3) var(--s4);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.editing [data-section],
+    body.editing .tile,
+    body.editing .place-card {
+        animation: none;
+    }
+}
+
+.detail-body .sun-arc {
+    max-height: 220px;
+}
+
+.detail-moon .moon {
+    width: 120px;
+    height: 120px;
 }

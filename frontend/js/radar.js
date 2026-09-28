@@ -23,6 +23,7 @@ import { store as savedStore } from './config.js?v=__V__';
 // Embedded in the overview page (radar.html?embed=1 in an iframe): start
 // from the defaults and leave the user's saved radar settings alone
 const EMBED = new URLSearchParams(location.search).has('embed');
+let setGestures = () => {};   // cooperative gestures on in the mini embed (page scroll wins), off full screen
 const store = EMBED ? { get: () => null, set() {} } : savedStore;
 if (EMBED) {
     document.body.classList.add('embed', 'embed-mini');
@@ -31,6 +32,7 @@ if (EMBED) {
         if (e.origin !== location.origin || e.data?.type !== 'wx-radar') return;
         if ('view' in e.data) {
             document.body.classList.toggle('embed-mini', e.data.view === 'mini');
+            setGestures(e.data.view === 'mini');
             if (map) map.resize();
         }
         if (e.data.play === false) pause();
@@ -57,7 +59,7 @@ const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past 
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
 const REFRESH_MS = 2 * 60 * 1000;   // Re-fetch frame index
-const LOAD_PARALLEL = 2;            // Frames loading tiles at once
+const LOAD_PARALLEL = 4;            // Frames loading tiles at once (the backend pre-warms the NYC views)
 const LOAD_STALL_MS = 10000;        // Give up waiting on a cold frame, move on
 
 // Radar is only ever useful slower, never faster
@@ -941,8 +943,12 @@ function init() {
         maxZoom: 12,          // LibreWXR radar tiles top out around z12
         hash: true,           // Shareable URLs with position (overrides saved)
         fadeDuration: 0,      // No basemap label crossfade - snappier feel
-        attributionControl: { compact: true }
+        attributionControl: { compact: true },
+        // Embedded mini map: one finger / plain wheel scroll the page; two fingers / ctrl+wheel move the map
+        cooperativeGestures: EMBED,
     });
+    setGestures = on => map.cooperativeGestures?.[on ? 'enable' : 'disable']?.();
+    if (EMBED) els.legend.open = false;
 
     // Remember where the user left the map
     map.on('moveend', () => {

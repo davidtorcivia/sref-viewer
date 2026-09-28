@@ -75,6 +75,33 @@ const assert = require('node:assert/strict');
     assert.equal(nd[0].cond.key, 'rain');
     assert.equal(nd[1].cond.key, 'partly', 'a 20% chance does not make a rain day');
 
+    // Twilight: each crossing is where the sun's altitude equals the target, in order through the day
+    const day0 = Date.parse('2026-09-28T16:00:00Z');
+    const cross = [-18, -12, -6, -0.833, 6].map(h => [h, f.sunCross(day0, 40.71, -74.0, h)]);
+    for (const [h, c] of cross) {
+        for (const t of [c.up, c.down]) assert.ok(Math.abs(f.sunAltitude(t, 40.71, -74.0) - h) < 0.05, `altitude at ${h}`);
+    }
+    const ups = cross.map(([, c]) => c.up), downs = cross.map(([, c]) => c.down);
+    assert.ok(ups.every((t, i) => !i || t > ups[i - 1]) && downs.every((t, i) => !i || t < downs[i - 1]), 'twilights in order');
+    // Sunrise from sunCross matches sunTimes (checked above against the published 6:48 AM)
+    assert.ok(Math.abs(cross[3][1].up - st.rise) < 60000);
+    const noonT = f.solarNoon(day0, 40.71, -74.0);
+    assert.ok(Math.abs(noonT.t - (st.rise + st.set) / 2) < 6 * 60000, 'solar noon midway between rise and set');
+
+    // Moon: opposite the sun (within a degree or two) at the 2026-09-26 16:49 UTC full moon
+    const mp = f.moonPosition(Date.parse('2026-09-26T16:49:00Z'));
+    const elong = Math.abs((((mp.lon - mp.sunLon) % 360) + 360) % 360 - 180);   // 0 at exactly opposite
+    assert.ok(elong < 2, `full moon elongation off by ${elong.toFixed(2)} degrees`);
+    const mt = f.moonTimes(Date.parse('2026-09-28T16:00:00Z'), 40.71, -74.0);
+    assert.ok(mt.rise && mt.set, 'moon rises and sets on an ordinary day');
+    assert.deepEqual(f.nextPhases(Date.parse('2026-09-28T00:00:00Z')).map(p => p.name), ['Last quarter', 'New moon', 'First quarter', 'Full moon']);
+
+    // UV estimate: clear summer noon ~11, overcast cuts it, night is 0
+    assert.ok(Math.abs(f.uvIndex(72, 0) - 11.1) < 0.3);
+    assert.ok(f.uvIndex(72, 100) < f.uvIndex(72, 0) * 0.45);
+    assert.equal(f.uvIndex(-5, 0), 0);
+    assert.equal(f.uvCategory(6.4), 'High');
+
     // Units
     const u = await import('./js/units.js');
     const C = u.parseUnits('{"temp":"C","wind":"kmh","precip":"mm","clock":"24","bogus":1}');

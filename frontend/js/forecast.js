@@ -90,13 +90,14 @@ export function dailyRows(rows) {
     return out;
 }
 
-const clock = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric' });
+const clock12 = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric' });
 
 /**
  * One sentence about precipitation over the next 12 hours from `now`:
- * when it starts, or when it ends if it is already falling.
+ * when it starts, or when it ends if it is already falling. `clock`
+ * formats the hour (the user's 12/24-hour choice).
  */
-export function nowcast(rows, now) {
+export function nowcast(rows, now, clock = clock12) {
     const ahead = rows.filter(r => r.t + 3600000 > now && r.t < now + 12 * 3600000);
     if (!ahead.length) return '';
     const kind = r => (r.snowy ? 'Snow' : 'Rain');
@@ -284,7 +285,7 @@ export function holidays(year) {
  * Holiday "moments" within `days` days of `now` that the hourly forecast
  * covers: [{name, label, when, text}], e.g. Halloween trick-or-treat 58°, dry.
  */
-export function moments(rows, now, days = 3) {
+export function moments(rows, now, days = 3, deg = f => `${Math.round(f)}°`) {
     const out = [];
     const y = new Date(now).getFullYear();
     for (const h of [...holidays(y), ...holidays(y + 1)]) {
@@ -294,8 +295,8 @@ export function moments(rows, now, days = 3) {
         if (!hrs.length) continue;
         const temps = hrs.map(r => r.tmp);
         const wet = hrs.filter(isWet);
-        const lo = Math.round(Math.min(...temps)), hi = Math.round(Math.max(...temps));
-        const range = lo === hi ? `${lo}°` : `${lo}–${hi}°`;
+        const lo = deg(Math.min(...temps)), hi = deg(Math.max(...temps));
+        const range = lo === hi ? lo : `${lo.replace('°', '')}–${hi}`;
         const sky = wet.length ? `${wet.some(r => r.snowy) ? 'snow' : 'rain'} at times`
             : hrs.every(r => (r.cloud ?? 0) < 40) ? 'clear' : 'dry';
         out.push({ name: h.name, label: h.label || h.name, when: t0, text: `${range}, ${sky}` });
@@ -335,4 +336,116 @@ export function nbmDays(daily) {
             : c < 25 ? { key: 'clear', label: 'Sunny' } : c < 60 ? { key: 'partly', label: 'Partly cloudy' } : { key: 'cloudy', label: 'Cloudy' };
         return { key: dayKey(t), t, hi: d.hi, lo: d.lo, pop: d.pop_day, qpf: d.qpf ?? 0, snow: d.snow ?? 0, gust: d.gust, cond };
     });
+}
+
+/**
+ * When the sun's center crosses altitude `h` degrees on the local day of
+ * `ms`: {up, down} (ms, null when it does not). h = -0.833 is sunrise and
+ * sunset; -6, -12 and -18 the civil, nautical and astronomical twilights;
+ * +6 the edge of golden hour.
+ */
+export function sunCross(ms, lat, lon, h) {
+    const day = new Date(ms);
+    day.setHours(0, 0, 0, 0);
+    const f = t => sunAltitude(t, lat, lon) - h;
+    let up = null, down = null;
+    const step = 10 * 60000;
+    for (let t = day.getTime(); t < day.getTime() + 86400000; t += step) {
+        const a = f(t), b = f(t + step);
+        if (a < 0 && b >= 0 && up === null) up = t + step * a / (a - b);
+        if (a >= 0 && b < 0 && down === null) down = t + step * a / (a - b);
+    }
+    return { up, down };
+}
+
+/** Solar noon on the local day of `ms`: {t, alt} at the sun's highest */
+export function solarNoon(ms, lat, lon) {
+    const day = new Date(ms);
+    day.setHours(0, 0, 0, 0);
+    let best = { t: day.getTime(), alt: -90 };
+    for (let t = day.getTime(); t < day.getTime() + 86400000; t += 5 * 60000) {
+        const alt = sunAltitude(t, lat, lon);
+        if (alt > best.alt) best = { t, alt };
+    }
+    return best;
+}
+
+const rev = x => ((x % 360) + 360) % 360;
+const sind = x => Math.sin(x * RAD), cosd = x => Math.cos(x * RAD);
+
+/**
+ * Moon right ascension and declination (degrees) from Paul Schlyter's
+ * low-precision method with the main perturbations (a few arcminutes).
+ * Also returns its ecliptic longitude and the sun's, for tests.
+ */
+export function moonPosition(ms) {
+    const d = ms / 86400000 + 2440587.5 - 2451543.5;
+    const N = rev(125.1228 - 0.0529538083 * d), i = 5.1454, w = rev(318.0634 + 0.1643573223 * d);
+    const a = 60.2666, e = 0.054900, M = rev(115.3654 + 13.0649929509 * d);
+    const ws = rev(282.9404 + 4.70935e-5 * d), Ms = rev(356.0470 + 0.9856002585 * d);
+    let E = M + (180 / Math.PI) * e * sind(M) * (1 + e * cosd(M));
+    for (let k = 0; k < 5; k++) E -= (E - (180 / Math.PI) * e * sind(E) - M) / (1 - e * cosd(E));
+    const xv = a * (cosd(E) - e), yv = a * Math.sqrt(1 - e * e) * sind(E);
+    const v = Math.atan2(yv, xv) / RAD, r = Math.hypot(xv, yv);
+    const xh = r * (cosd(N) * cosd(v + w) - sind(N) * sind(v + w) * cosd(i));
+    const yh = r * (sind(N) * cosd(v + w) + cosd(N) * sind(v + w) * cosd(i));
+    const zh = r * sind(v + w) * sind(i);
+    let lon = Math.atan2(yh, xh) / RAD, lat = Math.atan2(zh, Math.hypot(xh, yh)) / RAD;
+    const Ls = rev(ws + Ms), Lm = rev(N + w + M), D = rev(Lm - Ls), F = rev(Lm - N);
+    lon += -1.274 * sind(M - 2 * D) + 0.658 * sind(2 * D) - 0.186 * sind(Ms) - 0.059 * sind(2 * M - 2 * D)
+        - 0.057 * sind(M - 2 * D + Ms) + 0.053 * sind(M + 2 * D) + 0.046 * sind(2 * D - Ms) + 0.041 * sind(M - Ms)
+        - 0.035 * sind(D) - 0.031 * sind(M + Ms) - 0.015 * sind(2 * F - 2 * D) + 0.011 * sind(M - 4 * D);
+    lat += -0.173 * sind(F - 2 * D) - 0.055 * sind(M - F - 2 * D) - 0.046 * sind(M + F - 2 * D)
+        + 0.033 * sind(F + 2 * D) + 0.017 * sind(2 * M + F);
+    const ecl = 23.4393 - 3.563e-7 * d;
+    const x = cosd(lon) * cosd(lat), y = sind(lon) * cosd(lat), z = sind(lat);
+    const ye = y * cosd(ecl) - z * sind(ecl), ze = y * sind(ecl) + z * cosd(ecl);
+    // Sun's ecliptic longitude from its own orbit, for elongation checks
+    const Es = Ms + (180 / Math.PI) * 0.016709 * sind(Ms) * (1 + 0.016709 * cosd(Ms));
+    const vs = Math.atan2(Math.sqrt(1 - 0.016709 ** 2) * sind(Es), cosd(Es) - 0.016709) / RAD;
+    return { ra: rev(Math.atan2(ye, x) / RAD), dec: Math.atan2(ze, Math.hypot(x, ye)) / RAD, lon: rev(lon), sunLon: rev(vs + ws) };
+}
+
+export function moonAltitude(ms, lat, lon) {
+    const { ra, dec } = moonPosition(ms);
+    const D = ms / 86400000 - 10957.5;
+    const ha = ((18.697374558 + 24.06570982441908 * D) % 24) * 15 + lon - ra;
+    return Math.asin(sind(lat) * sind(dec) + cosd(lat) * cosd(dec) * cosd(ha)) / RAD;
+}
+
+/** Moonrise and moonset on the local day of `ms` (+0.125 degrees: refraction, radius, parallax) */
+export function moonTimes(ms, lat, lon) {
+    const day = new Date(ms);
+    day.setHours(0, 0, 0, 0);
+    const f = t => moonAltitude(t, lat, lon) - 0.125;
+    let rise = null, set = null;
+    const step = 10 * 60000;
+    for (let t = day.getTime(); t < day.getTime() + 86400000; t += step) {
+        const a = f(t), b = f(t + step);
+        if (a < 0 && b >= 0 && rise === null) rise = t + step * a / (a - b);
+        if (a >= 0 && b < 0 && set === null) set = t + step * a / (a - b);
+    }
+    return { rise, set };
+}
+
+/** The next new, first quarter, full and last quarter moons after `ms`, in date order */
+export function nextPhases(ms) {
+    return [[0, 'New moon'], [0.25, 'First quarter'], [0.5, 'Full moon'], [0.75, 'Last quarter']]
+        .map(([p, name]) => ({ name, t: nextMoon(ms + 3600000, p) }))
+        .sort((a, b) => a.t - b.t);
+}
+
+/**
+ * Estimated UV index: a clear-sky curve on solar elevation (12.5 * sin(alt)^2.42,
+ * about 11 at a summer noon sun and 6 at a late-September one in NYC) cut by
+ * cloud cover (up to 56% for overcast). No model here forecasts UV, so this
+ * ignores ozone and haze: shown as an estimate.
+ */
+export function uvIndex(alt, cloud) {
+    if (alt <= 0) return 0;
+    return 12.5 * Math.sin(alt * RAD) ** 2.42 * (1 - 0.56 * Math.min(Math.max(cloud ?? 0, 0), 100) / 100);
+}
+
+export function uvCategory(uv) {
+    return uv < 3 ? 'Low' : uv < 6 ? 'Moderate' : uv < 8 ? 'High' : uv < 11 ? 'Very high' : 'Extreme';
 }
