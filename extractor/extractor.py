@@ -932,6 +932,9 @@ def purge_fields():
     # between cannot mark a new cycle known without keeping it
     cycles, rtma = [field_cycle(m) for m in FIELD_MODES], rtma_frames()
     live = {('rrfs', d, c) for d, c in cycles if d} | {('rtma', d, c) for d, c in rtma}
+    prev = forecast_runs()[1]   # the last run's forecast crops serve until the new run's are cut
+    if prev:
+        live.add(('rrfs', *prev))
     keep = {os.path.basename(frame_dir(*f)) for f in live}
     known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set())
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
@@ -1130,9 +1133,9 @@ def preload_fields():
             for name in FIELDS:
                 if 'layers' not in FIELDS[name]:
                     warm_field(name, sorted({f for mode in FIELD_MODES for f in mode_frames(mode, name)}))
-            date, cycle = field_cycle(FORECAST_MODE)
-            if date:
-                ensure_crops(date, cycle, recent_tiles())
+            (date, cycle), prev = forecast_runs()
+            if date and ensure_crops(date, cycle, recent_tiles()) and prev:
+                _forecast_run['prev'] = None   # the new run's crops are cut; the old run can go
         except Exception as err:  # noqa: BLE001 - keep the loop alive
             print(f'[PRELOAD] {err}', flush=True)
         time.sleep(FIELD_CYCLE_TTL_S)
@@ -1156,8 +1159,19 @@ FORECAST_BATCH = 16                         # tiles cut per pass: bounds memory 
 NOW_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud')
 _crop_pool = ThreadPoolExecutor(max_workers=4)   # decodes run ~2.4x faster on 4 threads
 _crop_building = set()                           # (date, cycle, tile) being cut
+_forecast_run = {'cur': None, 'prev': None}
 _crop_lock = threading.Lock()
 _tiles_lock = threading.Lock()
+
+
+def forecast_runs():
+    """(current, previous or None) forecast runs. When the run changes, the
+    previous one stays until preload has cut the new run's crops, so saved
+    places keep a forecast through the switch."""
+    cur = field_cycle(FORECAST_MODE)
+    if cur[0] and cur != _forecast_run['cur']:
+        _forecast_run['prev'], _forecast_run['cur'] = _forecast_run['cur'], cur
+    return (_forecast_run['cur'] or (None, None)), _forecast_run['prev']
 
 
 def forecast_tile(lat, lon):
@@ -1186,6 +1200,8 @@ def build_crops(date, cycle, tiles):
         return
     p = decoded(path0)[1]
     boxes = {t: b for t in tiles if (b := crop_box(p, t))}
+    if not boxes:   # tiles off the grid: nothing to cut
+        return
     hours = range(FIELD_MODES[FORECAST_MODE] + 1)
     out = {t: np.full((len(FORECAST_MSGS), len(hours), j1 - j0, i1 - i0), np.nan, np.float32)
            for t, (j0, j1, i0, i1) in boxes.items()}
@@ -1216,18 +1232,21 @@ def build_crops(date, cycle, tiles):
 
 
 def ensure_crops(date, cycle, tiles):
-    """Cut the tiles that have no crop yet for this run, unless already under way."""
+    """Cut the tiles that have no crop yet for this run, unless already under
+    way. True when nothing failed."""
     with _crop_lock:
         todo = [t for t in tiles if (date, cycle, t) not in _crop_building
                 and not os.path.exists(crop_path(date, cycle, t))]
         _crop_building.update((date, cycle, t) for t in todo)
     if not todo:
-        return
+        return True
     try:
         for k in range(0, len(todo), FORECAST_BATCH):
             build_crops(date, cycle, todo[k:k + FORECAST_BATCH])
+        return True
     except Exception as err:  # noqa: BLE001 - a later request or preload pass retries
         print(f'[FORECAST] crops {date}{cycle} {todo}: {err}', flush=True)
+        return False
     finally:
         with _crop_lock:
             _crop_building.difference_update((date, cycle, t) for t in todo)
@@ -1310,7 +1329,7 @@ def forecast(lat, lon):
         vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
         now = {**vals, 'time': frame_time(*frame)} if vals else None
     tile = forecast_tile(lat, lon)
-    date, cycle = field_cycle(FORECAST_MODE)
+    (date, cycle), prev = forecast_runs()
     hourly, building = None, False
     path0 = date and fetch_msg('rrfs', date, cycle, 0, 'TMP')
     # Tiles the model grid does not reach get observations only, and are not kept
@@ -1319,9 +1338,12 @@ def forecast(lat, lon):
         if os.path.exists(crop_path(date, cycle, tile)):
             hourly = hourly_series(date, cycle, lat, lon)
         else:
-            building = True
             # Own thread: the warm pool may hold a whole run's preload queue
             threading.Thread(target=ensure_crops, args=(date, cycle, [tile]), daemon=True).start()
+            if prev and os.path.exists(crop_path(*prev, tile)):
+                hourly = hourly_series(*prev, lat, lon)   # last run's, until this one's is cut
+            else:
+                building = True
     return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hourly, 'building': building,
             'station': nearest_station(lat, lon)}
 

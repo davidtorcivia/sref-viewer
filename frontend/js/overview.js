@@ -63,10 +63,11 @@ async function fetchForecast(place) {
         const res = await fetch(`/api/forecast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const d = await res.json();
-        if (!d.building) return shape(d, place);
+        // Still building after every try (a new region while a run lands):
+        // show the observations anyway
+        if (!d.building || i === POLL_TRIES - 1) return shape(d, place);
         await new Promise(r => setTimeout(r, POLL_MS));
     }
-    throw new Error('Forecast still building');
 }
 
 // Rows from the model run's start; "now" is the first hour not yet over
@@ -78,9 +79,19 @@ function shape(d, place) {
     const night = sunAltitude(now, place.lat, place.lon) < -0.8;
     // Observed values where RTMA has them; the model hour fills the rest (precipitation)
     const obs = d.now || {};
-    const nowRow = cur && { ...cur, tmp: obs.tmp ?? cur.tmp, dpt: obs.dpt ?? cur.dpt, cloud: obs.cloud ?? cur.cloud };
+    // Without a model hour (still building), the observed cloud cover alone sets the condition
+    const nowRow = cur ? { ...cur, tmp: obs.tmp ?? cur.tmp, dpt: obs.dpt ?? cur.dpt, cloud: obs.cloud ?? cur.cloud }
+        : obs.cloud != null ? { cloud: obs.cloud, qpf: 0, dbz: -30 } : null;
+    // A run from last evening still holds hours of yesterday: days start today
+    const today = new Date().setHours(0, 0, 0, 0);
+    const days = dailyRows(rows.filter(r => r.t >= today));
+    // Today's range includes what has actually been observed
+    if (days[0]?.key === dayKey(now) && obs.tmp != null) {
+        days[0].hi = Math.max(days[0].hi, obs.tmp);
+        days[0].lo = Math.min(days[0].lo, obs.tmp);
+    }
     return {
-        raw: d, rows, upcoming, night, obs: d.now, days: dailyRows(rows),
+        raw: d, rows, upcoming, night, obs: d.now, days,
         cond: nowRow ? condition(nowRow, night) : { key: night ? 'clear-night' : 'clear', label: '' },
         temp: obs.tmp ?? cur?.tmp,
         line: nowcast(rows, now),
@@ -141,6 +152,7 @@ function setSky(key, night) {
 // ============ Places (home) ============
 
 function renderHome() {
+    renderSeq++;   // a place page still loading must not draw over home
     view.replaceChildren();
     const list = el('section', 'places');
     const ps = allPlaces();
@@ -178,7 +190,7 @@ function placeCard(place, setsSky) {
         const today = f.days.find(d => d.key === dayKey(Date.now()));
         if (today) hilo.textContent = `H ${deg(today.hi)}  L ${deg(today.lo)}`;
         line.textContent = f.line;
-        if (setsSky) setSky(f.cond.key, f.night);
+        if (setsSky && a.isConnected) setSky(f.cond.key, f.night);   // not after leaving home
     }).catch(() => {
         a.classList.remove('loading');
         line.textContent = 'Forecast unavailable';
@@ -193,7 +205,9 @@ function placeCard(place, setsSky) {
 
 // ============ One place ============
 
+let renderSeq = 0;
 async function renderPlace(id) {
+    const seq = ++renderSeq;
     const place = allPlaces().find(p => p.id === id);
     if (!place) { location.hash = ''; return; }
     view.replaceChildren();
@@ -210,7 +224,7 @@ async function renderPlace(id) {
         hero.append(el('div', 'hero-line', 'Forecast unavailable. Try again in a moment.'));
         return;
     }
-    if (location.hash !== `#p=${encodeURIComponent(id)}`) return;   // navigated away meanwhile
+    if (seq !== renderSeq) return;   // another render started meanwhile (navigation, refresh)
     setSky(f.cond.key, f.night);
     hero.replaceChildren(...heroContent(place, f));
     view.append(...[hourlySection(place, f), dailySection(place, f), actions(place, f)].filter(Boolean));
@@ -315,7 +329,7 @@ function hourlySection(place, f) {
         const tt = mk('text', { x: cx, y: yT(r.tmp) - 10, class: 'h-temp' }, link);
         tt.textContent = deg(r.tmp);
         // Precip bar: height by amount; blue for rain, white for snow
-        const amt = r.snowy ? r.qpf : r.qpf;
+        const amt = r.qpf;   // liquid equivalent for snow too
         if (amt >= 0.005) {
             const h = Math.max(3, Math.min(amt / QMAX, 1) * 38);
             mk('rect', { x: cx - 9, y: 184 - h, width: 18, height: h, rx: 3, class: r.snowy ? 'bar-snow' : 'bar-rain' }, link);
@@ -450,7 +464,16 @@ async function search() {
     if (!rows.length) searchResults.append(el('li', 'wx-empty', 'No places found'));
 }
 
+// Enter searches now instead of submitting (and closing) the dialog
+dialog.querySelector('form').addEventListener('submit', e => {
+    if (e.submitter?.value === 'cancel') return;
+    e.preventDefault();
+    clearTimeout(searchTimer);
+    search();
+});
+
 document.getElementById('addBtn').addEventListener('click', () => {
+    searchSeq++;   // drop any lookup still in flight from last time
     searchInput.value = '';
     searchResults.replaceChildren();
     dialog.showModal();

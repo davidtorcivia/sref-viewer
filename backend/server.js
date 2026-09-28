@@ -952,7 +952,9 @@ app.get('/api/geocode', async (req, res) => {
         }
         const q = String(req.query.q || '').trim().slice(0, 100);
         if (q.length < 2) return res.json([]);
-        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6&q=${encodeURIComponent(q.toLowerCase())}`);
+        // Bounded to the forecast area (the lower 48): the models cover nothing else
+        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6`
+            + `&viewbox=-134,53,-61,21&bounded=1&q=${encodeURIComponent(q.toLowerCase())}`);
         res.json(rows.map(r => ({ name: placeName(r.address || {}) || r.display_name, detail: r.display_name,
             lat: Number(r.lat), lon: Number(r.lon) })));
     } catch (err) {

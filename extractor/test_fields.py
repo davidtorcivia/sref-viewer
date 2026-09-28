@@ -114,6 +114,11 @@ def purge_with(cycles, rtma):
 live = {'hourly': ('20260928', '12'), 'extended': ('20260928', '12')}
 assert purge_with(live, [('20260928', '1615')]) == ['rrfs2026092812', 'rtma202609281615']
 assert os.listdir(os.path.join(X.FIELD_DIR, 'rrfs2026092812')) == ['fc_40_-74.npz'], 'crops kept, other files swept'
+# Run switch: the previous run stays (its forecast crops serve) until preload releases it
+switched = {'hourly': ('20260928', '18'), 'extended': ('20260928', '18')}
+assert 'rrfs2026092812' in purge_with(switched, [('20260928', '1615')]), 'previous run kept through the switch'
+X._forecast_run['prev'] = None
+assert 'rrfs2026092812' not in purge_with(switched, [('20260928', '1615')]), 'released run purged'
 cold = {'hourly': (None, None), 'extended': ('20260928', '12')}
 assert purge_with(cold, []) == ['rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615']
 
