@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Weather</title>
+    <meta name="description" content="Observed conditions and hourly forecasts for your places">
+    <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/icon-180.png">
+    <link rel="stylesheet" href="/css/overview.css?v=__V__">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#0b1430">
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js?v=__V__').catch(() => { });
+            });
+        }
+    </script>
+</head>
+
+<body>
+    <!-- Sky behind everything: its colors follow the shown place's conditions (overview.js setSky) -->
+    <div class="sky" id="sky" aria-hidden="true"></div>
+
+    <header class="wx-header">
+        <a href="#" class="wx-brand" id="brand">Weather</a>
+        <nav class="wx-nav">
+            <a href="/radar" class="wx-link">Radar</a>
+            <a href="/" class="wx-link">Plumes</a>
+            <button class="wx-icon-btn" id="addBtn" aria-label="Add a place">
+                <svg class="ic"><use href="#i-plus" /></svg>
+            </button>
+        </nav>
+    </header>
+
+    <main id="view" class="wx-main" aria-live="polite"></main>
+
+    <dialog id="searchDialog" class="wx-dialog">
+        <form method="dialog" class="wx-search">
+            <input id="searchInput" type="search" placeholder="Search for a city or town" autocomplete="off"
+                aria-label="Search places">
+            <button class="wx-link" value="cancel">Cancel</button>
+        </form>
+        <ul id="searchResults" class="wx-results"></ul>
+    </dialog>
+
+    <!-- Line icons. Colored parts read --sun/--moon/--drop/--flake/--bolt, which
+         reach inside <use> because custom properties inherit. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <defs>
+            <g id="g-cloud"><path d="M7.5 18.5h9.2a3.8 3.8 0 0 0 .5-7.57 5.6 5.6 0 0 0-10.6-1A4.3 4.3 0 0 0 7.5 18.5z" /></g>
+            <g id="g-cloud-up"><path d="M7.5 15h9.2a3.8 3.8 0 0 0 .5-7.57 5.6 5.6 0 0 0-10.6-1A4.3 4.3 0 0 0 7.5 15z" /></g>
+        </defs>
+        <symbol id="i-clear" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4.2" stroke="var(--sun, currentColor)" fill="var(--sun, none)" fill-opacity=".25" />
+            <path stroke="var(--sun, currentColor)" d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5l1.5 1.5M17 17l1.5 1.5M5.5 18.5L7 17M17 7l1.5-1.5" />
+        </symbol>
+        <symbol id="i-clear-night" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linejoin="round">
+            <path stroke="var(--moon, currentColor)" fill="var(--moon, none)" fill-opacity=".2" d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z" />
+        </symbol>
+        <symbol id="i-partly" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="9" cy="8.5" r="3.2" stroke="var(--sun, currentColor)" />
+            <path stroke="var(--sun, currentColor)" d="M9 2.6v1.2M3.1 8.5h1.2M4.8 4.3l.9.9M13.2 4.3l-.9.9" />
+            <use href="#g-cloud" stroke="currentColor" fill="var(--cloud-fill, none)" transform="translate(2 1.5) scale(.92)" />
+        </symbol>
+        <symbol id="i-partly-night" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linejoin="round">
+            <path stroke="var(--moon, currentColor)" d="M13.5 8.6A4.6 4.6 0 0 1 7.4 2.5a4.6 4.6 0 1 0 6.1 6.1z" />
+            <use href="#g-cloud" stroke="currentColor" fill="var(--cloud-fill, none)" transform="translate(2 1.5) scale(.92)" />
+        </symbol>
+        <symbol id="i-cloudy" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linejoin="round">
+            <use href="#g-cloud" stroke="currentColor" fill="var(--cloud-fill, none)" />
+        </symbol>
+        <symbol id="i-rain" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <use href="#g-cloud-up" stroke="currentColor" fill="var(--cloud-fill, none)" />
+            <path stroke="var(--drop, currentColor)" d="M8.5 17.5l-1 2.5M12.5 17.5l-1 2.5M16.5 17.5l-1 2.5" />
+        </symbol>
+        <symbol id="i-snow" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <use href="#g-cloud-up" stroke="currentColor" fill="var(--cloud-fill, none)" />
+            <g fill="var(--flake, currentColor)" stroke="none">
+                <circle cx="8" cy="18.6" r="1.1" /><circle cx="12" cy="20.4" r="1.1" /><circle cx="16" cy="18.6" r="1.1" />
+            </g>
+        </symbol>
+        <symbol id="i-storm" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <use href="#g-cloud-up" stroke="currentColor" fill="var(--cloud-fill, none)" />
+            <path stroke="var(--bolt, currentColor)" fill="var(--bolt, none)" fill-opacity=".3" d="M12.8 15.5l-2.6 3.6h2.6l-1.6 3.2" />
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14" />
+        </symbol>
+        <symbol id="i-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+            <path d="M20 4L4 11l7 2 2 7z" />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 4v16M6 14l6 6 6-6" />
+        </symbol>
+    </svg>
+
+    <script type="module" src="/js/overview.js?v=__V__"></script>
+</body>
+
+</html>

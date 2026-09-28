@@ -9,6 +9,7 @@ COPY nginx.conf /etc/nginx/conf.d/
 # Copy static files
 COPY index.html /usr/share/nginx/html/
 COPY radar.html /usr/share/nginx/html/
+COPY overview.html /usr/share/nginx/html/
 COPY admin.html /usr/share/nginx/html/
 COPY sw.js /usr/share/nginx/html/
 COPY manifest.json /usr/share/nginx/html/
@@ -24,6 +25,7 @@ RUN V=$(date +%Y%m%d%H%M%S) && \
     sed -i "s/__V__/$V/g" \
     /usr/share/nginx/html/index.html \
     /usr/share/nginx/html/radar.html \
+    /usr/share/nginx/html/overview.html \
     /usr/share/nginx/html/sw.js \
     /usr/share/nginx/html/js/*.js && \
     echo "Asset version: $V"
