@@ -6,7 +6,8 @@ import os
 import sys
 import tempfile
 
-os.environ.setdefault('CACHE_DIR', tempfile.mkdtemp())
+# Always a scratch dir: the purge test below deletes cycle directories
+os.environ['CACHE_DIR'] = tempfile.mkdtemp()
 os.environ.setdefault('STATIONS_FILE', os.path.join(os.environ['CACHE_DIR'], 's.json'))
 os.environ.setdefault('GRID_INDEX_FILE', os.path.join(os.environ['CACHE_DIR'], 'g.json'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

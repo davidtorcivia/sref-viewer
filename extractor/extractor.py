@@ -682,7 +682,7 @@ FIELDS = {
                       (65, (30, 150, 150, 255)), (70, (40, 110, 200, 255)), (75, (100, 60, 190, 255)),
                       (80, (170, 50, 170, 255))]},
     'wind': {'grib': ['UGRD', 'VGRD'], 'value': lambda u, v: np.hypot(u, v) * 2.23694, 'band': 2,
-             'grid': {'scale': 1, 'suffix': '', 'peak': True},
+             'grid': {'scale': 1, 'suffix': '', 'peak': True, 'uv': True},
              'unit': 'mph', 'label': '10 m wind speed', 'ticks': [10, 20, 30, 40, 50],
              'stops': [(0, (70, 110, 170, 0)), (5, (70, 110, 170, 70)), (10, (40, 150, 160, 150)),
                        (20, (80, 190, 90, 220)), (30, (230, 210, 50, 235)), (40, (240, 140, 40, 245)),
@@ -701,7 +701,7 @@ FIELDS = {
                       (330, (120, 125, 135, 0))]},
     'both': {'layers': ['refc', 'sat']},
     'gust': {'grib': ['GUST'], 'value': lambda g: g * 2.23694, 'band': 2,
-             'grid': {'scale': 1, 'suffix': '', 'peak': True},
+             'grid': {'scale': 1, 'suffix': '', 'peak': True, 'uv': True},
              'unit': 'mph', 'label': 'Wind gusts', 'ticks': [10, 20, 30, 40, 50],
              'stops': [(0, (70, 110, 170, 0)), (10, (70, 110, 170, 70)), (20, (40, 150, 160, 150)),
                        (30, (80, 190, 90, 220)), (40, (230, 210, 50, 235)), (50, (240, 140, 40, 245)),
@@ -921,13 +921,6 @@ def live_frames():
     return live | {('rtma', d, c) for d, c in rtma_frames()}
 
 
-def known_sources():
-    """Sources whose live frames are all known; purging the others could drop
-    a cache just because S3 has not answered yet (cold start)."""
-    known = {'rtma'} if rtma_frames() else set()
-    return known | ({'rrfs'} if all(field_cycle(m)[0] for m in FIELD_MODES) else set())
-
-
 def frame_dir(src, date, cycle):
     return os.path.join(FIELD_DIR, f'{src}{date}{cycle}')
 
@@ -935,10 +928,12 @@ def frame_dir(src, date, cycle):
 def purge_fields():
     """Drop every cycle/analysis no mode serves, and anything but GRIB
     messages (older cache formats, abandoned writes) inside the live ones."""
-    global _warming
-    live = live_frames()
+    # One read of the cycle caches for both sets, so a refresh landing in
+    # between cannot mark a new cycle known without keeping it
+    cycles, rtma = [field_cycle(m) for m in FIELD_MODES], rtma_frames()
+    live = {('rrfs', d, c) for d, c in cycles if d} | {('rtma', d, c) for d, c in rtma}
     keep = {os.path.basename(frame_dir(*f)) for f in live}
-    known = known_sources()
+    known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set())
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
         src = old[:4]   # dirs are <src><date><cycle>; anything else is an older cache format
         if old not in keep and (src not in SOURCES or src in known):
@@ -951,7 +946,8 @@ def purge_fields():
                     os.remove(f.path)
             except FileNotFoundError:
                 pass   # renamed into place or removed by a concurrent purge
-    _warming = {k for k in list(_warming) if k[:3] in live}
+    # In place: warm_one may be discarding a failed key right now
+    _warming.difference_update([k for k in list(_warming) if k[:3] not in live])
 
 
 def msg_path(src, date, cycle, fh, msg):
@@ -1043,14 +1039,23 @@ def grid_axes():
 @functools.lru_cache(maxsize=24)
 def field_grid(name, frame):
     """int8 lat/lon grid (rows north to south), -128 off the grid: the field
-    value times its grid scale, or for wind earth-relative u then v in 0.5 m/s.
-    Sent as pack_grid bytes."""
-    arrays, p = field_arrays(name, frame)
+    value times its grid scale, or for 'uv' fields earth-relative u then v in
+    0.5 m/s. Gusts have no direction of their own: their vectors take the 10 m
+    wind's direction at the gust's speed. Sent as pack_grid bytes."""
     lat, lon = grid_axes()
-    vals, inside = sample(arrays, p, lat[:, None], lon[None, :])
-    if name == 'wind':
-        out, scale = earth_winds(p, *vals, lon[None, :]), 2
+    if FIELDS[name]['grid'].get('uv'):
+        wind, p = field_arrays('wind', frame)
+        (u, v), inside = sample(wind, p, lat[:, None], lon[None, :])
+        u, v = earth_winds(p, u, v, lon[None, :])
+        if name != 'wind':
+            arrays, p = field_arrays(name, frame)
+            (g,), _ = sample(arrays, p, lat[:, None], lon[None, :])
+            k = FIELDS[name]['value'](g) / 2.23694 / np.maximum(np.hypot(u, v), 0.1)
+            u, v = u * k, v * k
+        out, scale = [u, v], 2
     else:
+        arrays, p = field_arrays(name, frame)
+        vals, inside = sample(arrays, p, lat[:, None], lon[None, :])
         out, scale = [FIELDS[name]['value'](*vals)], FIELDS[name]['grid']['scale']
     q = [np.where(inside, np.clip(np.rint(a * scale), -127, 127), -128).astype(np.int8) for a in out]
     return pack_grid(np.concatenate([a.ravel() for a in q]))
@@ -1096,8 +1101,10 @@ def warm_field(name, frames):
     """Queue every frame's messages in the background, nearest to now first,
     so tiles for the rest of the loop render without waiting on S3."""
     now = time.time()
+    # Vector grids also need the 10 m wind (gust direction)
+    msgs = field_msgs(name) + (field_msgs('wind') if FIELDS[name].get('grid', {}).get('uv') else [])
     for frame in sorted(frames, key=lambda f: abs(frame_time(*f) - now)):
-        for m in field_msgs(name):
+        for m in dict.fromkeys(msgs):
             if frame + (m,) not in _warming:
                 _warming.add(frame + (m,))
                 _warm_pool.submit(warm_one, frame + (m,))

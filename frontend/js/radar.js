@@ -167,7 +167,7 @@ async function fetchFieldFrames(name, mode = rangeMode()) {
     const fmt = d.grid.fields[name];
     return { legend: d.fields[name], frames: d.frames.map(f => ({
         time: f.time, basis: f.time - f.fh * 3600, fh: f.fh, src: f.src, cycle: f.cycle,
-        bounds: d.bounds, tile: d.tile, maxzoom: d.maxzoom, grid: fmt ? { ...d.grid, fmt } : null,
+        bounds: d.bounds, tile: d.tile, maxzoom: d.maxzoom, grid: fmt ? { ...d.grid, fmt, stops: d.fields[name]?.stops } : null,
         name, field: `${name}/${f.src}/${f.date}/${f.cycle}/${f.fh}`, nowcast: f.time > now,
     })) };
 }
@@ -564,6 +564,25 @@ const NUMBER_PLACES = ['city', 'town', 'village'];
 const FLOW_CELL = 8;                  // px per screen-space velocity lookup cell
 const PARTICLE_SPEED = 0.25;          // px per animation frame per m/s, same at every zoom
 const PARTICLE_DENSITY = 1 / 900;     // particles per px of map
+const PARTICLE_BAND_MPH = 5;          // particles are colored and sized per 5 mph band
+const PARTICLE_BANDS = 16;            // up to 80 mph
+const PX_TO_MPH = 2.23694 / PARTICLE_SPEED;
+
+// Stroke color per speed band from the legend's own stops (mph), lifted
+// toward white on the dark map (toward black on the light one) so a particle
+// reads against the same hue in the field under it; width grows with speed
+const PARTICLE_TINT = isLight ? [0, 0, 0, 0.3] : [255, 255, 255, 0.4];
+function particleStyles(stops) {
+    return Array.from({ length: PARTICLE_BANDS }, (_, b) => {
+        const mph = (b + 0.5) * PARTICLE_BAND_MPH;
+        const k = stops.findIndex(([v]) => v >= mph);
+        const [v0, c0] = stops[Math.max(0, k - 1)], [v1, c1] = stops[k === -1 ? stops.length - 1 : k];
+        const f = v1 > v0 ? Math.min(Math.max((mph - v0) / (v1 - v0), 0), 1) : 0;
+        const [r, g, bl] = c0.map((x, i) => x + (c1[i] - x) * f)
+            .slice(0, 3).map((x, i) => Math.round(x + (PARTICLE_TINT[i] - x) * PARTICLE_TINT[3]));
+        return { color: `rgb(${r},${g},${bl})`, width: 0.7 + b * 0.18 };   // ~1px at 5 mph, ~3px at 60
+    });
+}
 const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 const gridCache = new Map();          // url -> Promise<Int8Array | null>
 let grid = null;                      // { name, meta, data } for the frame on screen
@@ -611,7 +630,7 @@ function gridValue(lng, lat, k = 0) {
 function numberText(lng, lat) {
     const { scale, suffix, peak } = grid.meta.fmt;
     let v;
-    if (grid.name === 'wind') {
+    if (grid.meta.fmt.uv) {
         const u = gridValue(lng, lat, 0), vv = gridValue(lng, lat, 1);
         v = u === null || vv === null ? null : Math.hypot(u, vv) / 2 * 2.23694;
     } else {
@@ -671,7 +690,7 @@ function standoutPoint(lng0, lat0, s) {
         for (let c = c0; c <= c1; c++) {
             const o = r * meta.nx + c;
             if (data[o] === -128 || data[o + 1] === -128 || data[o + meta.nx] === -128 || data[o + meta.nx + 1] === -128) continue;
-            pts.push([c, r, grid.name === 'wind' ? Math.hypot(data[o], data[o + n]) : data[o]]);
+            pts.push([c, r, meta.fmt.uv ? Math.hypot(data[o], data[o + n]) : data[o]]);
         }
     }
     if (!pts.length) return null;
@@ -716,7 +735,7 @@ function addNumbersLayer() {
 // animation just picks up the new velocities, keeping its trails.
 let cellLngLat = null;                // { key, ll: Float64Array [lng, lat] per cell } for the current view
 function buildFlow() {
-    if (!grid || grid.name !== 'wind' || reducedMotion) { flow = null; stopParticles(); return; }
+    if (!grid?.meta.fmt.uv || reducedMotion) { flow = null; stopParticles(); return; }
     if (map.isMoving()) return;       // moveend rebuilds
     const { clientWidth: w, clientHeight: h } = map.getContainer();
     const cols = Math.ceil(w / FLOW_CELL) + 1, rows = Math.ceil(h / FLOW_CELL) + 1;
@@ -740,7 +759,7 @@ function buildFlow() {
         v[i + 1] = vv === null ? NaN : -vv / 2 * PARTICLE_SPEED;   // north is up the screen
     }
     const resized = flow?.w !== w || flow?.h !== h;
-    flow = { cols, rows, w, h, v };
+    flow = { cols, rows, w, h, v, styles: particleStyles(grid.meta.stops) };
     if (!particleRaf || resized) startParticles();
 }
 
@@ -763,8 +782,9 @@ function startParticles() {
     particleCanvas.height = flow.h * dpr;
     const ctx = particleCanvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.lineWidth = 1.1;
-    ctx.strokeStyle = isLight ? 'rgba(20, 28, 45, 0.7)' : 'rgba(255, 255, 255, 0.8)';
+    ctx.lineCap = 'round';
+    // A thin dark halo keeps particles readable over the same colors in the field below
+    const halo = isLight ? 'rgba(255, 255, 255, 0.35)' : 'rgba(0, 0, 0, 0.3)';
     const count = Math.min(3000, Math.round(flow.w * flow.h * PARTICLE_DENSITY));
     particles = Array.from({ length: count }, () => spawn({}));
     const step = () => {
@@ -773,7 +793,7 @@ function startParticles() {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.92)';
         ctx.fillRect(0, 0, flow.w, flow.h);
         ctx.globalCompositeOperation = 'source-over';
-        ctx.beginPath();
+        const paths = flow.styles.map(() => null);
         for (const p of particles) {
             const i = (((p.y / FLOW_CELL) | 0) * flow.cols + ((p.x / FLOW_CELL) | 0)) * 2;
             const vx = flow.v[i], vy = flow.v[i + 1];
@@ -781,12 +801,23 @@ function startParticles() {
                 spawn(p);
                 continue;
             }
-            ctx.moveTo(p.x, p.y);
+            const band = Math.min(PARTICLE_BANDS - 1, (Math.hypot(vx, vy) * PX_TO_MPH / PARTICLE_BAND_MPH) | 0);
+            const path = paths[band] ??= new Path2D();
+            path.moveTo(p.x, p.y);
             p.x += vx;
             p.y += vy;
-            ctx.lineTo(p.x, p.y);
+            path.lineTo(p.x, p.y);
         }
-        ctx.stroke();
+        paths.forEach((path, b) => {
+            if (!path) return;
+            const { color, width } = flow.styles[b];
+            ctx.strokeStyle = halo;
+            ctx.lineWidth = width + 1;
+            ctx.stroke(path);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.stroke(path);
+        });
         particleRaf = requestAnimationFrame(step);
     };
     particleRaf = requestAnimationFrame(step);
