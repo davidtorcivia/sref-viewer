@@ -21,29 +21,41 @@
 </head>
 
 <body>
-    <!-- Sky behind everything: its colors follow the shown place's conditions (overview.js setSky) -->
+    <!-- Sky behind everything: gradient by condition (overview.js showSky), living layer on the canvas (sky.js) -->
     <div class="sky" id="sky" aria-hidden="true"></div>
+    <canvas class="sky-canvas" id="skyCanvas" aria-hidden="true"></canvas>
 
-    <header class="wx-header">
-        <a href="#" class="wx-brand" id="brand">Weather</a>
-        <nav class="wx-nav">
-            <a href="/radar" class="wx-link">Radar</a>
-            <a href="/" class="wx-link">Plumes</a>
-            <button class="wx-icon-btn" id="addBtn" aria-label="Add a place">
-                <svg class="ic"><use href="#i-plus" /></svg>
+    <header class="wx-header" id="header">
+        <div class="wx-header-side">
+            <a href="#" class="wx-icon-btn" id="backBtn" aria-label="All places" hidden>
+                <svg class="ic"><use href="#i-back" /></svg>
+            </a>
+            <a href="#" class="wx-brand" id="brand">Weather</a>
+        </div>
+        <div class="wx-header-title" id="headerTitle" aria-hidden="true"></div>
+        <nav class="wx-header-side wx-nav">
+            <a href="/radar" class="wx-icon-btn" aria-label="Radar map">
+                <svg class="ic"><use href="#i-radar" /></svg>
+            </a>
+            <button class="wx-icon-btn" id="searchBtn" aria-label="Search and add places">
+                <svg class="ic"><use href="#i-search" /></svg>
             </button>
         </nav>
     </header>
 
     <main id="view" class="wx-main" aria-live="polite"></main>
 
-    <dialog id="searchDialog" class="wx-dialog">
-        <form method="dialog" class="wx-search">
-            <input id="searchInput" type="search" placeholder="Search for a city or town" autocomplete="off"
-                aria-label="Search places">
-            <button type="button" class="wx-link" id="searchCancel">Cancel</button>
+    <dialog id="searchDialog" class="wx-sheet" aria-label="Search places">
+        <form class="wx-search">
+            <label class="wx-field">
+                <svg class="ic ic-sm"><use href="#i-search" /></svg>
+                <input id="searchInput" type="search" placeholder="City, ZIP code or street address" autocomplete="off"
+                    aria-label="Search places" enterkeyhint="search">
+            </label>
+            <button type="button" class="wx-cancel" id="searchCancel">Cancel</button>
         </form>
         <ul id="searchResults" class="wx-results"></ul>
+        <p class="wx-sheet-note">Forecasts resolve to about 2.5 km: an address picks the neighborhood.</p>
     </dialog>
 
     <!-- Line icons. Colored parts read --sun/--moon/--drop/--flake/--bolt, which
@@ -91,6 +103,21 @@
         </symbol>
         <symbol id="i-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
             <path d="M20 4L4 11l7 2 2 7z" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <circle cx="10.5" cy="10.5" r="6.2" /><path d="M15.2 15.2L20 20" />
+        </symbol>
+        <symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.5 5.5L8 12l6.5 6.5" />
+        </symbol>
+        <symbol id="i-radar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="4.5" opacity=".6" /><path d="M12 12l5.5-5.5" /><circle cx="12" cy="12" r="1.2" fill="currentColor" />
+        </symbol>
+        <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+            <path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11z" /><circle cx="12" cy="10" r="2.3" />
+        </symbol>
+        <symbol id="i-city" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+            <path d="M3.5 20.5h17M5 20.5V10l4-2v12.5M9 20.5V5.5l6-2.5v17.5M15 20.5V11l4 1.5v8" />
         </symbol>
         <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 4v16M6 14l6 6 6-6" />

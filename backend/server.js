@@ -940,6 +940,9 @@ function nominatim(path) {
 
 const placeName = a => [a.city || a.town || a.village || a.hamlet || a.suburb || a.county, a.state]
     .filter(Boolean).join(', ');
+// Street results read as "12 Main St, Hoboken"; places as "Hoboken, New Jersey"
+const streetName = a => a.road && [[a.house_number, a.road].filter(Boolean).join(' '),
+    a.city || a.town || a.village || a.hamlet || a.suburb].filter(Boolean).join(', ');
 
 app.get('/api/geocode', async (req, res) => {
     if (rateLimited(req, res)) return;
@@ -955,8 +958,12 @@ app.get('/api/geocode', async (req, res) => {
         // Bounded to the forecast area (the lower 48): the models cover nothing else
         const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6`
             + `&viewbox=-134,53,-61,21&bounded=1&q=${encodeURIComponent(q.toLowerCase())}`);
-        res.json(rows.map(r => ({ name: placeName(r.address || {}) || r.display_name, detail: r.display_name,
-            lat: Number(r.lat), lon: Number(r.lon) })));
+        res.json(rows.map(r => {
+            const a = r.address || {};
+            const street = (a.house_number || r.category === 'highway' || r.type === 'house') && streetName(a);
+            return { name: street || placeName(a) || r.display_name, detail: r.display_name, address: !!street,
+                lat: Number(r.lat), lon: Number(r.lon) };
+        }));
     } catch (err) {
         res.status(502).json({ error: 'Place search unavailable', details: err.message });
     }

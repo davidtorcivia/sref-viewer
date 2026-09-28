@@ -1,7 +1,9 @@
-/* Weather overview. The sky gradient follows the shown place's conditions;
-   panels are glass drawn with translucency, a lit rim and an inner
-   highlight rather than backdrop blur (which re-renders on every scroll
-   frame on Android). Only the sticky header blurs. */
+/* Weather overview.
+   System: one spacing scale (--s1..--s6), one panel radius, a type ramp of
+   thin display numerals, semibold titles and uppercase micro-labels, and
+   glass in two strengths drawn with translucency, a lit rim and an inner
+   highlight rather than backdrop blur (which re-renders every scroll frame
+   on Android). The living sky sits behind everything (sky.js). */
 
 @property --sky-a {
     syntax: '<color>';
@@ -17,20 +19,30 @@
 
 :root {
     color-scheme: dark;
-    --text: #f5f8ff;
-    --text-dim: rgba(235, 242, 255, 0.72);
-    --text-faint: rgba(235, 242, 255, 0.5);
-    --glass: linear-gradient(160deg, rgba(255, 255, 255, 0.17), rgba(255, 255, 255, 0.06) 55%, rgba(255, 255, 255, 0.09));
+    --s1: 4px;
+    --s2: 8px;
+    --s3: 12px;
+    --s4: 16px;
+    --s5: 24px;
+    --s6: 36px;
+    --radius: 26px;
+    --radius-sm: 18px;
+    --text: #f6f8ff;
+    --text-dim: rgba(236, 242, 255, 0.74);
+    --text-faint: rgba(236, 242, 255, 0.52);
     --rim: rgba(255, 255, 255, 0.2);
-    --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -1px 0 rgba(255, 255, 255, 0.06),
-        0 18px 40px -22px rgba(0, 0, 0, 0.6);
+    --glass: linear-gradient(155deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05) 50%, rgba(255, 255, 255, 0.08));
+    --glass-strong: linear-gradient(155deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.09) 50%, rgba(255, 255, 255, 0.13));
+    --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34), inset 0 -1px 0 rgba(255, 255, 255, 0.05),
+        0 20px 44px -26px rgba(0, 0, 0, 0.65);
     --sun: #ffcf5a;
     --moon: #e3e8ff;
     --drop: #7cc4ff;
     --flake: #ffffff;
     --bolt: #ffd84d;
     --cloud-fill: rgba(255, 255, 255, 0.12);
-    --radius: 24px;
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --max: 780px;
 }
 
 * {
@@ -47,19 +59,8 @@ body {
     min-height: 100vh;
     font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
     color: var(--text);
-    background: transparent;
     -webkit-font-smoothing: antialiased;
     font-variant-numeric: tabular-nums;
-}
-
-.sky {
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    background:
-        radial-gradient(120% 70% at 85% -10%, rgba(255, 255, 255, 0.16), transparent 60%),
-        linear-gradient(180deg, var(--sky-a), var(--sky-b));
-    transition: --sky-a 1.2s ease, --sky-b 1.2s ease;
 }
 
 a {
@@ -75,6 +76,32 @@ button {
     cursor: pointer;
 }
 
+:focus-visible {
+    outline: 2px solid rgba(160, 210, 255, 0.85);
+    outline-offset: 2px;
+}
+
+/* ============ Sky ============ */
+.sky {
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+        radial-gradient(130% 70% at 80% -15%, rgba(255, 255, 255, 0.14), transparent 60%),
+        linear-gradient(180deg, var(--sky-a), var(--sky-b));
+    transition: --sky-a 1.4s var(--ease), --sky-b 1.4s var(--ease);
+}
+
+.sky-canvas {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    width: 100vw;
+    height: 100vh;
+    pointer-events: none;
+}
+
+/* ============ Icons ============ */
 .ic {
     width: 1.5em;
     height: 1.5em;
@@ -83,8 +110,8 @@ button {
 }
 
 .ic-sm {
-    width: 1.1em;
-    height: 1.1em;
+    width: 1.15em;
+    height: 1.15em;
 }
 
 .ic-xs {
@@ -94,64 +121,97 @@ button {
     vertical-align: -0.05em;
 }
 
-/* ============ Header ============ */
+/* ============ Header ============
+   Transparent over the hero; glass once the page scrolls. The place's name
+   and temperature fade in when the hero has scrolled away. */
 .wx-header {
     position: sticky;
     top: 0;
     z-index: 5;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: var(--s3);
+    padding: max(var(--s3), env(safe-area-inset-top)) max(var(--s4), env(safe-area-inset-right)) var(--s3) max(var(--s4), env(safe-area-inset-left));
+    transition: background 0.3s var(--ease), box-shadow 0.3s var(--ease);
+}
+
+.wx-header.scrolled {
+    background: linear-gradient(180deg, rgba(10, 16, 32, 0.46), rgba(10, 16, 32, 0.22));
+    backdrop-filter: blur(18px) saturate(1.5);
+    -webkit-backdrop-filter: blur(18px) saturate(1.5);
+    box-shadow: 0 10px 30px -22px rgba(0, 0, 0, 0.8);
+}
+
+.wx-header-side {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: max(0.7rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) 0.7rem max(1rem, env(safe-area-inset-left));
-    background: linear-gradient(180deg, rgba(8, 12, 24, 0.35), rgba(8, 12, 24, 0.12));
-    backdrop-filter: blur(14px) saturate(1.4);
-    -webkit-backdrop-filter: blur(14px) saturate(1.4);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    gap: var(--s2);
+}
+
+.wx-header-side.wx-nav {
+    justify-content: flex-end;
 }
 
 .wx-brand {
     font-weight: 700;
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     letter-spacing: -0.01em;
 }
 
-.wx-nav {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
+#backBtn:not([hidden]) + .wx-brand {
+    display: none;
 }
 
-.wx-link {
-    padding: 0.45rem 0.75rem;
-    border-radius: 999px;
-    font-size: 0.88rem;
-    font-weight: 600;
-    color: var(--text-dim);
+.wx-header-title {
+    font-weight: 650;
+    font-size: 0.98rem;
+    white-space: pre;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.25s var(--ease), transform 0.25s var(--ease);
 }
 
-.wx-link:hover {
-    color: var(--text);
-    background: rgba(255, 255, 255, 0.08);
+.wx-header.show-title .wx-header-title {
+    opacity: 1;
+    transform: none;
 }
 
 .wx-icon-btn {
-    width: 38px;
-    height: 38px;
+    width: 40px;
+    height: 40px;
     border-radius: 50%;
     display: grid;
     place-items: center;
     background: rgba(255, 255, 255, 0.12);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 6px 16px -10px rgba(0, 0, 0, 0.6);
+    transition: background 0.2s, transform 0.15s;
+}
+
+.wx-icon-btn[hidden] {
+    display: none;
+}
+
+.wx-icon-btn .ic {
+    width: 1.25em;
+    height: 1.25em;
+}
+
+.wx-icon-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.wx-icon-btn:active {
+    transform: scale(0.94);
 }
 
 .wx-main {
-    max-width: 760px;
+    max-width: var(--max);
     margin: 0 auto;
-    padding: 1rem max(1rem, env(safe-area-inset-left)) calc(2rem + env(safe-area-inset-bottom));
+    padding: var(--s2) max(var(--s4), env(safe-area-inset-left)) calc(var(--s6) + env(safe-area-inset-bottom));
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: var(--s4);
 }
 
 /* ============ Glass ============ */
@@ -165,85 +225,131 @@ button {
     isolation: isolate;
 }
 
-/* Soft specular sheen in the top-left corner */
+/* Specular sheen in the top-left corner and a faint caustic along the bottom */
 .glass::before {
     content: '';
     position: absolute;
     inset: 0;
     z-index: -1;
-    background: radial-gradient(90% 60% at 0% 0%, rgba(255, 255, 255, 0.16), transparent 55%);
+    background:
+        radial-gradient(90% 60% at 0% 0%, rgba(255, 255, 255, 0.16), transparent 55%),
+        radial-gradient(70% 40% at 100% 120%, rgba(255, 255, 255, 0.07), transparent 60%);
     pointer-events: none;
 }
 
-/* ============ Place cards ============ */
-.places {
-    display: grid;
-    gap: 0.8rem;
+/* ============ Home ============ */
+.home-intro {
+    padding: var(--s4) var(--s1) var(--s2);
 }
 
+.home-date {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+}
+
+.home-title {
+    font-size: 2.1rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-top: var(--s1);
+}
+
+.places {
+    display: grid;
+    gap: var(--s3);
+}
+
+@media (min-width: 720px) {
+    .places {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+/* A card carries its own sky (--tint-a/b from its condition) under the glass */
 .place-card {
     display: grid;
     grid-template-columns: 1fr auto;
-    gap: 0.2rem 1rem;
-    padding: 1.05rem 1.2rem;
-    transition: transform 0.2s ease;
+    grid-template-areas: 'name temp' 'cond hilo' 'spark spark' 'line line' 'alert alert';
+    gap: var(--s1) var(--s4);
+    padding: var(--s4) var(--s5);
+    background:
+        var(--glass),
+        linear-gradient(160deg, color-mix(in srgb, var(--tint-a, #3b4a66) 70%, transparent), color-mix(in srgb, var(--tint-b, #6b7a93) 45%, transparent));
+    transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+}
+
+.place-card:hover {
+    transform: translateY(-2px);
 }
 
 .place-card:active {
     transform: scale(0.985);
 }
 
-.pc-top {
-    grid-column: 1 / -1;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1rem;
-}
-
 .pc-name {
-    font-size: 1.15rem;
+    grid-area: name;
+    font-size: 1.12rem;
     font-weight: 650;
+    align-self: center;
 }
 
 .pc-temp {
-    font-size: 2.9rem;
-    font-weight: 250;
-    line-height: 1;
-    letter-spacing: -0.03em;
+    grid-area: temp;
+    font-size: 3rem;
+    font-weight: 200;
+    line-height: 0.95;
+    letter-spacing: -0.04em;
+    text-align: right;
 }
 
 .pc-cond {
+    grid-area: cond;
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--s2);
     color: var(--text-dim);
     font-size: 0.92rem;
 }
 
 .pc-hilo {
+    grid-area: hilo;
     text-align: right;
     color: var(--text-dim);
-    font-size: 0.88rem;
+    font-size: 0.86rem;
     white-space: pre;
 }
 
+.pc-spark {
+    grid-area: spark;
+    height: 34px;
+    margin-top: var(--s2);
+}
+
+.spark {
+    width: 100%;
+    height: 34px;
+    display: block;
+    overflow: visible;
+}
+
 .pc-line {
-    grid-column: 1 / -1;
-    margin-top: 0.35rem;
+    grid-area: line;
     color: var(--text-faint);
-    font-size: 0.85rem;
+    font-size: 0.84rem;
 }
 
 .pc-alert,
 .hero-alert {
-    grid-column: 1 / -1;
-    margin-top: 0.4rem;
-    padding: 0.35rem 0.65rem;
-    border-radius: 10px;
-    background: rgba(255, 170, 60, 0.18);
-    border: 1px solid rgba(255, 190, 90, 0.35);
-    color: #ffe2b8;
+    grid-area: alert;
+    margin-top: var(--s2);
+    padding: var(--s1) var(--s3);
+    border-radius: 12px;
+    background: rgba(255, 170, 60, 0.2);
+    border: 1px solid rgba(255, 190, 90, 0.38);
+    color: #ffe4bd;
     font-size: 0.82rem;
 }
 
@@ -252,7 +358,7 @@ button {
     color: transparent;
     background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.08));
     background-size: 200% 100%;
-    border-radius: 12px;
+    border-radius: 14px;
     animation: shimmer 1.4s ease-in-out infinite;
 }
 
@@ -261,64 +367,55 @@ button {
     to { background-position: -100% 0; }
 }
 
-.place-locate {
+.place-add {
+    grid-column: 1 / -1;
     display: flex;
     align-items: center;
-    gap: 0.6rem;
     justify-content: center;
+    gap: var(--s2);
+    min-height: 60px;
     font-weight: 600;
     color: var(--text-dim);
+    border-style: dashed;
+    background: rgba(255, 255, 255, 0.05);
 }
 
-/* ============ One place ============ */
-.wx-back {
-    align-self: flex-start;
-    color: var(--text-dim);
-    font-size: 0.9rem;
-    font-weight: 600;
-    padding: 0.2rem 0;
+.place-add:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.1);
 }
 
-.wx-back::before {
-    content: '';
-    display: inline-block;
-    width: 0.45em;
-    height: 0.45em;
-    margin-right: 0.45em;
-    border: solid currentColor;
-    border-width: 0 0.14em 0.14em 0;
-    transform: rotate(135deg) translateY(-0.05em);
-}
-
+/* ============ Hero ============ */
 .hero {
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
-    gap: 0.25rem;
-    padding: 0.6rem 0 0.4rem;
+    gap: var(--s1);
+    padding: var(--s2) 0 var(--s4);
 }
 
 .hero-name {
-    font-size: 1.35rem;
+    font-size: 1.4rem;
     font-weight: 600;
+    text-shadow: 0 2px 16px rgba(0, 0, 0, 0.2);
 }
 
 .hero-temp {
-    font-size: 6.2rem;
-    font-weight: 200;
+    font-size: clamp(5.4rem, 18vw, 7.4rem);
+    font-weight: 180;
     line-height: 1;
     letter-spacing: -0.05em;
     margin-left: 0.12em;   /* the degree sign makes it look off-center */
-    text-shadow: 0 6px 30px rgba(0, 0, 0, 0.18);
+    text-shadow: 0 8px 40px rgba(0, 0, 0, 0.2);
 }
 
 .hero-cond {
     display: flex;
     align-items: center;
-    gap: 0.45rem;
-    font-size: 1.1rem;
-    font-weight: 550;
+    gap: var(--s2);
+    font-size: 1.15rem;
+    font-weight: 560;
 }
 
 .hero-hilo {
@@ -326,75 +423,60 @@ button {
     white-space: pre;
 }
 
-.hero-stats {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 0.5rem 1.4rem;
-    margin-top: 0.8rem;
-}
-
-.stat {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-}
-
-.stat-label {
-    font-size: 0.68rem;
-    font-weight: 700;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-}
-
-.stat-value {
-    font-size: 1rem;
-    font-weight: 600;
-}
-
 .hero-line {
-    margin-top: 0.7rem;
-    font-size: 0.95rem;
-    color: var(--text);
+    margin-top: var(--s3);
+    padding: var(--s2) var(--s4);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    font-size: 0.92rem;
 }
 
-.hero-src {
-    margin-top: 0.3rem;
-    font-size: 0.72rem;
-    color: var(--text-faint);
+.hero-moment {
+    display: flex;
+    gap: var(--s2);
+    align-items: baseline;
+    margin-top: var(--s2);
+    padding: var(--s2) var(--s4);
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(255, 207, 90, 0.22), rgba(255, 150, 90, 0.14));
+    border: 1px solid rgba(255, 210, 130, 0.35);
+    font-size: 0.88rem;
+}
+
+.moment-name {
+    font-weight: 700;
+    color: #ffe0a6;
 }
 
 .hero-alert {
-    margin-top: 0.8rem;
+    margin-top: var(--s3);
 }
 
 /* ============ Panels ============ */
 .panel {
-    padding: 0.9rem 0 0.8rem;
+    padding: var(--s4) 0 var(--s3);
 }
 
-.panel-title {
-    padding: 0 1.1rem 0.5rem;
-    font-size: 0.72rem;
+.panel-title,
+.tile-title {
+    font-size: 0.7rem;
     font-weight: 700;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.11em;
     text-transform: uppercase;
     color: var(--text-faint);
 }
 
-.panel-note {
-    padding: 0.5rem 1.1rem 0;
-    font-size: 0.72rem;
-    color: var(--text-faint);
+.panel-title {
+    padding: 0 var(--s5) var(--s2);
 }
 
 .hourly-scroll {
     overflow-x: auto;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
-    -webkit-mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 24px), transparent);
-    mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 24px), transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 28px), transparent);
 }
 
 .hourly-scroll::-webkit-scrollbar {
@@ -407,7 +489,7 @@ button {
         scrollbar-width: thin;
         scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
         cursor: grab;
-        padding-bottom: 4px;
+        padding-bottom: var(--s1);
     }
 
     .hourly-scroll::-webkit-scrollbar {
@@ -428,13 +510,17 @@ button {
 
 .hourly-svg {
     display: block;
-    margin: 0 0.4rem;
+    margin: 0 var(--s2);
 }
 
 .hourly-svg text {
     fill: var(--text);
     text-anchor: middle;
     font-family: inherit;
+}
+
+.night {
+    fill: rgba(4, 8, 30, 0.13);
 }
 
 .h-time {
@@ -478,7 +564,7 @@ button {
 }
 
 .day-rule {
-    stroke: rgba(255, 255, 255, 0.14);
+    stroke: rgba(255, 255, 255, 0.16);
     stroke-dasharray: 2 4;
 }
 
@@ -495,9 +581,10 @@ button {
     display: grid;
     grid-template-columns: 3.4rem 1.7rem 4.6rem 2.4rem 1fr 2.4rem;
     align-items: center;
-    gap: 0.6rem;
-    padding: 0.6rem 1.1rem;
+    gap: var(--s3);
+    padding: var(--s3) var(--s5);
     border-top: 1px solid rgba(255, 255, 255, 0.07);
+    transition: background 0.2s;
 }
 
 .day:hover {
@@ -526,7 +613,7 @@ button {
     position: relative;
     height: 6px;
     border-radius: 3px;
-    background: rgba(0, 0, 0, 0.22);
+    background: rgba(0, 0, 0, 0.24);
 }
 
 .day-bar i {
@@ -547,14 +634,176 @@ button {
     box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
 }
 
+/* ============ Tiles ============ */
+.tiles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--s3);
+}
+
+.tile {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    padding: var(--s4);
+    min-height: 168px;
+    border-radius: var(--radius-sm);
+}
+
+.tile-title {
+    margin-bottom: var(--s2);
+}
+
+.tile-value {
+    font-size: 2.2rem;
+    font-weight: 250;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+}
+
+.tile-sub {
+    font-weight: 620;
+}
+
+.tile-note {
+    margin-top: auto;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+}
+
+.meter {
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.25);
+    overflow: hidden;
+    margin-top: var(--s2);
+}
+
+.meter i {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, #9fd4ff, #5aa9ff);
+}
+
+.compass {
+    width: 112px;
+    height: 112px;
+    align-self: center;
+}
+
+.compass .dial {
+    fill: rgba(0, 0, 0, 0.12);
+    stroke: rgba(255, 255, 255, 0.18);
+}
+
+.compass .tick {
+    stroke: rgba(255, 255, 255, 0.28);
+    stroke-width: 1;
+}
+
+.compass .tick-major {
+    stroke: rgba(255, 255, 255, 0.7);
+    stroke-width: 1.6;
+}
+
+.compass .cardinal {
+    fill: var(--text-faint);
+    font-size: 9px;
+    font-weight: 700;
+    text-anchor: middle;
+}
+
+.compass .wind-arrow {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.compass .hub {
+    fill: rgba(20, 30, 55, 0.85);
+    stroke: rgba(255, 255, 255, 0.25);
+}
+
+.compass .hub-speed {
+    fill: #fff;
+    font-size: 15px;
+    font-weight: 650;
+    text-anchor: middle;
+}
+
+.compass .hub-unit {
+    fill: var(--text-faint);
+    font-size: 7px;
+    text-anchor: middle;
+}
+
+.tile-wind .tile-note {
+    margin-top: var(--s2);
+    text-align: center;
+}
+
+.sun-arc {
+    width: 100%;
+    height: 64px;
+}
+
+.sun-arc .arc {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.22);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 4;
+}
+
+.sun-arc .arc-done {
+    fill: none;
+    stroke: var(--sun);
+    stroke-width: 2;
+    opacity: 0.85;
+}
+
+.sun-arc .horizon {
+    stroke: rgba(255, 255, 255, 0.25);
+}
+
+.sun-arc .sun-dot {
+    fill: var(--sun);
+    filter: drop-shadow(0 0 6px rgba(255, 207, 90, 0.9));
+}
+
+.sun-times {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--s2);
+    font-size: 0.86rem;
+    font-weight: 600;
+}
+
+.moon {
+    width: 64px;
+    height: 64px;
+}
+
+.moon .moon-dark {
+    fill: rgba(10, 16, 36, 0.55);
+    stroke: rgba(255, 255, 255, 0.12);
+}
+
+.moon .moon-lit {
+    fill: #eef1fa;
+    filter: drop-shadow(0 0 8px rgba(220, 228, 255, 0.45));
+}
+
 .actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.6rem;
+    gap: var(--s2);
 }
 
 .action {
-    padding: 0.7rem 1.1rem;
+    padding: var(--s3) var(--s4);
     border-radius: 999px;
     font-weight: 600;
     font-size: 0.9rem;
@@ -562,68 +811,139 @@ button {
 
 .action-quiet {
     color: var(--text-dim);
+}
+
+.action-quiet:first-of-type {
     margin-left: auto;
 }
 
-/* ============ Search ============ */
-.wx-dialog {
-    margin: max(4rem, 10vh) auto auto;
-    width: min(520px, calc(100% - 2rem));
-    border: 1px solid var(--rim);
-    border-radius: var(--radius);
-    background: rgba(18, 26, 46, 0.92);
-    color: var(--text);
-    box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.7);
-    padding: 0.8rem;
+.sources {
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    padding: var(--s2) var(--s4);
 }
 
-.wx-dialog::backdrop {
-    background: rgba(4, 8, 18, 0.55);
+/* ============ Search sheet ============ */
+.wx-sheet {
+    margin: 0;
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    padding: max(var(--s4), env(safe-area-inset-top)) max(var(--s4), env(safe-area-inset-right)) var(--s4) max(var(--s4), env(safe-area-inset-left));
+}
+
+.wx-sheet[open] {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    animation: sheet-in 0.28s var(--ease);
+}
+
+.wx-sheet::backdrop {
+    background: linear-gradient(180deg, rgba(6, 10, 24, 0.55), rgba(6, 10, 24, 0.72));
+    backdrop-filter: blur(22px) saturate(1.4);
+    -webkit-backdrop-filter: blur(22px) saturate(1.4);
+}
+
+@keyframes sheet-in {
+    from { opacity: 0; transform: translateY(12px); }
+}
+
+.wx-sheet > * {
+    width: min(var(--max), 100%);
 }
 
 .wx-search {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--s3);
+    align-items: center;
 }
 
-.wx-search input {
+.wx-field {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: 0 var(--s4);
+    height: 52px;
+    border-radius: 999px;
+    background: var(--glass-strong);
+    border: 1px solid var(--rim);
+    box-shadow: var(--glass-shadow);
+    color: var(--text-dim);
+}
+
+.wx-field input {
     flex: 1;
     min-width: 0;
+    height: 100%;
     font: inherit;
+    font-size: 1.05rem;
     color: var(--text);
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 14px;
-    padding: 0.65rem 0.9rem;
+    background: none;
+    border: none;
+    outline: none;
 }
 
-.wx-search input:focus-visible {
-    outline: 2px solid rgba(124, 196, 255, 0.7);
+.wx-field:focus-within {
+    border-color: rgba(160, 210, 255, 0.7);
+}
+
+.wx-cancel {
+    font-weight: 600;
+    color: var(--text-dim);
+    padding: var(--s2);
+}
+
+.wx-cancel:hover {
+    color: var(--text);
 }
 
 .wx-results {
     list-style: none;
-    margin-top: 0.5rem;
-    max-height: 50vh;
+    margin-top: var(--s4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
     overflow-y: auto;
 }
 
 .wx-result {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: var(--s3);
     width: 100%;
     text-align: left;
-    padding: 0.6rem 0.7rem;
-    border-radius: 12px;
+    padding: var(--s3) var(--s4);
+    border-radius: var(--radius-sm);
+    background: var(--glass);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    transition: background 0.2s, transform 0.15s;
 }
 
 .wx-result:hover,
 .wx-result:focus-visible {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--glass-strong);
+}
+
+.wx-result:active {
+    transform: scale(0.99);
+}
+
+.wx-result-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
 
 .wx-result-name {
-    font-weight: 600;
+    font-weight: 620;
 }
 
 .wx-result-detail {
@@ -634,32 +954,48 @@ button {
     text-overflow: ellipsis;
 }
 
-.wx-empty {
-    padding: 0.6rem 0.7rem;
+.wx-empty,
+.wx-sheet-note {
+    padding: var(--s3) var(--s4);
     color: var(--text-faint);
+    font-size: 0.85rem;
+}
+
+.wx-sheet-note {
+    margin-top: auto;
+    text-align: center;
+    font-size: 0.74rem;
+}
+
+/* ============ Motion ============ */
+::view-transition-old(root),
+::view-transition-new(root) {
+    animation-duration: 0.26s;
+    animation-timing-function: var(--ease);
+}
+
+::view-transition-group(*) {
+    animation-duration: 0.32s;
+    animation-timing-function: var(--ease);
 }
 
 @media (max-width: 480px) {
-    .hero-temp {
-        font-size: 5.2rem;
-    }
-
-    .hero-stats {
-        gap: 0.5rem 0.9rem;
-    }
-
-    .stat-value {
-        font-size: 0.92rem;
-    }
-
     .day {
         grid-template-columns: 2.9rem 1.5rem 3.6rem 2.1rem 1fr 2.1rem;
-        gap: 0.45rem;
-        padding: 0.6rem 0.8rem;
+        gap: var(--s2);
+        padding: var(--s3) var(--s4);
     }
 
-    .wx-link {
-        padding: 0.4rem 0.55rem;
+    .panel-title {
+        padding: 0 var(--s4) var(--s2);
+    }
+
+    .tiles {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .wx-header-title {
+        font-size: 0.88rem;
     }
 }
 
@@ -669,7 +1005,8 @@ button {
     }
 
     .skeleton-text,
-    .place-card.loading .pc-temp {
+    .place-card.loading .pc-temp,
+    .wx-sheet[open] {
         animation: none;
     }
 }

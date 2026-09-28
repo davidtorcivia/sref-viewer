@@ -155,3 +155,165 @@ export function monotonePath(pts) {
     }
     return d;
 }
+
+// ============ Sun, moon, comfort, holidays ============
+
+const RAD = Math.PI / 180;
+
+/** Sun altitude and azimuth (degrees, azimuth clockwise from north) */
+export function sunPosition(ms, lat, lon) {
+    const d = ms / 86400000 - 10957.5;
+    const g = (357.529 + 0.98560028 * d) * RAD;
+    const q = 280.459 + 0.98564736 * d;
+    const L = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * RAD;
+    const e = (23.439 - 0.00000036 * d) * RAD;
+    const dec = Math.asin(Math.sin(e) * Math.sin(L));
+    const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L));
+    const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
+    const ha = (gmst * 15 + lon) * RAD - ra;
+    const phi = lat * RAD;
+    const alt = Math.asin(Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(ha));
+    const az = Math.atan2(-Math.sin(ha), Math.tan(dec) * Math.cos(phi) - Math.sin(phi) * Math.cos(ha));
+    return { alt: alt / RAD, az: ((az / RAD) + 360) % 360 };
+}
+
+/**
+ * Sunrise and sunset (ms) on the device-local day containing `ms`: where
+ * the sun's center crosses -0.833 degrees (refraction plus the disk).
+ * null for a crossing that does not happen (polar day or night).
+ */
+export function sunTimes(ms, lat, lon) {
+    const day = new Date(ms);
+    day.setHours(0, 0, 0, 0);
+    const f = t => sunAltitude(t, lat, lon) + 0.833;
+    let rise = null, set = null;
+    const step = 10 * 60000;
+    for (let t = day.getTime(); t < day.getTime() + 86400000; t += step) {
+        const a = f(t), b = f(t + step);
+        if (a < 0 && b >= 0 && rise === null) rise = t + step * a / (a - b);
+        if (a >= 0 && b < 0 && set === null) set = t + step * a / (a - b);
+    }
+    return { rise, set };
+}
+
+const SYNODIC = 29.530588853;
+const NEW_MOON = Date.UTC(2000, 0, 6, 18, 14);   // reference new moon
+
+/** Moon phase: {phase 0..1 (0 new, 0.5 full), illum 0..1, name, waxing} */
+export function moonPhase(ms) {
+    const phase = (((ms - NEW_MOON) / 86400000 / SYNODIC) % 1 + 1) % 1;
+    const illum = (1 - Math.cos(2 * Math.PI * phase)) / 2;
+    const names = ['New moon', 'Waxing crescent', 'First quarter', 'Waxing gibbous', 'Full moon',
+        'Waning gibbous', 'Last quarter', 'Waning crescent'];
+    return { phase, illum, name: names[Math.round(phase * 8) % 8], waxing: phase < 0.5 };
+}
+
+/** The next time (ms) the moon reaches `target` phase (0 new, 0.5 full) after `ms` */
+export function nextMoon(ms, target) {
+    const { phase } = moonPhase(ms);
+    return ms + (((target - phase) % 1 + 1) % 1) * SYNODIC * 86400000;
+}
+
+/** Relative humidity (%) from temperature and dew point in °F (Magnus) */
+export function humidity(tf, dpf) {
+    const c = f => (f - 32) * 5 / 9;
+    const m = t => Math.exp(17.625 * t / (243.04 + t));
+    return Math.min(100, 100 * m(c(dpf)) / m(c(tf)));
+}
+
+/** Apparent temperature (°F): NWS heat index when hot, wind chill when cold, else the air */
+export function feelsLike(tf, dpf, mph) {
+    if (tf <= 50 && mph > 3) {
+        return 35.74 + 0.6215 * tf - 35.75 * mph ** 0.16 + 0.4275 * tf * mph ** 0.16;
+    }
+    if (tf >= 80) {
+        const rh = humidity(tf, dpf);
+        const hi = -42.379 + 2.04901523 * tf + 10.14333127 * rh - 0.22475541 * tf * rh - 0.00683783 * tf * tf
+            - 0.05481717 * rh * rh + 0.00122874 * tf * tf * rh + 0.00085282 * tf * rh * rh - 0.00000199 * tf * tf * rh * rh;
+        return Math.max(tf, hi);
+    }
+    return tf;
+}
+
+/** How the air feels from its dew point (°F) */
+export function comfort(dpf) {
+    if (dpf < 40) return 'Dry';
+    if (dpf < 55) return 'Comfortable';
+    if (dpf < 61) return 'A little humid';
+    if (dpf < 66) return 'Humid';
+    if (dpf < 71) return 'Muggy';
+    return 'Oppressive';
+}
+
+// Holidays with the hours people are out in the weather. Dates are local.
+const nthWeekday = (y, m, weekday, n) => {
+    const d = new Date(y, m, 1);
+    const shift = (weekday - d.getDay() + 7) % 7 + (n - 1) * 7;
+    return new Date(y, m, 1 + shift);
+};
+const lastWeekday = (y, m, weekday) => {
+    const d = new Date(y, m + 1, 0);
+    return new Date(y, m, d.getDate() - (d.getDay() - weekday + 7) % 7);
+};
+export function holidays(year) {
+    const at = (d, h0, h1) => [new Date(d).setHours(h0, 0, 0, 0), new Date(d).setHours(h1, 0, 0, 0)];
+    const day = (y, m, d) => new Date(y, m, d);
+    return [
+        { name: "New Year's Day", window: at(day(year, 0, 1), 10, 16) },
+        { name: 'Martin Luther King Jr. Day', window: at(nthWeekday(year, 0, 1, 3), 10, 16) },
+        { name: "Valentine's Day", window: at(day(year, 1, 14), 18, 22), label: 'Evening out' },
+        { name: 'Presidents Day', window: at(nthWeekday(year, 1, 1, 3), 10, 16) },
+        { name: "St. Patrick's Day", window: at(day(year, 2, 17), 11, 17), label: 'Parade hours' },
+        { name: "Mother's Day", window: at(nthWeekday(year, 4, 0, 2), 11, 15), label: 'Brunch' },
+        { name: 'Memorial Day', window: at(lastWeekday(year, 4, 1), 11, 18), label: 'Cookout hours' },
+        { name: "Father's Day", window: at(nthWeekday(year, 5, 0, 3), 11, 17) },
+        { name: 'Juneteenth', window: at(day(year, 5, 19), 11, 18) },
+        { name: 'Independence Day', window: at(day(year, 6, 4), 21, 22), label: 'Fireworks' },
+        { name: 'Labor Day', window: at(nthWeekday(year, 8, 1, 1), 11, 18), label: 'Cookout hours' },
+        { name: 'Indigenous Peoples Day', window: at(nthWeekday(year, 9, 1, 2), 10, 16) },
+        { name: 'Halloween', window: at(day(year, 9, 31), 17, 20), label: 'Trick-or-treat' },
+        { name: 'Veterans Day', window: at(day(year, 10, 11), 10, 16) },
+        { name: 'Thanksgiving', window: at(nthWeekday(year, 10, 4, 4), 9, 17), label: 'Travel and parade' },
+        { name: 'Christmas Eve', window: at(day(year, 11, 24), 16, 23) },
+        { name: 'Christmas', window: at(day(year, 11, 25), 8, 18) },
+        { name: "New Year's Eve", window: at(day(year, 11, 31), 22, 24), label: 'Midnight' },
+    ];
+}
+
+/**
+ * Holiday "moments" within `days` days of `now` that the hourly forecast
+ * covers: [{name, label, when, text}], e.g. Halloween trick-or-treat 58°, dry.
+ */
+export function moments(rows, now, days = 3) {
+    const out = [];
+    const y = new Date(now).getFullYear();
+    for (const h of [...holidays(y), ...holidays(y + 1)]) {
+        const [t0, t1] = h.window;
+        if (t1 < now || t0 > now + days * 86400000) continue;
+        const hrs = rows.filter(r => r.t >= t0 && r.t < t1);
+        if (!hrs.length) continue;
+        const temps = hrs.map(r => r.tmp);
+        const wet = hrs.filter(isWet);
+        const lo = Math.round(Math.min(...temps)), hi = Math.round(Math.max(...temps));
+        const range = lo === hi ? `${lo}°` : `${lo}–${hi}°`;
+        const sky = wet.length ? `${wet.some(r => r.snowy) ? 'snow' : 'rain'} at times`
+            : hrs.every(r => (r.cloud ?? 0) < 40) ? 'clear' : 'dry';
+        out.push({ name: h.name, label: h.label || h.name, when: t0, text: `${range}, ${sky}` });
+    }
+    return out;
+}
+
+/**
+ * SVG path of the moon's lit part: a disk of radius r at (cx, cy) in
+ * `phase` (0 new, 0.5 full). The limb is a half circle on the lit side,
+ * the terminator a half ellipse whose width follows the phase. Northern
+ * sky: lit on the right while waxing.
+ */
+export function moonPath(cx, cy, r, phase) {
+    const k = Math.cos(2 * Math.PI * phase);   // 1 new, -1 full
+    const rx = Math.abs(k) * r;
+    const waxing = phase < 0.5;
+    const limb = waxing ? 1 : 0;
+    const term = waxing ? (k > 0 ? 0 : 1) : (k > 0 ? 1 : 0);
+    return `M${cx},${cy - r}A${r},${r} 0 0 ${limb} ${cx},${cy + r}A${rx},${r} 0 0 ${term} ${cx},${cy - r}Z`;
+}
