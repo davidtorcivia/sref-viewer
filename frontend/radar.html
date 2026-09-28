@@ -41,42 +41,47 @@
 
     <!-- Colors mirror LibreWXR's TWC table (backend TILE_STYLE 4/1_1): 5 dBZ bands, 5-80.
          Rates: Marshall-Palmer Z=200R^1.6 for rain, Z=2000S^2 at 10:1 for snow (both approximate). -->
-    <div class="radar-legend" id="legend" data-overlay="radar">
-        <select id="overlaySelect" class="overlay-select" aria-label="Map overlay">
-            <option value="radar">Radar</option>
-            <option value="satellite">Satellite</option>
-            <option value="both">Radar + satellite</option>
-            <option value="temp">Temperature</option>
-            <option value="dewpoint">Dew point</option>
-            <option value="wind">Wind</option>
-            <option value="clouds">Clouds</option>
-        </select>
-        <div class="legend-grid legend-precip">
-            <span>Rain</span><i class="legend-bar rain"></i>
-            <span></span>
-            <div class="legend-axis">
-                <span style="left: 20%">.03</span><span style="left: 33.33%">.1</span><span style="left: 46.67%">.5</span><span style="left: 60%">2</span>
+    <details class="radar-legend" id="legend" data-overlay="radar" open>
+        <summary class="legend-toggle"><span id="overlayName" class="overlay-name">Radar</span><span class="caret"></span></summary>
+        <div class="legend-body">
+            <select id="overlaySelect" class="overlay-select" aria-label="Map overlay">
+                <option value="radar">Radar</option>
+                <option value="satellite">Satellite</option>
+                <option value="both">Radar + satellite</option>
+                <option value="temp">Temperature</option>
+                <option value="dewpoint">Dew point</option>
+                <option value="wind">Wind</option>
+                <option value="clouds">Clouds</option>
+            </select>
+            <div class="legend-grid legend-precip">
+                <span>Rain</span><i class="legend-bar rain"></i>
+                <span></span>
+                <div class="legend-axis">
+                    <span style="left: 20%">.03</span><span style="left: 33.33%">.1</span><span style="left: 46.67%">.5</span><span style="left: 60%">2</span>
+                </div>
+                <span>Snow</span><i class="legend-bar snow"></i>
+                <span></span>
+                <div class="legend-axis">
+                    <span style="left: 6.67%">.03</span><span style="left: 20%">.1</span><span style="left: 33.33%">.3</span><span style="left: 46.67%">1</span>
+                </div>
             </div>
-            <span>Snow</span><i class="legend-bar snow"></i>
-            <span></span>
-            <div class="legend-axis">
-                <span style="left: 6.67%">.03</span><span style="left: 20%">.1</span><span style="left: 33.33%">.3</span><span style="left: 46.67%">1</span>
+            <div class="legend-caption legend-precip">Inches per hour (approx.)</div>
+            <!-- Filled from the extractor's palette (radar.js renderFieldLegend) -->
+            <div class="legend-grid legend-field">
+                <span id="fieldUnit"></span><i class="legend-bar" id="fieldBar"></i>
+                <span></span>
+                <div class="legend-axis" id="fieldAxis"></div>
             </div>
+            <div class="legend-caption legend-field" id="fieldCaption"></div>
+            <div class="legend-caption legend-sat">Satellite: brighter = thicker, colder cloud tops</div>
+            <div class="legend-caption legend-model">Simulated by the RRFS 3 km model</div>
         </div>
-        <div class="legend-caption legend-precip">Inches per hour (approx.)</div>
-        <!-- Filled from the extractor's palette (radar.js renderFieldLegend) -->
-        <div class="legend-grid legend-field">
-            <span id="fieldUnit"></span><i class="legend-bar" id="fieldBar"></i>
-            <span></span>
-            <div class="legend-axis" id="fieldAxis"></div>
-        </div>
-        <div class="legend-caption legend-field" id="fieldCaption"></div>
-        <div class="legend-caption legend-sat">Satellite: brighter = thicker, colder cloud tops</div>
-    </div>
+    </details>
 
     <div class="radar-controls">
         <button id="playBtn" class="play-btn" title="Play/pause animation" aria-label="Play animation"></button>
         <button id="speedBtn" class="speed-btn" title="Animation speed" aria-label="Animation speed">1&times;</button>
+        <button id="rangeBtn" class="speed-btn range-btn" aria-label="Time range">Now</button>
         <div class="scrubber-wrap">
             <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="Radar frame time">
             <div class="scrubber-labels">

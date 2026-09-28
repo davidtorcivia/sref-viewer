@@ -47,10 +47,22 @@ const NYC = { center: [-73.95, 40.75], zoom: 8.2 };
 const POSITION_KEY = 'sref-radar-position';
 const SPEED_KEY = 'sref-radar-speed';
 const OVERLAY_KEY = 'sref-radar-overlay';
+const RANGE_KEY = 'sref-radar-range';
+const LEGEND_KEY = 'sref-radar-legend';
 // Overlay -> extractor field name, and how opaque each field draws
 const FIELD_OVERLAYS = { temp: 'tmp', dewpoint: 'dpt', wind: 'wind', clouds: 'cloud' };
 const FIELD_OPACITY = { tmp: 0.6, dpt: 0.6, wind: 0.75, cloud: 0.9 };
+// Radar/satellite past 'now' come from RRFS simulated reflectivity and IR
+const MODEL_OVERLAYS = { radar: 'refc', satellite: 'sat', both: 'both' };
 const OVERLAYS = ['radar', 'satellite', 'both', ...Object.keys(FIELD_OVERLAYS)];
+// Time range: observations (model fields: short-range RRFS) ~2h back to 1h
+// ahead, then RRFS hourly to 36h, then 3-hourly to 84h
+const RANGES = [
+    { mode: 'now', label: 'Now', title: 'Last 2 hours to 1 hour ahead' },
+    { mode: 'hourly', label: '36h', title: 'RRFS forecast, hourly to 36 hours' },
+    { mode: 'extended', label: '3½d', title: 'RRFS forecast, 3-hourly to 3½ days' },
+];
+const fieldFor = (which, mode) => FIELD_OVERLAYS[which] || (mode === 'now' ? null : MODEL_OVERLAYS[which]);
 
 function savedPosition() {
     try {
@@ -80,10 +92,13 @@ const els = {
     fieldCaption: document.getElementById('fieldCaption'),
     legend: document.getElementById('legend'),
     overlay: document.getElementById('overlaySelect'),
+    overlayName: document.getElementById('overlayName'),
+    rangeBtn: document.getElementById('rangeBtn'),
 };
 
 let map = null;
 let overlay = OVERLAYS.includes(store.get(OVERLAY_KEY)) ? store.get(OVERLAY_KEY) : 'radar';
+let rangeIdx = Math.max(0, RANGES.findIndex(r => r.mode === store.get(RANGE_KEY)));
 let frames = [];          // [{ time, path, nowcast, sat, field }]
 let mapReady = false;
 let backdropId = null;    // latest satellite frame under the radar in 'both'
@@ -103,7 +118,7 @@ let speedIdx = (() => {
 })();
 
 function tileUrl(frame) {
-    if (frame.field) return `/api/radar/field/${frame.field}.png`;
+    if (frame.field) return `/api/radar/field/${frame.field}/{z}/{x}/{y}.png`;
     if (frame.sat) return `/api/radar/sat/${frame.time}/{z}/{x}/{y}.png`;
     const url = `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png?v=${TILE_STYLE_V}`;
     // A nowcast frame shares its time with the observed frame it later
@@ -123,7 +138,8 @@ function layerId(frame) {
 // Animated frames for the chosen overlay, plus the static satellite
 // backdrop shown under the radar in 'both'
 async function fetchFrames(which) {
-    if (FIELD_OVERLAYS[which]) return { frames: await fetchFieldFrames(FIELD_OVERLAYS[which]), backdrop: null };
+    const field = fieldFor(which, RANGES[rangeIdx].mode);
+    if (field) return { frames: await fetchFieldFrames(field), backdrop: null };
     const res = await fetch('/api/radar/frames');
     if (!res.ok) throw new Error(`Frame index HTTP ${res.status}`);
     const data = await res.json();
@@ -135,16 +151,17 @@ async function fetchFrames(which) {
     return { frames: past.concat(nowcast), backdrop: which === 'both' ? sat[sat.length - 1] || null : null };
 }
 
-// Hourly RRFS field, one extractor-rendered Web Mercator image per forecast hour
+// RRFS field, extractor-rendered tiles per forecast hour
 async function fetchFieldFrames(name) {
-    const res = await fetch('/api/radar/field');
+    const res = await fetch(`/api/radar/field?mode=${RANGES[rangeIdx].mode}&field=${name}`);
     if (!res.ok) throw new Error(`Field index HTTP ${res.status}`);
     const d = await res.json();
-    renderFieldLegend(d.fields[name]);
+    if (d.fields[name]) renderFieldLegend(d.fields[name]);
     const run = Date.UTC(+d.date.slice(0, 4), +d.date.slice(4, 6) - 1, +d.date.slice(6, 8), +d.cycle) / 1000;
     const now = Date.now() / 1000;
     return d.hours.map(h => ({
-        time: run + h * 3600, basis: run, fh: h, cycle: d.cycle, bounds: d.bounds,
+        time: run + h * 3600, basis: run, fh: h, cycle: d.cycle, bounds: d.bounds, tile: d.tile, maxzoom: d.maxzoom,
+        grid: d.grid.fields.includes(name) ? d.grid : null,
         name, field: `${name}/${d.date}/${d.cycle}/${h}`, nowcast: run + h * 3600 > now,
     }));
 }
@@ -169,8 +186,8 @@ function renderFieldLegend({ stops, unit, label, ticks }) {
 
 function sourceFor(frame) {
     if (frame.field) {
-        const [w, s, e, n] = frame.bounds;
-        return { type: 'image', url: tileUrl(frame), coordinates: [[w, n], [e, n], [e, s], [w, s]] };
+        return { type: 'raster', tiles: [tileUrl(frame)], tileSize: frame.tile, maxzoom: frame.maxzoom,
+            bounds: frame.bounds, attribution: 'Model &copy; NOAA RRFS' };
     }
     return frame.sat
         ? { type: 'raster', tiles: [tileUrl(frame)], tileSize: TILE_SIZE, maxzoom: SAT_MAXZOOM,
@@ -192,9 +209,9 @@ function labelLayerId() {
 
 function addFrameLayer(frame) {
     const id = layerId(frame);
-    // Insert below warning polygons (and labels) so alert outlines stay
-    // visible on top of the radar.
-    const beforeId = map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId();
+    // Insert below map numbers, warning polygons and labels so they all
+    // stay visible on top of the radar.
+    const beforeId = ['numbers', 'alerts-fill'].find(id => map.getLayer(id)) ?? labelLayerId();
     map.addSource(id, sourceFor(frame));
     map.addLayer({
         id,
@@ -205,7 +222,7 @@ function addFrameLayer(frame) {
             'raster-opacity-transition': { duration: 0 },
             'raster-fade-duration': 0,
             // White clouds vanish on the light basemap: dim them to gray
-            ...(frame.name === 'cloud' && isLight ? { 'raster-brightness-max': 0.6 } : {})
+            ...((frame.name === 'cloud' || frame.name === 'sat') && isLight ? { 'raster-brightness-max': 0.6 } : {})
         }
     }, beforeId);
     loadedLayerIds.add(id);
@@ -305,6 +322,7 @@ function showFrame(index) {
     }
     els.scrubber.value = String(currentFrame);
     updateFrameLabel();
+    syncGrid(frames[currentFrame]);
 }
 
 function updateFrameLabel() {
@@ -318,7 +336,7 @@ function updateFrameLabel() {
     }) + ' ET';
 
     if (frame.field) {
-        els.frameBadge.textContent = `RRFS ${frame.cycle}Z +${frame.fh}h`;
+        els.frameBadge.textContent = `+${frame.fh}h`;   // cycle is in the header pill
         els.frameBadge.classList.toggle('nowcast', frame.nowcast);
     } else if (frame.nowcast) {
         const minsAhead = Math.round((frame.time * 1000 - Date.now()) / 60000);
@@ -461,7 +479,9 @@ function setOverlay(which) {
     overlay = which;
     store.set(OVERLAY_KEY, which);
     els.overlay.value = which;
+    els.overlayName.textContent = els.overlay.selectedOptions[0].text;
     els.legend.dataset.overlay = FIELD_OVERLAYS[which] ? 'field' : which;
+    els.legend.dataset.model = String(!FIELD_OVERLAYS[which] && !!fieldFor(which, RANGES[rangeIdx].mode));
     if (!mapReady) return;   // map 'load' picks it up
     pause();
     for (const id of [...loadedLayerIds]) removeLayer(id);
@@ -473,9 +493,9 @@ function setOverlay(which) {
 
 async function refreshFrames({ initial = false } = {}) {
     try {
-        const which = overlay;
+        const which = overlay, range = rangeIdx;
         const { frames: newFrames, backdrop } = await fetchFrames(which);
-        if (which !== overlay) return;   // overlay switched mid-fetch
+        if (which !== overlay || range !== rangeIdx) return;   // switched mid-fetch
         syncBackdrop(backdrop);
         if (!newFrames.length) throw new Error('No frames available');
 
@@ -510,6 +530,199 @@ async function refreshFrames({ initial = false } = {}) {
             els.frameBadge.textContent = '';
         }
     }
+}
+
+// ============ Map numbers + wind particles ============
+// Both read the field's coarse lat/lon grid (/grid.bin: int8, -128 off the
+// model grid; wind is earth-relative u then v in 0.5 m/s). Numbers are a
+// symbol layer under the basemap labels, so place names win collisions.
+const NUMBER_SPACING_PX = 110;
+const FLOW_CELL = 8;                  // px per screen-space velocity lookup cell
+const PARTICLE_SPEED = 0.25;          // px per animation frame per m/s, same at every zoom
+const PARTICLE_DENSITY = 1 / 900;     // particles per px of map
+const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+const gridCache = new Map();          // url -> Promise<Int8Array | null>
+let grid = null;                      // { name, meta, data } for the frame on screen
+let flow = null;                      // { cols, rows, v: Float32Array [vx, vy] per cell }
+let particles = [];
+let particleRaf = 0;
+let particleCanvas = null;
+
+function loadGrid(frame) {
+    const url = `/api/radar/field/${frame.field}/grid.bin`;
+    if (!gridCache.has(url)) {
+        if (gridCache.size >= 48) gridCache.delete(gridCache.keys().next().value);
+        gridCache.set(url, fetch(url)
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+            })
+            .then(b => new Int8Array(b))
+            .catch(() => { gridCache.delete(url); return null; }));
+    }
+    return gridCache.get(url);
+}
+
+// Bilinear value of grid layer k (0, or 1 for wind v) at lng/lat; null off the grid
+function gridValue(lng, lat, k = 0) {
+    const { meta, data } = grid;
+    const x = (lng - meta.west) / meta.step, y = (meta.north - lat) / meta.step;
+    const c = Math.floor(x), r = Math.floor(y);
+    if (c < 0 || r < 0 || c >= meta.nx - 1 || r >= meta.ny - 1) return null;
+    const o = k * meta.nx * meta.ny + r * meta.nx + c;
+    const q = [data[o], data[o + 1], data[o + meta.nx], data[o + meta.nx + 1]];
+    if (q.includes(-128)) return null;
+    const fx = x - c, fy = y - r;
+    return (q[0] * (1 - fx) + q[1] * fx) * (1 - fy) + (q[2] * (1 - fx) + q[3] * fx) * fy;
+}
+
+function numberText(lng, lat) {
+    if (grid.name !== 'wind') {
+        const v = gridValue(lng, lat);
+        return v === null ? null : `${Math.round(v)}°`;
+    }
+    const u = gridValue(lng, lat, 0), v = gridValue(lng, lat, 1);
+    return u === null || v === null ? null : String(Math.round(Math.hypot(u, v) / 2 * 2.23694));
+}
+
+// A lattice fixed in lat/lon (power-of-two degree spacing, odd rows offset)
+// so numbers stay put while panning instead of re-sampling under the finger
+function updateNumbers() {
+    const src = map.getSource('numbers');
+    if (!src) return;
+    const features = [];
+    if (grid) {
+        const pxPerDeg = 512 * 2 ** map.getZoom() / 360;
+        const s = 2 ** Math.round(Math.log2(NUMBER_SPACING_PX / pxPerDeg));
+        const b = map.getBounds();
+        for (let i = Math.floor(b.getSouth() / s); i * s <= b.getNorth(); i++) {
+            const shift = i % 2 ? s / 2 : 0;
+            for (let j = Math.floor(b.getWest() / s) - 1; j * s + shift <= b.getEast(); j++) {
+                const lng = j * s + shift, lat = i * s;
+                const t = numberText(lng, lat);
+                if (t !== null) features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { t } });
+            }
+        }
+    }
+    src.setData({ type: 'FeatureCollection', features });
+}
+
+function addNumbersLayer() {
+    // An upright font the basemap already serves glyphs for (bold if it has one)
+    const fonts = map.getStyle().layers.flatMap(l => l.type === 'symbol' && Array.isArray(l.layout?.['text-font'])
+        ? [l.layout['text-font']] : []).filter(f => !/italic/i.test(f.join()));
+    const font = fonts.find(f => /bold/i.test(f.join())) || fonts[0] || ['Noto Sans Regular'];
+    map.addSource('numbers', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+        id: 'numbers', type: 'symbol', source: 'numbers',
+        layout: { 'text-field': ['get', 't'], 'text-font': font, 'text-size': 12, 'text-padding': 8 },
+        paint: {
+            'text-color': isLight ? '#1b2230' : '#f4f6fb',
+            'text-halo-color': isLight ? 'rgba(255,255,255,0.8)' : 'rgba(8,10,16,0.7)',
+            'text-halo-width': 1.4,
+        },
+    }, labelLayerId());
+}
+
+// Screen-space velocity per FLOW_CELL, rebuilt when the view settles or
+// the wind frame changes, so the animation loop never unprojects. A running
+// animation just picks up the new velocities, keeping its trails.
+let cellLngLat = null;                // { key, ll: Float64Array [lng, lat] per cell } for the current view
+function buildFlow() {
+    if (!grid || grid.name !== 'wind' || reducedMotion) { flow = null; stopParticles(); return; }
+    if (map.isMoving()) return;       // moveend rebuilds
+    const { clientWidth: w, clientHeight: h } = map.getContainer();
+    const cols = Math.ceil(w / FLOW_CELL) + 1, rows = Math.ceil(h / FLOW_CELL) + 1;
+    const key = `${w}x${h}@${map.getCenter().toArray()}/${map.getZoom()}`;
+    if (cellLngLat?.key !== key) {
+        const ll = new Float64Array(cols * rows * 2);
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const p = map.unproject([c * FLOW_CELL, r * FLOW_CELL]);
+                ll[(r * cols + c) * 2] = p.lng;
+                ll[(r * cols + c) * 2 + 1] = p.lat;
+            }
+        }
+        cellLngLat = { key, ll };
+    }
+    const v = new Float32Array(cols * rows * 2);
+    for (let i = 0; i < v.length; i += 2) {
+        const u = gridValue(cellLngLat.ll[i], cellLngLat.ll[i + 1], 0);
+        const vv = gridValue(cellLngLat.ll[i], cellLngLat.ll[i + 1], 1);
+        v[i] = u === null ? NaN : u / 2 * PARTICLE_SPEED;
+        v[i + 1] = vv === null ? NaN : -vv / 2 * PARTICLE_SPEED;   // north is up the screen
+    }
+    const resized = flow?.w !== w || flow?.h !== h;
+    flow = { cols, rows, w, h, v };
+    if (!particleRaf || resized) startParticles();
+}
+
+function spawn(p) {
+    p.x = Math.random() * flow.w;
+    p.y = Math.random() * flow.h;
+    p.age = 40 + Math.random() * 60;
+    return p;
+}
+
+function startParticles() {
+    stopParticles();
+    if (!particleCanvas) {
+        particleCanvas = document.createElement('canvas');
+        particleCanvas.className = 'particles';
+        map.getCanvasContainer().appendChild(particleCanvas);
+    }
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    particleCanvas.width = flow.w * dpr;
+    particleCanvas.height = flow.h * dpr;
+    const ctx = particleCanvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = isLight ? 'rgba(20, 28, 45, 0.7)' : 'rgba(255, 255, 255, 0.8)';
+    const count = Math.min(3000, Math.round(flow.w * flow.h * PARTICLE_DENSITY));
+    particles = Array.from({ length: count }, () => spawn({}));
+    const step = () => {
+        // Fade the trails, then extend each particle one step along the flow
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.92)';
+        ctx.fillRect(0, 0, flow.w, flow.h);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.beginPath();
+        for (const p of particles) {
+            const i = (((p.y / FLOW_CELL) | 0) * flow.cols + ((p.x / FLOW_CELL) | 0)) * 2;
+            const vx = flow.v[i], vy = flow.v[i + 1];
+            if (p.age-- <= 0 || !(vx === vx) || p.x < 0 || p.y < 0 || p.x >= flow.w || p.y >= flow.h) {
+                spawn(p);
+                continue;
+            }
+            ctx.moveTo(p.x, p.y);
+            p.x += vx;
+            p.y += vy;
+            ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+        particleRaf = requestAnimationFrame(step);
+    };
+    particleRaf = requestAnimationFrame(step);
+}
+
+function stopParticles() {
+    cancelAnimationFrame(particleRaf);
+    particleRaf = 0;
+    particleCanvas?.getContext('2d').clearRect(0, 0, particleCanvas.width, particleCanvas.height);
+}
+
+// Point numbers and particles at the frame on screen once its grid arrives
+function syncGrid(frame) {
+    if (!frame?.grid) {
+        if (grid) { grid = null; updateNumbers(); buildFlow(); }
+        return;
+    }
+    loadGrid(frame).then(data => {
+        if (frames[currentFrame] !== frame || !data) return;
+        grid = { name: frame.name, meta: frame.grid, data };
+        updateNumbers();
+        buildFlow();
+    });
 }
 
 function init() {
@@ -560,6 +773,7 @@ function init() {
 
     map.on('load', async () => {
         mapReady = true;
+        addNumbersLayer();
         loadAlerts();
         setInterval(() => !document.hidden && loadAlerts(), ALERTS_REFRESH_MS);
         await refreshFrames({ initial: true });
@@ -568,6 +782,10 @@ function init() {
         play();
         setInterval(() => !document.hidden && refreshFrames(), REFRESH_MS);
     });
+
+    map.on('movestart', stopParticles);
+    map.on('moveend', () => { if (grid) { updateNumbers(); buildFlow(); } });
+    map.on('resize', () => grid && buildFlow());   // a size change restarts the particles
 
     // Refetch alerts when the map moves well away from the last fetch center
     map.on('moveend', () => {
@@ -582,6 +800,23 @@ function init() {
 
     setOverlay(overlay);
     els.overlay.addEventListener('change', () => setOverlay(els.overlay.value));
+
+    const showRange = () => {
+        const r = RANGES[rangeIdx];
+        els.rangeBtn.textContent = r.label;
+        els.rangeBtn.title = r.title;
+        els.rangeBtn.dataset.forecast = String(r.mode !== 'now');
+    };
+    showRange();
+    els.rangeBtn.addEventListener('click', () => {
+        rangeIdx = (rangeIdx + 1) % RANGES.length;
+        store.set(RANGE_KEY, RANGES[rangeIdx].mode);
+        showRange();
+        setOverlay(overlay);
+    });
+
+    if (store.get(LEGEND_KEY) === '0') els.legend.open = false;
+    els.legend.addEventListener('toggle', () => store.set(LEGEND_KEY, els.legend.open ? '1' : '0'));
 
     els.speedBtn.textContent = SPEEDS[speedIdx].label;
     els.speedBtn.addEventListener('click', () => {

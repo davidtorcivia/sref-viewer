@@ -853,27 +853,40 @@ async function warmRadarTilesOnce() {
 app.get('/api/radar/field', async (req, res) => {
     try {
         res.set('Cache-Control', 'public, max-age=300');
-        res.json(await getJson(`${EXTRACTOR_URL}/fields`, 30000));
+        const mode = ['now', 'hourly', 'extended'].includes(req.query.mode) ? req.query.mode : 'hourly';
+        // field: the extractor pre-fetches that field's hours in the background
+        const field = /^[a-z]{1,10}$/.test(req.query.field || '') ? req.query.field : '';
+        res.json(await getJson(`${EXTRACTOR_URL}/fields?mode=${mode}&field=${field}`, 30000));
     } catch (err) {
         res.status(502).json({ error: 'Model fields unavailable', details: err.message });
     }
 });
 
-app.get('/api/radar/field/:name/:date/:cycle/:fh.png', async (req, res) => {
+// One loop is ~37 frames x ~12 visible tiles, re-requested on every zoom
+const fieldBuckets = new Map();
+
+// Tiles and the numbers/particles grid for one field and hour; a cycle's output never changes
+app.get('/api/radar/field/:name/:date/:cycle/:fh/:z/:x/:y.png', (req, res) =>
+    proxyField(req, res, 'png', `&z=${req.params.z}&x=${req.params.x}&y=${req.params.y}`));
+app.get('/api/radar/field/:name/:date/:cycle/:fh/grid.bin', (req, res) => proxyField(req, res, 'grid', ''));
+
+async function proxyField(req, res, kind, extra) {
     const { name, date, cycle, fh } = req.params;
-    if (!/^[a-z]{1,10}$/.test(name) || !/^\d{8}$/.test(date) || !/^\d{2}$/.test(cycle) || !/^\d{1,2}$/.test(fh)) return res.status(400).end();
+    if (!/^[a-z]{1,10}$/.test(name) || !/^\d{8}$/.test(date) || !/^\d{2}$/.test(cycle)
+        || !Object.values(req.params).slice(3).every(v => /^\d{1,4}$/.test(v))) return res.status(400).end();
+    // ponytail: every miss renders in the extractor (~20ms warm); wrap in tileCache if extractor CPU bites
+    if (!takeToken(req.ip, fieldBuckets, 1500, 60)) return res.status(429).end();
     try {
-        const up = await fetch(`${EXTRACTOR_URL}/fields/${name}.png?date=${date}&cycle=${cycle}&fh=${fh}`,
+        const up = await fetch(`${EXTRACTOR_URL}/fields/${name}.${kind}?date=${date}&cycle=${cycle}&fh=${fh}${extra}`,
             { signal: AbortSignal.timeout(60000) });
         if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).end();
-        res.set('Content-Type', 'image/png');
-        // A cycle's frame never changes
+        res.set('Content-Type', up.headers.get('content-type'));
         res.set('Cache-Control', 'public, max-age=86400, immutable');
         res.send(Buffer.from(await up.arrayBuffer()));
     } catch {
         res.status(502).end();
     }
-});
+}
 
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
 // Cached per rounded location so all viewers of an area share one
