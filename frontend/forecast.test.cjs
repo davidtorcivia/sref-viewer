@@ -152,14 +152,22 @@ const assert = require('node:assert/strict');
         assert.ok(sp.segs[0].observed && !sp.segs[96].observed);
         assert.equal(sp.segs[96].tmp, 63);                       // the join shows the analysis value
         assert.equal(sp.now.x, '260.0');                         // now sits at the top
-        const strokes = n => Math.round(n / (0.4 / 25.4));
-        assert.equal(sp.rain.length, strokes(0.1) + strokes(0.02));
+        assert.equal(sp.rain.length, 2);                         // one drop per wet hour
+        assert.ok(sp.rain[0].t < now && sp.rain[1].t > now);
         assert.equal(sp.wedges.length, 1);
         assert.equal(sp.table.pastRain, 0.1);
         assert.equal(sp.table.pastLow, 60);
         assert.equal(sp.table.nextLow, 55);
         assert.ok(Math.abs(sp.table.nextRain - 0.02) < 1e-9);
-        assert.equal(sp.low.tmp, 55);
+        assert.equal(sp.table.nextHigh, 67);                     // the hour starting 24 h out still counts
+        assert.equal(sp.table.nextLowAt, h0);
+        // possible paths stay inside the p10..p90 range and repeat for a seed
+        const rows = [0, 1, 2, 3].map(i => ({ x: i * 3 * H, y: 60 + i, p10: 56 + i, p25: 58 + i, p75: 62 + i, p90: 64 + i }));
+        const ps = sg.samplePaths(rows, 30, 7);
+        assert.equal(ps.length, 30);
+        assert.ok(ps.every(path => path.every((p, i) => p.v >= rows[i].p10 - 1e-9 && p.v <= rows[i].p90 + 1e-9)));
+        assert.deepEqual(sg.samplePaths(rows, 3, 7), sg.samplePaths(rows, 3, 7));
+        assert.notDeepEqual(sg.samplePaths(rows, 3, 7), sg.samplePaths(rows, 3, 8));
         assert.equal(sp.wind.length, 12);
         // the current hour's report not in yet: the lap still reaches now, no gap
         const gap = past.map((h, i) => (i === past.length - 1 ? { ...h, tmp: null } : h));

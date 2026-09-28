@@ -35,6 +35,7 @@ if (EMBED) {
             setGestures(e.data.view === 'mini');
             if (map) map.resize();
         }
+        if (OVERLAYS.includes(e.data.layer)) { layerFromParent = true; if (overlayReady) setOverlay(e.data.layer); else overlay = e.data.layer; }
         if (e.data.play === false) pause();
         else if (e.data.play === true && frames.length) play();
     });
@@ -128,6 +129,7 @@ const els = {
 };
 
 let map = null;
+let overlayReady = false, layerFromParent = false;   // setOverlay needs the map and controls; an embed's early message just picks the start
 let overlay = OVERLAYS.includes(store.get(OVERLAY_KEY)) ? store.get(OVERLAY_KEY) : 'radar';
 let rangeIdx = Math.max(0, RANGES.findIndex(r => r.mode === store.get(RANGE_KEY)));
 let frames = [];          // [{ time, path, nowcast, sat, field }]
@@ -1021,7 +1023,7 @@ function init() {
     // range is chosen to cover t; the query is dropped so a reload resumes normally.
     const link = new URLSearchParams(location.search);
     const linkTime = Number(link.get('t')) || 0;
-    if (OVERLAYS.includes(link.get('layer'))) overlay = link.get('layer');
+    if (OVERLAYS.includes(link.get('layer')) && !layerFromParent) overlay = link.get('layer');
     if (linkTime) {
         const ahead = (linkTime - Date.now() / 1000) / 3600;
         rangeIdx = RANGES.findIndex(r => r.mode === (ahead <= 0.5 ? 'now' : ahead <= 26 ? 'hourly' : 'extended'));
@@ -1033,6 +1035,7 @@ function init() {
     }
 
     setOverlay(overlay);
+    overlayReady = true;
     els.overlay.addEventListener('change', () => setOverlay(els.overlay.value));
 
     els.rangeBtn.addEventListener('click', () => {

@@ -109,29 +109,21 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
         segs.push({ s: a, t: tOf(a), tmp: v, observed: a < 24,
             d: `M${f1(p1[0])},${f1(p1[1])} L${f1(p2[0])},${f1(p2[1])} L${f1(p3[0])},${f1(p3[1])} L${f1(p4[0])},${f1(p4[1])} Z` });
     }
-    const outer = [], inner = [], track = [];
-    for (let q = 0; q <= 192; q++) {
-        const s = q / 4, o = P(R(s) + W, s), i = P(R(s) - W, s), m = P(R(s), s);
-        outer.push(`${f1(o[0])},${f1(o[1])}`);
-        inner.unshift(`${f1(i[0])},${f1(i[1])}`);
-        track.push(`${f1(m[0])},${f1(m[1])}`);
-    }
+    const track = [];
+    for (let q = 0; q <= 192; q++) { const s = q / 4, m = P(R(s), s); track.push(`${f1(m[0])},${f1(m[1])}`); }
     // the end: an arrowhead pointing on, clockwise
     const e1 = P(R(48) + W + 4, 48), e2 = P(R(48) - W - 4, 48), ta = A(48) + Math.PI / 2;
     const tip = [C + R(48) * Math.cos(A(48)) + Math.cos(ta) * 20, C + R(48) * Math.sin(A(48)) + Math.sin(ta) * 20];
 
-    // rain: a short stroke across the band per 0.4 mm (0.0157 in) in the hour
-    const MM = 0.4 / 25.4;
+    // rain: a drop on the band for each wet hour, sized by the amount (0.01 in to 0.25 in and up)
     const rain = [];
-    const strokes = (s0, inches) => {
-        const n = Math.min(12, Math.round((inches || 0) / MM));
-        for (let j = 0; j < n; j++) {
-            const s = s0 + (j + 0.5) / n, a = P(R(s) - W + 3, s), b = P(R(s) + W - 3, s);
-            rain.push({ x1: f1(a[0]), y1: f1(a[1]), x2: f1(b[0]), y2: f1(b[1]) });
-        }
+    const drop = (s0, inches, t) => {
+        if (!(inches >= 0.01)) return;
+        const s = s0 + 0.5, [x, y] = P(R(s), s), r = 3 + Math.min(1, Math.sqrt(inches / 0.25)) * 5.5;
+        rain.push({ t, inches, x: f1(x), y: f1(y), d: dropPath(x, y, r) });
     };
-    for (const h of past) { const s = (h.t - t0) / HOUR; if (s >= 0 && s < 24) strokes(s, h.precip); }
-    for (const r of future) { const s = 24 + (r.t - now) / HOUR; if (s >= 24 && s < 48) strokes(s, r.qpf); }
+    for (const h of past) { const s = (h.t - t0) / HOUR; if (s >= 0 && s < 24) drop(s, h.precip, h.t); }
+    for (const r of future) { const s = 24 + (r.t - now) / HOUR; if (s >= 24 && s < 48) drop(s, r.qpf, r.t); }
 
     // night: one wedge per dark spell behind both laps (sunset and sunrise barely move in a day)
     const wedges = [];
@@ -139,8 +131,7 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
         const sa = Math.max(0, (a - now) / HOUR), sb = Math.min(24, (b - now) / HOUR);
         if (sb - sa < 0.05) continue;
         const th = s => (s / 24) * 2 * Math.PI - Math.PI / 2;
-        const mid = [C + (r1 + W + 50) * Math.cos(th((sa + sb) / 2)), C + (r1 + W + 50) * Math.sin(th((sa + sb) / 2))];
-        wedges.push({ a, b, d: annulus(C, C, r0 - 20, r1 + W + 38, th(sa), th(sb)), label: { x: f1(mid[0]), y: f1(mid[1]) } });
+        wedges.push({ a, b, d: annulus(C, C, r0 - 20, r1 + W + 38, th(sa), th(sb)) });
     }
 
     // wind ahead: every two hours outside the outer lap, longer when stronger
@@ -156,22 +147,52 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     const ahead = future.filter(r => r.t + HOUR > now && r.t < now + 24 * HOUR);
     const lo = ahead.reduce((m, r) => (m == null || r.tmp < m.tmp ? r : m), null);
     const hi = ahead.reduce((m, r) => (m == null || r.tmp >= m.tmp ? r : m), null);
-    const place = (r, dr) => { const s = 24 + (r.t - now) / HOUR + 0.5, [x, y] = P(R(s) + dr, s); return { t: r.t, tmp: r.tmp, x: f1(x), y: f1(y), right: x >= C }; };
     const nowPt = P(R(24), 24);
     const pastRain = past.reduce((a, h) => a + (h.precip || 0), 0);
     const pastTemps = past.map(h => h.tmp).filter(v => v != null);
     return {
         segs, rain, wedges, wind, track: `M${track.join('L')}`,
-        edge: `M${outer.join('L')}L${f1(tip[0])},${f1(tip[1])}L${inner.join('L')}Z`,
         tip: `M${f1(e1[0])},${f1(e1[1])} L${f1(tip[0])},${f1(tip[1])} L${f1(e2[0])},${f1(e2[1])} Z`,
         end: future.length ? future[Math.min(future.length - 1, 24)].tmp : null,
         now: { x: f1(nowPt[0]), y: f1(nowPt[1]) },
-        low: lo && place(lo, 58), high: hi && place(hi, 52),
         table: {
             pastRain: past.length ? pastRain : null, nextRain: ahead.reduce((a, r) => a + (r.qpf || 0), 0),
             pastLow: pastTemps.length ? Math.min(...pastTemps) : null, nextLow: lo?.tmp ?? null,
+            pastHigh: pastTemps.length ? Math.max(...pastTemps) : null, nextHigh: hi?.tmp ?? null,
+            nextLowAt: lo?.t ?? null, nextHighAt: hi?.t ?? null,
         },
     };
+}
+
+// A raindrop of radius r centered at (x, y), point up
+export function dropPath(x, y, r) {
+    const p = (dx, dy) => `${f1(x + dx * r)},${f1(y + dy * r)}`;
+    return `M${p(0, -1.75)} C${p(0.55, -0.95)} ${p(1, -0.35)} ${p(1, 0.15)} A${f1(r)},${f1(r)} 0 1 1 ${p(-1, 0.15)} C${p(-1, -0.35)} ${p(-0.55, -0.95)} ${p(0, -1.75)} Z`;
+}
+
+/**
+ * Possible temperature paths inside the ensemble's spread: each path wanders
+ * through quantile levels (an AR(1) walk in normal space, 0.8 correlation per
+ * 3-hour step), so every path is a plausible trace and together they keep the
+ * spread's p10–p90 range. Quantile levels outside 0.1..0.9 are clipped to
+ * the published range. Deterministic for a given seed.
+ *   rows: REFS rows {x (ms), y, p10, p25, p75, p90}; returns [[{t, v}]]
+ */
+export function samplePaths(rows, n = 16, seed = 1) {
+    let a = seed >>> 0;
+    const rand = () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const gauss = () => Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
+    const phi = z => 0.5 * (1 + Math.tanh(0.7978845608 * (z + 0.044715 * z * z * z)));   // normal CDF, tanh approximation
+    const rho = 0.8;
+    const out = [];
+    for (let k = 0; k < n; k++) {
+        let z = gauss();
+        out.push(rows.map((row, i) => {
+            if (i) z = rho * z + Math.sqrt(1 - rho * rho) * gauss();
+            return { t: row.x, v: quantile(row, Math.min(0.9, Math.max(0.1, phi(z)))) };
+        }));
+    }
+    return out;
 }
 
 // Angle-to-time for a pointer on the spiral: the lap is picked by radius

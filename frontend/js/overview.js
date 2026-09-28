@@ -4,8 +4,8 @@
  *   hero      the next 24 hours as a color field, the observed temperature,
  *             one sentence, and the 48-hour spiral (last 24 h observed inside,
  *             next 24 h forecast outside)
- *   readouts  eight values at the cursor time
- *   hours     48 hours: RRFS line, ensemble quantile paths, wind
+ *   readouts  eight values at the cursor time; a card slides its detail open below
+ *   hours     48 hours: RRFS line, possible paths within the ensemble spread, wind
  *   days      the NBM days on one temperature axis, rain as 20 outcomes
  *   radar, ensemble plumes
  * One cursor time drives the hero number, the readouts, the chart and the
@@ -20,7 +20,7 @@ import {
     hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
     comfort, compass, monotonePath, dayKey, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex,
 } from './forecast.js?v=__V__';
-import { rampColor, certaintyWeight, quantile, windArrow, spiral, spiralTimeAt, SPIRAL } from './signal.js?v=__V__';
+import { rampColor, certaintyWeight, windArrow, spiral, spiralTimeAt, samplePaths, SPIRAL } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
 
 const PLACES_KEY = 'wx-places';
@@ -353,6 +353,7 @@ async function renderPlace(place) {
     } else if (f.temp != null) top.style.background = rampColor(f.temp);
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', f.temp != null ? rampColor(f.temp) : PAPER);
     top.prepend(skyTicks(next24));
+    const strip = hourStrip(next24);
 
     const sentence = el('p', 'sg-sentence', headline(f));
     const alerts = el('div', 'sg-alerts');
@@ -361,15 +362,15 @@ async function renderPlace(place) {
     showHero(hero, null, null);
 
     const spiralBox = el('div', 'sg-spiral');
-    top.append(spiralBox);
+    top.append(spiralBox, strip.el);
     const cells = readouts(place, f);
     const hours = hoursSection(place, f, null);
     const daysSec = daysSection(f);
-    const more = el('section', 'sg-more');
+    const more = el('div', 'sg-more');
     const radar = radarPanel(place);
     const plume = plumePanel(f);
     more.append(radar, ...(plume ? [plume] : []));
-    view.append(cells.sec, ...(hours ? [hours.sec] : []), ...(daysSec ? [daysSec] : []), more, placeFooter(place, f));
+    view.append(cells.sec, cells.detail, ...(hours ? [hours.sec] : []), ...(daysSec ? [daysSec] : []), more, placeFooter(place, f));
 
     let ens = null, hist = null;
     // a redraw keeps keyboard focus on the spiral
@@ -387,6 +388,7 @@ async function renderPlace(place) {
         if (!e || seq !== renderSeq) return;
         ens = e;
         cells.update(cursor.t, ens);
+        strip.update(ens);
         hours?.setEnsemble(ens);
     });
     // A new region's days are cut after its hourly series: ask again until they land
@@ -420,6 +422,23 @@ function skyTicks(rows) {
         strip.append(i);
     }
     return strip;
+}
+
+// The next 24 hours as blocks along the bottom of the color field: the time and the temperature,
+// set lighter where the ensemble disagrees
+function hourStrip(rows) {
+    const box = el('div', 'sg-strip');
+    const cells = rows.slice(0, 24).map(r => {
+        const c = el('div', 'sg-strip-h');
+        const v = el('b', null, deg(r.tmp));
+        c.append(el('span', null, hourOf(r.t)), v);
+        box.append(c);
+        return [r, v];
+    });
+    return {
+        el: box,
+        update: ens => { for (const [r, v] of cells) { const rg = rangeAt(ens, r.t); v.style.fontWeight = certaintyWeight(rg ? rg.hi - rg.lo : null); } },
+    };
 }
 
 // The hero number: the observation at rest, the forecast at the cursor (set lighter where the ensemble disagrees)
@@ -474,10 +493,7 @@ function spiralSvg(place, f, hist) {
         'aria-label': `The last 24 hours observed and the next 24 forecast, as a spiral colored by temperature` });
 
     svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272, class: 'sp-disk' }, s);
-    for (const w of sp.wedges) {
-        svgTitle(svgEl('path', { d: w.d, class: 'sp-night' }, s), `Night: sunset ${timeOf(w.a)} to sunrise ${timeOf(w.b)}`);
-        svgEl('text', { x: w.label.x, y: w.label.y, class: 'sp-night-label', 'text-anchor': 'middle', 'dominant-baseline': 'central' }, s).textContent = 'NIGHT';
-    }
+    for (const w of sp.wedges) svgTitle(svgEl('path', { d: w.d, class: 'sp-night' }, s), `Night: sunset ${timeOf(w.a)} to sunrise ${timeOf(w.b)}`);
     const id = `sw${Math.random().toString(36).slice(2, 8)}`;
     const mask = svgEl('mask', { id }, svgEl('defs', {}, s));
     svgEl('path', { d: sp.track, class: 'sp-sweep', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
@@ -487,9 +503,8 @@ function spiralSvg(place, f, hist) {
         const p = svgEl('path', { d: seg.d, fill: c, stroke: c, 'stroke-width': 0.6 }, g);
         svgTitle(p, `${weekday(seg.t)} ${timeOf(seg.t)} · ${seg.tmp == null ? 'no observation' : deg(seg.tmp)}${seg.observed ? `, observed${hist?.station ? ` at ${hist.station.id}` : ''}` : ''}`);
     }
-    for (const r of sp.rain) svgEl('line', { ...r, class: 'sp-rain' }, g);
-    svgEl('path', { d: sp.edge, class: 'sp-edge' }, g);
-    svgEl('path', { d: sp.tip, class: 'sp-tip', fill: sp.end != null ? rampColor(sp.end) : PAPER }, g);
+    svgEl('path', { d: sp.tip, fill: sp.end != null ? rampColor(sp.end) : PAPER }, g);
+    for (const r of sp.rain) svgTitle(svgEl('path', { d: r.d, class: 'sp-drop' }, s), `${weekday(r.t)} ${timeOf(r.t)} · ${rain(r.inches)} of rain${r.t < now ? ' observed' : ' forecast'}`);
 
     for (const w of sp.wind) {
         const a = svgEl('g', { class: 'sp-wind' }, s);
@@ -500,25 +515,26 @@ function spiralSvg(place, f, hist) {
     svgEl('circle', { cx: sp.now.x, cy: sp.now.y, r: 7, class: 'sp-now' }, s);
     svgEl('text', { x: sp.now.x, y: (sp.now.y - 17).toFixed(1), class: 'sp-now-label', 'text-anchor': 'middle' }, s).textContent = 'NOW';
 
-    const label = (pt, big, small, anchor) => {
-        svgEl('text', { x: pt.x, y: pt.y, class: 'sp-big', 'text-anchor': anchor }, s).textContent = big;
-        svgEl('text', { x: pt.x, y: (+pt.y + 19).toFixed(1), class: 'sp-small', 'text-anchor': anchor }, s).textContent = small;
-    };
-    if (sp.low) label(sp.low, deg(sp.low.tmp), partOfDay(sp.low.t, now), sp.low.right ? 'start' : 'end');
-    if (sp.high && Math.round(sp.high.tmp) !== Math.round(sp.low?.tmp)) label(sp.high, deg(sp.high.tmp), partOfDay(sp.high.t, now), sp.high.right ? 'start' : 'end');
 
     // Center: the day behind against the day ahead
     const { C } = SPIRAL, tb = sp.table;
     const cell = (x, y, cls, text, anchor = 'middle') => { svgEl('text', { x, y, class: cls, 'text-anchor': anchor }, s).textContent = text; };
-    cell(C - 50, C - 44, 'sp-th', 'Last 24 h');
-    cell(C + 50, C - 44, 'sp-th', 'Next 24 h');
-    svgEl('line', { x1: C - 92, x2: C + 92, y1: C - 34, y2: C - 34, class: 'sp-rule' }, s);
-    cell(C - 50, C + 2, 'sp-td', tb.pastRain == null ? '—' : tb.pastRain < 0.005 ? 'Dry' : rain(tb.pastRain));
-    cell(C + 50, C + 2, 'sp-td', tb.nextRain < 0.005 ? 'Dry' : rain(tb.nextRain));
-    cell(C, C + 20, 'sp-tl', 'rain');
-    cell(C - 50, C + 56, 'sp-td', tb.pastLow == null ? '—' : deg(tb.pastLow));
-    cell(C + 50, C + 56, 'sp-td', tb.nextLow == null ? '—' : deg(tb.nextLow));
-    cell(C, C + 74, 'sp-tl', 'low');
+    const orDash = (v, fmt) => (v == null ? '—' : fmt(v));
+    cell(C - 46, C - 56, 'sp-th', 'Last 24 h');
+    cell(C + 46, C - 56, 'sp-th', 'Next 24 h');
+    const rows3 = [
+        ['rain', orDash(tb.pastRain, v => (v < 0.005 ? 'Dry' : rain(v))), tb.nextRain < 0.005 ? 'Dry' : rain(tb.nextRain), null],
+        ['low', orDash(tb.pastLow, deg), orDash(tb.nextLow, deg), tb.nextLowAt],
+        ['high', orDash(tb.pastHigh, deg), orDash(tb.nextHigh, deg), tb.nextHighAt],
+    ];
+    rows3.forEach(([k, a, b, at], i) => {
+        const y = C - 18 + i * 44;
+        cell(C - 46, y, 'sp-td', a);
+        const nb = svgEl('text', { x: C + 46, y, class: 'sp-td', 'text-anchor': 'middle' }, s);
+        nb.textContent = b;
+        if (at) svgTitle(nb, `${partOfDay(at, now)}, around ${hourOf(at)}`);
+        cell(C, y + 15, 'sp-tl', k);
+    });
 
     // The cursor on the spiral
     const mark = svgEl('circle', { r: 9, class: 'sp-cursor', visibility: 'hidden' }, s);
@@ -575,12 +591,20 @@ function windGlyph(dir, mph, gust) {
     if (gust != null) svgEl('line', { x1: X(gust), x2: X(gust), y1: 6, y2: 24, class: 'mini-mark' }, s);
     return s;
 }
-function band(lo, hi, v, a, b) {
+// The ensemble's 8-in-10 range around the forecast, its ends labeled
+function band(lo, hi, v) {
     const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    if (lo == null) {
+        svgEl('rect', { x: 0, y: 13, width: 138, height: 4, class: 'mini-track' }, s);
+        return s;
+    }
+    const a = lo - (hi - lo) * 0.9 - 1, b = hi + (hi - lo) * 0.9 + 1;
     const X = x => Math.max(0, Math.min(138, (x - a) / (b - a) * 138));
-    svgEl('rect', { x: 0, y: 13, width: 138, height: 4, class: 'mini-track' }, s);
-    if (lo != null) svgEl('rect', { x: X(lo), y: 10, width: Math.max(2, X(hi) - X(lo)), height: 10, fill: rampColor(v), class: 'mini-band' }, s);
-    svgEl('circle', { cx: X(v), cy: 15, r: 4, class: 'mini-dot' }, s);
+    svgEl('rect', { x: 0, y: 19, width: 138, height: 3, class: 'mini-track' }, s);
+    svgEl('rect', { x: X(lo), y: 15, width: Math.max(2, X(hi) - X(lo)), height: 11, rx: 5.5, fill: rampColor(v), class: 'mini-band' }, s);
+    svgEl('circle', { cx: X(v), cy: 20.5, r: 3.5, class: 'mini-dot' }, s);
+    svgEl('text', { x: X(lo), y: 10, class: 'mini-label', 'text-anchor': 'middle' }, s).textContent = deg(lo);
+    svgEl('text', { x: X(hi), y: 10, class: 'mini-label', 'text-anchor': 'middle' }, s).textContent = deg(hi);
     return s;
 }
 function dayBar(rise, set, t) {
@@ -596,11 +620,36 @@ const CELL_DETAIL = { feels: 'feels', dew: 'humidity', wind: 'wind', rain: 'prec
 
 function readouts(place, f) {
     const sec = el('section', 'sg-cells');
-    sec.title = 'Values at the time you drag to on the chart or the spiral; lighter numbers mean the ensemble disagrees more';
+    sec.setAttribute('aria-label', 'Conditions at the cursor time');
+    // A card opens its detail in place, sliding down under the row
+    const detail = el('section', 'sg-detail');
+    const inner = el('div', 'sg-detail-inner');
+    detail.append(inner);
+    let open = null;
+    const toggle = (key, btn) => {
+        const closing = open === key;
+        sec.querySelectorAll('[aria-expanded]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+        if (closing) { open = null; detail.classList.remove('open'); return; }
+        open = key;
+        btn.setAttribute('aria-expanded', 'true');
+        detail.classList.add('open');
+        renderDetail(inner, key, place, f);
+        drawnW = Math.round(inner.clientWidth - 40);   // content width, as the observer reports it (20 px padding a side)
+    };
+    // an open detail redraws when it has grown or shrunk 8 px from the width it was drawn at
+    let drawnW = 0;
+    new ResizeObserver(([e]) => {
+        const w = Math.round(e.contentRect.width);
+        if (open && Math.abs(w - drawnW) > 8) { renderDetail(inner, open, place, f); drawnW = w; }
+    }).observe(inner);
     const keys = ['feels', 'dew', 'wind', 'sky', 'rain', 'later3', 'later12', 'sun'];
     const cells = Object.fromEntries(keys.map(k => {
         const c = el(CELL_DETAIL[k] ? 'button' : 'div', 'sg-cell');
-        if (CELL_DETAIL[k]) { c.type = 'button'; c.addEventListener('click', () => openDetail(CELL_DETAIL[k], place, f)); }
+        if (CELL_DETAIL[k]) {
+            c.type = 'button';
+            c.setAttribute('aria-expanded', 'false');
+            c.addEventListener('click', () => toggle(CELL_DETAIL[k], c));
+        }
         const parts = { k: el('div', 'sg-cell-k'), v: el('div', 'sg-cell-v'), sub: el('div', 'sg-cell-sub'), mini: el('div', 'sg-cell-mini') };
         c.append(parts.k, parts.v, parts.sub, parts.mini);
         sec.append(c);
@@ -639,8 +688,8 @@ function readouts(place, f) {
         const ahead = (h, key) => {
             const at = tt + h * HOUR, rr = rowAt(f, at), rg = rangeAt(ens, at);
             if (!rr || rr.t + HOUR < at) { put(key, `In ${h} hours`, '--', '', null); return; }
-            put(key, `In ${h} hours`, deg(rr.tmp), rg ? `${deg(rg.lo)} to ${deg(rg.hi)} in 8 of 10.` : `${weekday(at)} ${hourOf(at)}.`,
-                band(rg?.lo, rg?.hi, rr.tmp, Math.min(rr.tmp, rg?.lo ?? rr.tmp) - 6, Math.max(rr.tmp, rg?.hi ?? rr.tmp) + 6), certaintyWeight(rg ? rg.hi - rg.lo : null));
+            put(key, `In ${h} hours`, deg(rr.tmp), rg ? `8 in 10 outcomes between these, ${weekday(at).toLowerCase() === 'today' ? '' : `${weekday(at)} `}${hourOf(at)}.` : `${weekday(at)} ${hourOf(at)}.`,
+                band(rg?.lo, rg?.hi, rr.tmp), certaintyWeight(rg ? rg.hi - rg.lo : null));
         };
         ahead(3, 'later3');
         ahead(12, 'later12');
@@ -653,7 +702,7 @@ function readouts(place, f) {
         }
     };
     update(null, null);
-    return { sec, update };
+    return { sec, detail, update };
 }
 
 // ============ 48 hours ============
@@ -662,15 +711,13 @@ function hoursSection(place, f, ens0) {
     const rows = f.upcoming.slice(0, HOURS_SHOWN);
     if (rows.length < 2) return null;
     const sec = el('section', 'sg-hours');
-    const head = el('div', 'sg-head');
-    const h2 = el('h2', 'sg-h2', 'Forty-eight hours');
-    h2.title = 'Solid line: the RRFS forecast. Faint lines: nine ensemble quantile paths (quantile levels, not members), redrawn one at a time. Arrows point the way the wind blows; longer is stronger.';
-    head.append(h2);
+    sec.setAttribute('aria-label', 'Next 48 hours');
     const wrap = el('div', 'sg-chart');
+    wrap.title = 'Solid line: the RRFS forecast. Faint lines: possible temperatures, drawn at random within the REFS ensemble spread. Arrows point the way the wind blows; longer is stronger.';
     const card = el('div', 'sg-card');
     card.hidden = true;
     wrap.append(card);
-    sec.append(head, wrap);
+    sec.append(wrap);
     let ens = ens0;
     let redraw = () => {};
 
@@ -707,16 +754,14 @@ function hoursSection(place, f, ens0) {
             const rect = svgEl('rect', { x: X(r.t) - bw / 2, y: HT, width: bw + 0.5, height: STRIP, fill: rampColor(r.tmp) }, s);
             svgTitle(rect, `${weekday(r.t)} ${timeOf(r.t)} · ${deg(r.tmp)}`);
         }
-        // ensemble quantile paths, redrawn one at a time
+        // possible temperatures within the ensemble spread, drawn once and left still
         if (ensIn.length > 1) {
             const clipId = `hc${Math.random().toString(36).slice(2, 8)}`;
             svgEl('rect', { x: L, y: 0, width: W - L - Rm, height: HT }, svgEl('clipPath', { id: clipId }, svgEl('defs', {}, s)));
-            const hops = svgEl('g', { 'clip-path': `url(#${clipId})` }, s);
-            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9].forEach((q, k) => {
-                const pts = ensIn.map(m => [X(m.x), Y(quantile(m, q))]);
-                const p = svgEl('path', { d: monotonePath(pts), class: 'g-hop' }, hops);
-                p.style.animationDelay = `${((k * 5) % 9) * 0.8}s`;
-            });
+            const paths = svgEl('g', { 'clip-path': `url(#${clipId})`, class: 'g-paths' }, s);
+            for (const path of samplePaths(ensIn, 18, Math.round(ensIn[0].x / HOUR))) {
+                svgEl('path', { d: monotonePath(path.map(p => [X(p.t), Y(p.v)])), class: 'g-path' }, paths);
+            }
         }
         // rain and snow, hourly
         for (const r of rows) {
@@ -733,7 +778,7 @@ function hoursSection(place, f, ens0) {
             svgEl('text', { x: X(lastR.t) + 8, y: Y(lastR.tmp) + 4, class: 'g-end' }, s).textContent = 'forecast';
             if (ensIn.length > 1) {
                 const lm = ensIn[ensIn.length - 1];
-                if (lm.x <= x1 + 3 * HOUR) svgEl('text', { x: Math.min(X(lm.x), W - Rm) + 8, y: Y(lm.p10) + 16, class: 'g-end g-end-soft' }, s).textContent = 'likely range';
+                if (lm.x <= x1 + 3 * HOUR) svgEl('text', { x: Math.min(X(lm.x), W - Rm) + 8, y: Y(lm.p10) + 16, class: 'g-end g-end-soft' }, s).textContent = 'possible';
             }
         }
         // wind lane
@@ -805,11 +850,7 @@ function daysSection(f) {
     const days = f.days;
     if (!days.length) return null;
     const sec = el('section', 'sg-days');
-    const head = el('div', 'sg-head');
-    const h2 = el('h2', 'sg-h2', `${days.length === 1 ? 'One day' : `${['', '', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve'][days.length] || days.length} days`}`);
-    h2.title = 'Each bar is painted with the temperatures the day passes through. Squares: 20 equally likely outcomes, filled when wet (NBM probability of 0.01 in or more).';
-    head.append(h2);
-    sec.append(head);
+    sec.setAttribute('aria-label', `${days.length} days`);
     const lowOf = d => d.lo ?? (d.key === dayKey(Date.now()) ? f.temp : null) ?? d.hi;
     const his = days.map(d => d.hi).filter(v => v != null), los = days.map(lowOf).filter(v => v != null);
     const lo = Math.min(...los) - 2, hi = Math.max(...his) + 2;
@@ -849,11 +890,40 @@ function daysSection(f) {
         for (let i = 0; i < 20; i++) sq.append(el('i', i < n ? 'on' : ''));
         const snow = d.snow >= 0.1;
         const amt = el('span', 'sg-day-amt sg-right', (d.pop ?? 0) >= 30 && (snow || d.qpf >= 0.01) ? `${rain(snow ? d.snow : d.qpf, snow)}${snow ? ' snow' : ''}` : '');
-        row.append(name, date, barBox, sq, amt);
+        row.append(name, date, barBox, sq, amt, dayMore(d, f));
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-expanded', 'false');
+        const flip = () => row.setAttribute('aria-expanded', String(row.classList.toggle('open')));
+        row.addEventListener('click', flip);
+        row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
         table.append(row);
     }
     sec.append(table);
     return sec;
+}
+
+// The day opened: its sky, wind and rain in words, and its hours where the hourly forecast reaches
+function dayMore(d, f) {
+    const box = el('div', 'sg-day-more');
+    const inner = el('div', 'sg-day-more-inner');
+    const bits = [d.cond?.label, d.gust != null ? `gusts to ${windStr(d.gust)}` : null,
+        d.pop != null ? `${d.pop}% chance of rain${d.qpf >= 0.01 ? `, about ${rain(d.snow >= 0.1 ? d.snow : d.qpf, d.snow >= 0.1)}${d.snow >= 0.1 ? ' snow' : ''}` : ''}` : null].filter(Boolean);
+    inner.append(el('p', 'sg-day-words', bits.join(' · ')));
+    const hrs = f.rows.filter(r => dayKey(r.t) === d.key && new Date(r.t).getHours() % 3 === 0);
+    if (hrs.length) {
+        const strip = el('div', 'sg-day-hours');
+        for (const r of hrs) {
+            const c = el('div', 'sg-strip-h');
+            c.style.background = rampColor(r.tmp);
+            c.append(el('span', null, hourOf(r.t)), el('b', null, deg(r.tmp)));
+            if (r.qpf >= 0.01) c.append(el('i', 'sg-wet', rain(r.qpf, r.snowy)));
+            strip.append(c);
+        }
+        inner.append(strip);
+    }
+    box.append(inner);
+    return box;
 }
 
 // ============ Ensemble plumes ============
@@ -875,9 +945,9 @@ const HALF_HOUR = 1800000;
 function plumePanel(f) {
     const st = f.raw.station;
     if (!st || st.km > ENSEMBLE_MAX_KM) return null;
-    const sec = el('section', 'sg-panel plume-panel');
+    const sec = el('section', 'plume-panel');
+    sec.setAttribute('aria-label', 'Ensemble plumes');
     const head = el('div', 'panel-head');
-    head.append(el('h2', 'panel-title', 'Ensemble plumes'));
     const tabs = el('div', 'seg');
     head.append(tabs);
     const readout = el('div', 'plume-readout');
@@ -1030,18 +1100,23 @@ window.addEventListener('message', e => {
 // The radar page embedded (radar.html?embed=1): loaded once scrolled near,
 // paused while out of view, a tap expands it to full screen in place
 function radarPanel(place) {
-    const sec = el('section', 'sg-panel radar-panel');
-    const head = el('div', 'panel-head');
-    head.append(el('h2', 'panel-title', 'Radar'));
+    const sec = el('section', 'radar-panel');
+    sec.setAttribute('aria-label', 'Map');
     const frame = el('div', 'radar-frame');
+    // Map type, passed to the embedded page
+    const pick = el('select', 'radar-pick');
+    pick.setAttribute('aria-label', 'Map type');
+    for (const [v, text] of [['radar', 'Radar'], ['satellite', 'Satellite'], ['temp', 'Temperature'], ['wind', 'Wind'], ['gust', 'Wind gusts'], ['clouds', 'Clouds'], ['precip', 'Rain total'], ['snow', 'Snow total'], ['dewpoint', 'Dew point']]) {
+        pick.append(Object.assign(el('option', null, text), { value: v }));
+    }
     const open = el('button', 'wx-icon-btn radar-expand');
     open.setAttribute('aria-label', 'Open the radar full screen');
     open.append(icon('expand'));
     const close = el('button', 'wx-icon-btn radar-close');
     close.setAttribute('aria-label', 'Close the radar');
     close.append(icon('close'));
-    frame.append(open, close);
-    sec.append(head, frame);
+    frame.append(pick, open, close);
+    sec.append(frame);
 
     let iframe = null;
     const post = msg => iframe?.contentWindow?.postMessage({ type: 'wx-radar', ...msg }, location.origin);
@@ -1050,7 +1125,9 @@ function radarPanel(place) {
         iframe = el('iframe');
         iframe.title = 'Radar map';
         iframe.loading = 'lazy';
-        iframe.src = `/radar?embed=1#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
+        iframe.src = `/radar?embed=1&layer=${pick.value}#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
+        // a pick made while the page loaded went to the blank document: send the current one now
+        iframe.addEventListener('load', () => post({ layer: pick.value }));
         frame.prepend(iframe);
     };
     new IntersectionObserver(([e]) => {
@@ -1064,6 +1141,7 @@ function radarPanel(place) {
         post({ view: full ? 'full' : 'mini', play: true });
         if (full) close.focus();
     };
+    pick.addEventListener('change', () => { if (iframe) post({ layer: pick.value }); });
     open.addEventListener('click', () => { load(); setFull(true); });
     // Escape pressed inside the map arrives as a message from the iframe
     radarEscape = source => { if (source === iframe?.contentWindow && sec.classList.contains('full')) setFull(false); };
@@ -1090,9 +1168,6 @@ function placeFooter(place, f) {
 
 // ============ Detail sheets ============
 
-const detailDialog = document.getElementById('detailDialog');
-detailDialog.querySelector('.detail-done').addEventListener('click', () => detailDialog.close());
-detailDialog.addEventListener('click', e => { if (e.target === detailDialog) detailDialog.close(); });
 
 // Today's hourly UV estimate from the sun's elevation and the forecast cloud cover
 function uvHours(place, f) {
@@ -1141,12 +1216,9 @@ function rowsList(rows) {
     return dl;
 }
 
-function openDetail(key, place, f) {
-    const body = detailDialog.querySelector('.detail-body');
-    const titles = { wind: 'Wind', humidity: 'Humidity', uv: 'UV index', sun: 'Sun and moon', feels: 'Feels like', precip: 'Precipitation' };
-    detailDialog.querySelector('.detail-title').textContent = titles[key];
-    body.replaceChildren();
-    detailDialog.showModal();
+let detailWidth = 520;   // the open detail's inner width; its charts fill it
+function renderDetail(body, key, place, f) {
+    detailWidth = body.clientWidth - 40;
     const hrs = f.upcoming.slice(0, 48);
     const T = v => U.toTemp(v, units);
     const content = {
@@ -1191,11 +1263,8 @@ function openDetail(key, place, f) {
         precip: () => [seriesChart(hrs, [], { fmt: v => rain(v), bars: { get: r => r.qpf, snow: r => r.snowy }, zero: true, label: 'Per hour' }),
             rowsList(f.days.slice(0, 11).map(d => [weekday(d.t), `${d.pop != null ? `${d.pop}% chance · ` : ''}${d.snow >= 0.1 ? `${rain(d.snow, true)} snow` : rain(d.qpf)}`]))],
     }[key];
-    // Charts size to the sheet, so build once it is laid out
-    requestAnimationFrame(() => {
-        body.replaceChildren(...content());
-        body.querySelector('.detail-moon')?.append(moonDisk(96));
-    });
+    body.replaceChildren(...content());
+    body.querySelector('.detail-moon')?.append(moonDisk(96));
 }
 
 // A scrubbable 48-hour chart: lines (and optional bars) over hourly rows
@@ -1204,7 +1273,7 @@ function seriesChart(rows, lines, opts) {
     const readout = el('div', 'series-readout');
     wrap.append(readout);
     if (rows.length < 2) return wrap;
-    const W = Math.max(260, (detailDialog.querySelector('.detail-body')?.clientWidth || 520)), H = 170, L = 44, R = 10, T = 10, B = 24;
+    const W = Math.max(260, detailWidth), H = 170, L = 44, R = 10, T = 10, B = 24;
     const x0 = rows[0].t, x1 = rows[rows.length - 1].t;
     const vals = [...lines.flatMap(l => rows.map(l.get)), ...(opts.bars ? rows.map(opts.bars.get) : [])].filter(v => v != null && !Number.isNaN(v));
     let lo = opts.zero ? 0 : Math.min(...vals), hi = opts.max ?? Math.max(...vals, lo + 1);
