@@ -349,9 +349,50 @@ function hourlySection(place, f) {
         }
     });
     scroller.append(svg);
+    dragScroll(scroller);
     sec.append(scroller);
     sec.append(el('div', 'panel-note', 'Precipitation bars in inches per hour. Tap an hour for the map.'));
     return sec;
+}
+
+// A mouse wheel scrolls vertically and a mouse cannot swipe: turn the wheel
+// sideways over the strip (until it reaches an end) and let a mouse drag it.
+// A drag must not end as a click on the hour under the pointer.
+function dragScroll(box) {
+    box.addEventListener('wheel', e => {
+        if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;   // trackpads already scroll sideways
+        const max = box.scrollWidth - box.clientWidth;
+        const next = Math.min(max, Math.max(0, box.scrollLeft + e.deltaY));
+        if (next === box.scrollLeft) return;   // at an end: let the page scroll
+        e.preventDefault();
+        box.scrollLeft = next;
+    }, { passive: false });
+    // Pointer capture keeps the drag on the strip even outside it, with no
+    // window listeners to pile up across renders
+    let start = null, moved = false;
+    const end = () => { start = null; box.classList.remove('dragging'); };
+    box.addEventListener('pointerdown', e => {
+        moved = false;   // any new press (mouse, touch, pen) starts clean
+        if (e.pointerType !== 'mouse' || e.button !== 0) return;
+        start = { x: e.clientX, left: box.scrollLeft };
+    });
+    box.addEventListener('pointermove', e => {
+        if (start && !(e.buttons & 1)) end();   // released outside before the drag captured
+        if (!start) return;
+        const dx = e.clientX - start.x;
+        if (!moved && Math.abs(dx) > 4) {
+            moved = true;
+            box.setPointerCapture(e.pointerId);
+            box.classList.add('dragging');
+        }
+        if (moved) box.scrollLeft = start.left - dx;
+    });
+    box.addEventListener('pointerup', end);
+    box.addEventListener('pointercancel', end);
+    box.addEventListener('keydown', () => { moved = false; });
+    box.addEventListener('click', e => {
+        if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; }
+    }, true);
 }
 
 // Daily rows with low-high bars on one shared scale (Apple Weather style)

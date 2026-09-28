@@ -401,6 +401,31 @@ button {
     display: none;
 }
 
+/* With a mouse, a slim scrollbar shows the strip scrolls; drag grabs it */
+@media (hover: hover) and (pointer: fine) {
+    .hourly-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+        cursor: grab;
+        padding-bottom: 4px;
+    }
+
+    .hourly-scroll::-webkit-scrollbar {
+        display: block;
+        height: 6px;
+    }
+
+    .hourly-scroll::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.28);
+        border-radius: 3px;
+    }
+
+    .hourly-scroll.dragging {
+        cursor: grabbing;
+        user-select: none;
+    }
+}
+
 .hourly-svg {
     display: block;
     margin: 0 0.4rem;
