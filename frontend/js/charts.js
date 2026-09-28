@@ -4,6 +4,7 @@
  */
 import { CONFIG, isMobile, isTouchDevice, convertWind, getWindUnit, formatValue } from './config.js?v=__V__';
 import { getPercentileBands } from './api.js?v=__V__';
+import { rampColor } from './signal.js?v=__V__';
 
 // Store chart instances for cleanup
 const chartInstances = {};
@@ -34,15 +35,58 @@ function getThemeColors() {
         gridColor: token('--chart-grid'),
         tickColor: token('--chart-tick'),
         meanLineColor: token('--chart-mean'),
-        memberColor: token('--chart-member'),
-        bandOuter: token('--chart-band-outer'),
-        bandInner: token('--chart-band-inner'),
+        hue: { precip: token('--c-rain'), snow: token('--c-snow'), wind: token('--c-wind') },
+        dark: document.documentElement?.dataset.theme === 'dark',
         surface: token('--surface'),
         crosshair: token('--chart-crosshair'),
         nowLineColor: token('--chart-now'),
         nowLabelBg: token('--chart-mean'),
         nowLabelText: token('--surface'),
     };
+}
+
+// Line and fill alphas: members and bands are tints of the variable's color,
+// previous runs fade with age (rank 0 = most recent)
+const ALPHA = { member: 0.34, bandOuter: 0.15, bandInner: 0.28, runs: [0.72, 0.48, 0.3] };
+
+/** oklch(L C h) with an alpha; other color formats pass through */
+const withAlpha = (c, a) => a >= 1 || !/^oklch\([^/]*\)$/.test(c) ? c : c.replace(')', ` / ${a})`);
+
+/**
+ * The overview's temperature ramp, with lightness clamped so a line stays
+ * legible: capped on paper (the ramp's pale yellows), floored on dark
+ */
+function tempColor(f, a, dark) {
+    const [l, c, h] = rampColor(f).match(/[\d.]+/g).map(Number);
+    const L = dark ? Math.max(l, 0.68) : Math.min(l, 0.64);
+    return `oklch(${L.toFixed(3)} ${(c * 1.2).toFixed(3)} ${h}${a < 1 ? ` / ${a}` : ''})`;
+}
+
+/**
+ * How a variable is painted. at(y, a): the color at value y (readout dots,
+ * crosshair rings). stroke(a): a canvas color for lines and fills; for
+ * temperature a vertical gradient over the y axis, so warm stretches of a
+ * line run orange and cool ones blue.
+ */
+function seriesPaint(type, theme) {
+    if (type !== 'temp') {
+        const base = theme.hue[type] || theme.meanLineColor;
+        return { at: (y, a = 1) => withAlpha(base, a), stroke: (a = 1) => withAlpha(base, a) };
+    }
+    const at = (y, a = 1) => tempColor(y, a, theme.dark);
+    const stroke = (a = 1) => ({ chart }) => {
+        const { chartArea: area, scales: { y } } = chart;
+        if (!area || !y) return at(50, a);
+        const key = `${area.top},${area.bottom},${y.min},${y.max}`;
+        const cache = chart.$gradients ??= {};
+        if (cache[a]?.key === key) return cache[a].g;
+        const g = chart.ctx.createLinearGradient(0, area.bottom, 0, area.top);
+        if (!g?.addColorStop) return at(50, a);
+        for (let i = 0; i <= 8; i++) g.addColorStop(i / 8, at(y.min + (y.max - y.min) * i / 8, a));
+        cache[a] = { key, g };
+        return g;
+    };
+    return { at, stroke };
 }
 
 /**
@@ -57,6 +101,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
     const info = CONFIG.params[param];
     const responsive = getResponsiveOptions();
     const theme = getThemeColors();
+    const paint = seriesPaint(info.type, theme);
     const datasets = [];
 
     // Check if this is wind data - we may need to convert
@@ -88,7 +133,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             datasets.push({
                 label: overlay.label,
                 data: chartPoints,
-                borderColor: overlay.color,
+                borderColor: paint.stroke(ALPHA.runs[overlay.rank] ?? 0.3),
+                _colorAt: y => paint.at(y, ALPHA.runs[overlay.rank] ?? 0.3),
                 borderWidth: 1.5,
                 pointRadius: 0,
                 pointHitRadius: 20,
@@ -131,8 +177,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             // Outer band: P90 filling down to a hidden P10 boundary
             // Inner band: P75 filling down to a hidden P25 boundary (darker)
             const layers = [
-                { lo: bands.p10, hi: bands.p90, loName: 'P10', hiName: 'P90', order: 4, fill: theme.bandOuter },
-                { lo: bands.p25, hi: bands.p75, loName: 'P25', hiName: 'P75', order: 3, fill: theme.bandInner },
+                { lo: bands.p10, hi: bands.p90, loName: 'P10', hiName: 'P90', order: 4, fill: paint.stroke(ALPHA.bandOuter) },
+                { lo: bands.p25, hi: bands.p75, loName: 'P25', hiName: 'P75', order: 3, fill: paint.stroke(ALPHA.bandInner) },
             ];
             for (const layer of layers) {
                 datasets.push({
@@ -158,11 +204,9 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                     pointHitRadius: 0,
                     pointHoverRadius: 0,
                     tension: 0.3,
-                    fill: {
-                        target: datasets.length - 1,
-                        above: layer.fill,
-                        below: layer.fill
-                    },
+                    // Fill in backgroundColor: it is scriptable (the gradient)
+                    backgroundColor: layer.fill,
+                    fill: { target: datasets.length - 1 },
                     order: layer.order,
                     _band: true,
                     _core: group.core
@@ -181,7 +225,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                 datasets.push({
                     label: 'Mean',
                     data: chartPoints,
-                    borderColor: theme.meanLineColor,
+                    borderColor: paint.stroke(),
+                    _colorAt: y => paint.at(y),
                     borderWidth: responsive.meanLineWidth,
                     pointRadius: 0,
                     pointHitRadius: 20,
@@ -216,7 +261,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             datasets.push({
                 label,
                 data: chartPoints,
-                borderColor: isMean || isRRFS ? theme.meanLineColor : theme.memberColor,
+                borderColor: paint.stroke(isMean || isRRFS ? 1 : ALPHA.member),
+                _colorAt: y => paint.at(y),
                 borderWidth: isMean ? responsive.meanLineWidth : isRRFS ? 1.75 : responsive.memberLineWidth,
                 borderDash: isRRFS ? [6, 4] : core === 'NMB' ? [4, 3] : [],
                 pointRadius: 0,
@@ -315,7 +361,8 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
                         callback: (v) => {
                             if (info.type === 'temp') return v.toFixed(0) + '°';
                             if (info.type === 'wind') return v.toFixed(0);
-                            return v.toFixed(1);
+                            // Small precip totals: 0.0 on every tick says nothing
+                            return v.toFixed(Math.abs(v) < 1 && v !== 0 ? 2 : 1);
                         }
                     }
                 }
@@ -325,6 +372,7 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
     chart.$type = info.type;
     chart.$param = param;
     chart.$theme = theme;
+    chart.$paint = paint;
 
     // A mouse that went from the chart into the readout (for its map link)
     // resets it on leaving, unless it heads back to the chart
@@ -378,7 +426,7 @@ function valuesAt(chart, x) {
         if (ds._band && !/P(10|90)$/.test(ds.label)) return;
         const p = valueAt(chart, i, x);
         if (!p) return;
-        if (ds._overlay) out.overlays.push({ label: ds.label.replace(' Mean', ''), color: ds.borderColor, p });
+        if (ds._overlay) out.overlays.push({ label: ds.label.replace(' Mean', ''), color: ds._colorAt(p.y), p });
         else if (ds.label === 'Mean') out.mean = p;
         else if (ds.label === 'RRFS') out.rrfs = p;
         else if (ds._band) band.push(p.y);
@@ -481,8 +529,9 @@ const crosshairPlugin = {
             ctx.stroke();
         };
         for (const o of v.overlays) ring(o.p, o.color);
-        if (v.rrfs) ring(v.rrfs, t.meanLineColor);
-        if (v.mean) ring(v.mean, t.meanLineColor);
+        const colorAt = p => chart.$paint.at(p.y);
+        if (v.rrfs) ring(v.rrfs, colorAt(v.rrfs));
+        if (v.mean) ring(v.mean, colorAt(v.mean));
         ctx.restore();
     }
 };

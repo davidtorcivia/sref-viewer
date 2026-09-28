@@ -5,7 +5,7 @@
  *             one sentence, and the 48-hour spiral (last 24 h observed inside,
  *             next 24 h forecast outside)
  *   readouts  eight values at the cursor time; a card slides its detail open below
- *   hours     48 hours: RRFS line, possible paths within the ensemble spread, wind
+ *   hours     48 hours: RRFS line, the ensemble spread as a band, cloud cover, wind
  *   days      the NBM days on one temperature axis, rain as 20 outcomes
  *   radar, ensemble plumes
  * One cursor time drives the hero number, the readouts, the chart and the
@@ -322,6 +322,11 @@ function renderChips(activeId) {
 
 // ============ One place ============
 
+// Phones: the color field fills the first screen and the spiral follows it
+const narrowScreen = matchMedia('(max-width: 860px)');
+let placeSpiral = () => {};   // the current page's: move the spiral in or out of the color field
+narrowScreen.addEventListener?.('change', () => placeSpiral());
+
 let renderSeq = 0;
 
 async function renderPlace(place) {
@@ -360,7 +365,10 @@ async function renderPlace(place) {
     showHero(hero, null, null);
 
     const spiralBox = el('div', 'sg-spiral');
-    top.append(spiralBox, strip.el);
+    placeSpiral = () => {
+        if (narrowScreen.matches) { top.append(strip.el); top.after(spiralBox); } else top.append(spiralBox, strip.el);
+    };
+    placeSpiral();
     const cells = readouts(place, f);
     const hours = hoursSection(place, f, null);
     const daysSec = daysSection(f);
@@ -372,9 +380,10 @@ async function renderPlace(place) {
 
     let ens = null, hist = null;
     // a redraw keeps keyboard focus on the spiral
+    // only the first drawing sweeps in; a redraw when the history lands appears in place
     const drawSpiral = () => {
         const hadFocus = spiralBox.contains(document.activeElement);
-        spiralBox.replaceChildren(spiralSvg(place, f, hist));
+        spiralBox.replaceChildren(spiralSvg(place, f, hist, !spiralBox.firstChild));
         if (hadFocus) spiralBox.firstChild.focus();
     };
     drawSpiral();
@@ -499,7 +508,7 @@ function alertRow(feature) {
 
 // ============ The spiral ============
 
-function spiralSvg(place, f, hist) {
+function spiralSvg(place, f, hist, sweep = true) {
     const now = Date.now();
     const past = hist?.hours?.map(h => ({ t: h.t, tmp: h.tmp, precip: h.precip })) ?? [];
     const future = f.upcoming.slice(0, 26);
@@ -511,14 +520,17 @@ function spiralSvg(place, f, hist) {
     for (const w of sp.wedges) svgTitle(svgEl('path', { d: w.d, class: 'sp-night' }, s), `Night: sunset ${timeOf(w.a)} to sunrise ${timeOf(w.b)}`);
     const id = `sw${Math.random().toString(36).slice(2, 8)}`;
     const mask = svgEl('mask', { id }, svgEl('defs', {}, s));
-    svgEl('path', { d: sp.track, class: 'sp-sweep', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
+    svgEl('path', { d: sp.track, class: sweep ? 'sp-sweep' : '', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
+    const [c0] = sp.caps;
+    svgEl('circle', { cx: c0.x, cy: c0.y, r: c0.r, fill: '#000' }, mask);   // the start is concave: an arch into the band
     const g = svgEl('g', { mask: `url(#${id})` }, s);
     for (const seg of sp.segs) {
         const p = seg.tmp == null ? svgEl('path', { d: seg.d, class: 'sp-missing' }, g)
             : svgEl('path', { d: seg.d, fill: rampColor(seg.tmp), stroke: rampColor(seg.tmp), 'stroke-width': 0.6 }, g);
         svgTitle(p, `${weekday(seg.t)} ${timeOf(seg.t)} · ${seg.tmp == null ? 'no observation' : deg(seg.tmp)}${seg.observed ? `, observed${hist?.station ? ` at ${hist.station.id}` : ''}` : ''}`);
     }
-    for (const c of sp.caps) svgEl('circle', { cx: c.x, cy: c.y, r: c.r, ...(c.tmp == null ? { class: 'sp-missing' } : { fill: rampColor(c.tmp) }) }, g);
+    const end = sp.caps[1];
+    svgEl('circle', { cx: end.x, cy: end.y, r: end.r, ...(end.tmp == null ? { class: 'sp-missing' } : { fill: rampColor(end.tmp) }) }, g);
     for (const r of sp.rain) svgTitle(svgEl('path', { d: r.d, class: 'sp-drop' }, s), `${weekday(r.t)} ${timeOf(r.t)} · ${rain(r.inches)} of rain${r.t < now ? ' observed' : ' forecast'}`);
 
     for (const w of sp.wind) {
@@ -670,6 +682,17 @@ function readouts(place, f) {
             drawnW = w;
         }
     }).observe(inner);
+    const close = () => {
+        if (!open) return;
+        open = null;
+        detail.classList.remove('open');
+        sec.querySelectorAll('[aria-expanded]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+    };
+    // a tap anywhere outside the cards and the open detail closes it (click, so a scroll doesn't)
+    document.addEventListener('click', function outside(e) {
+        if (!sec.isConnected) { document.removeEventListener('click', outside); return; }
+        if (open && !sec.contains(e.target)) close();
+    });
     const keys = ['feels', 'dew', 'wind', 'sky', 'rain', 'later3', 'later12', 'sun'];
     const cells = Object.fromEntries(keys.map(k => {
         const c = el(CELL_DETAIL[k] ? 'button' : 'div', 'sg-cell');
@@ -741,7 +764,7 @@ function hoursSection(place, f, ens0) {
     const sec = el('section', 'sg-hours');
     sec.setAttribute('aria-label', 'Next 48 hours');
     const wrap = el('div', 'sg-chart');
-    wrap.title = 'Solid line: the RRFS forecast. Faint lines: possible temperatures, drawn at random within the REFS ensemble spread. Arrows point the way the wind blows; longer is stronger.';
+    wrap.title = 'Line: the RRFS forecast. Band: where 8 in 10 REFS ensemble outcomes fall, the middle half darker. Columns: cloud cover. Arrows point the way the wind blows; longer is stronger.';
     const card = el('div', 'sg-card');
     card.hidden = true;
     wrap.append(card);

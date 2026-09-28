@@ -37,10 +37,9 @@ const state = {
 const COMPARE_CYCLES = 3;
 const isRunVisible = run => state.visibleRuns[run] ?? !isMobile();
 
-// Comparison overlays in ink, fading with age: --run-1 is the most recent
-// previous cycle. Canvas needs the resolved color, the DOM takes the var().
+// Comparison chips fade with age (--run-1 is the most recent previous
+// cycle); on the charts the same rank fades the variable's own color
 const runToken = i => `--run-${i + 1}`;
-const runColor = i => getComputedStyle(document.documentElement).getPropertyValue(runToken(i)).trim() || '#888';
 
 const $ = id => document.getElementById(id);
 const elements = {};
@@ -567,7 +566,7 @@ function getOverlayData(param) {
     for (const [i, { run }] of comparisonCycles().entries()) {
         const mean = state.previousRuns[run]?.[param]?.['Mean'];
         if (isRunVisible(run) && mean) {
-            overlays.push({ label: `${run}Z Mean`, data: mean, color: runColor(i) });
+            overlays.push({ label: `${run}Z Mean`, data: mean, rank: i });
         }
     }
     return overlays;
@@ -710,12 +709,11 @@ function updateTrendText() {
 
 // ============ Precip Type (REFS) ============
 const PTYPE_DEFS = [
-    // Rain in ink like the overview; frozen types from the cold end of the
-    // temperature ramp (signal.js) so they read as colder than rain
-    { key: 'snow', label: 'Snow', color: 'oklch(0.55 0.10 262)' },
-    { key: 'rain', label: 'Rain', color: 'var(--ink)' },
-    { key: 'zr', label: 'Frz rain', color: 'oklch(0.63 0.09 238)' },
-    { key: 'ip', label: 'Sleet', color: 'oklch(0.50 0.11 272)' },
+    // Same hues as the precipitation and snow charts (styles.css tokens)
+    { key: 'snow', label: 'Snow', color: 'var(--c-snow)' },
+    { key: 'rain', label: 'Rain', color: 'var(--c-rain)' },
+    { key: 'zr', label: 'Frz rain', color: 'var(--c-ice)' },
+    { key: 'ip', label: 'Sleet', color: 'var(--c-sleet)' },
 ];
 
 /**

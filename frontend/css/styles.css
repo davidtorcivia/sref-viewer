@@ -42,6 +42,16 @@
     --run-2: rgba(20, 19, 18, 0.42);
     --run-3: rgba(20, 19, 18, 0.26);
 
+    /* Variable hues (oklch, read by charts.js; alpha is added there).
+       Temperature takes the overview's ramp instead (signal.js). */
+    --c-rain: oklch(0.58 0.14 248);
+    --c-snow: oklch(0.6 0.12 290);
+    --c-ice: oklch(0.6 0.15 350);
+    --c-sleet: oklch(0.62 0.1 200);
+    --c-wind: oklch(0.56 0.09 175);
+    --c-cool: oklch(0.55 0.1 262);
+    --c-warm: oklch(0.62 0.18 34);
+
     --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
     --gut: max(clamp(16px, 3.4vw, 48px), calc((100vw - 1400px) / 2));
     --control-h: 40px;
@@ -73,6 +83,14 @@ html[data-theme="dark"] {
     --run-1: rgba(239, 235, 226, 0.62);
     --run-2: rgba(239, 235, 226, 0.42);
     --run-3: rgba(239, 235, 226, 0.26);
+
+    --c-rain: oklch(0.72 0.13 245);
+    --c-snow: oklch(0.8 0.09 290);
+    --c-ice: oklch(0.74 0.13 350);
+    --c-sleet: oklch(0.78 0.09 200);
+    --c-wind: oklch(0.74 0.09 175);
+    --c-cool: oklch(0.68 0.1 262);
+    --c-warm: oklch(0.72 0.16 40);
 }
 
 /* ============ Base ============ */
@@ -622,7 +640,15 @@ select:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 /* ============ Chart cards: no box, just the plot ============ */
-.chart-card { position: relative; }
+.chart-card { position: relative; --series: var(--ink); }
+.chart-card[data-type="precip"] { --series: var(--c-rain); }
+.chart-card[data-type="snow"] { --series: var(--c-snow); }
+.chart-card[data-type="wind"] { --series: var(--c-wind); }
+.chart-card[data-type="temp"] { --series: linear-gradient(90deg, var(--c-cool), var(--c-warm)); }
+.chart-section:has([data-type="precip"]) .mean-line { background: var(--c-rain); }
+.chart-section:has([data-type="snow"]) .mean-line { background: var(--c-snow); }
+.chart-section:has([data-type="wind"]) .mean-line { background: var(--c-wind); }
+.chart-section:has([data-type="temp"]) .mean-line { background: linear-gradient(90deg, var(--c-cool), var(--c-warm)); }
 
 .chart-card + .chart-card { margin-top: 32px; }
 
@@ -683,23 +709,26 @@ select:disabled { opacity: 0.5; cursor: not-allowed; }
     transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
 }
 
-/* Swatch: what the line looks like on the plot */
+/* Swatch: what the line looks like on the plot, in the variable's color */
 .chart-actions button::before {
     content: '';
     width: 16px;
     height: 3px;
     border-radius: 2px;
-    background: currentColor;
-    opacity: 0.4;
+    background: var(--series);
+    opacity: 0.5;
+    transition: opacity 0.2s var(--ease);
 }
 
 .chart-actions button[data-core="Mean"]::before { height: 4px; opacity: 1; }
 .chart-actions button[data-core="NMB"]::before,
 .chart-actions button[data-core="MEM"]::before {
     height: 2px;
-    background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px);
-    opacity: 1;
+    -webkit-mask: repeating-linear-gradient(90deg, #000 0 4px, transparent 4px 7px);
+    mask: repeating-linear-gradient(90deg, #000 0 4px, transparent 4px 7px);
 }
+.chart-actions button[data-core="MEM"]::before { height: 2.5px; opacity: 1; }
+.chart-actions button:not(.active)::before { opacity: 0.2; }
 
 .chart-actions button:hover { color: var(--ink); background: var(--wash); }
 
@@ -784,7 +813,6 @@ select:disabled { opacity: 0.5; cursor: not-allowed; }
     border-radius: 2px;
 }
 
-.chart-readout.live .ro-label i { filter: invert(1); }
 
 .ro-value {
     font-size: 24px;
