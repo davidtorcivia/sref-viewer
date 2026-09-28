@@ -900,9 +900,10 @@ async function proxyField(req, res, kind, extra, immutable) {
 }
 
 // ============ Overview: point forecast and place search ============
-// Observed now (RTMA) plus the hourly RRFS series for one place. A place in
-// a region the extractor has not cut yet comes back with building: true and
-// no hourly; the page asks again a few seconds later.
+// Observed now (RTMA), the hourly RRFS series and daily NBM rows for one
+// place. A place in a region the extractor has not cut yet comes back with
+// building: true and no hourly (daily_building: true and no daily for NBM);
+// the page asks again a few seconds later.
 app.get('/api/forecast', async (req, res) => {
     const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
     if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).json({ error: 'Invalid lat/lon' });
@@ -913,7 +914,7 @@ app.get('/api/forecast', async (req, res) => {
         const body = await up.json();
         if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).json(body);
         // Observations turn over every 15 minutes; a building answer must not stick
-        res.set('Cache-Control', body.building ? 'no-store' : 'public, max-age=120');
+        res.set('Cache-Control', body.building || body.daily_building ? 'no-store' : 'public, max-age=120');
         res.json(body);
     } catch (err) {
         res.status(502).json({ error: 'Forecast unavailable', details: err.message });
