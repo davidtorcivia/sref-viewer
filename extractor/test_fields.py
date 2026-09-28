@@ -31,6 +31,14 @@ fi, fj = X.lambert_ij(p, lats, lons)
 k = np.arange(450 * 265)
 err = max(np.abs(fi - k % 450).max(), np.abs(fj - k // 450).max())
 assert err < 0.01, f'grid math off by {err:.3f} cells'
+# NBM scans every other row east to west: grid_values must agree with
+# ecCodes' own nearest-point lookup (which honours the scan) on odd and even rows
+ec.codes_set(g, 'alternativeRowScanning', 1)
+ec.codes_set_values(g, np.arange(450 * 265, dtype=float))
+for k in (460, 1550, 905):
+    assert ec.codes_grib_find_nearest(g, lats[k], lons[k])[0].value == X.grid_values(g, p)[k // 450, k % 450], k
+ec.codes_set(g, 'alternativeRowScanning', 0)
+assert X.grid_values(g, p)[1, 10] == 460
 
 # Values equal to the column index: a bilinear sample must equal its fractional column
 col = np.tile(np.arange(450, dtype=np.float32), (265, 1))

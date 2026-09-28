@@ -1028,13 +1028,22 @@ def ccsds(msg):
         ec.codes_release(g)
 
 
-@functools.lru_cache(maxsize=24)   # 7.6MB (RRFS) to 15MB (RTMA) each
+def grid_values(g, p):
+    """(ny, nx) values, each row west to east. NBM scans every other row
+    east to west (alternativeRowScanning), and ecCodes returns them as stored."""
+    a = ec.codes_get_values(g).reshape(p['Ny'], p['Nx'])
+    if ec.codes_get(g, 'alternativeRowScanning'):
+        a[1::2] = a[1::2, ::-1]
+    return a
+
+
+@functools.lru_cache(maxsize=24)   # 7.6MB (RRFS) to 15MB (RTMA, NBM) each
 def decoded(path):
     with open(path, 'rb') as fp:
         g = ec.codes_new_from_message(fp.read())
     try:
         p = grid_params(g)
-        return ec.codes_get_values(g).astype(np.float32).reshape(p['Ny'], p['Nx']), p
+        return grid_values(g, p).astype(np.float32), p
     finally:
         ec.codes_release(g)
 
@@ -1306,7 +1315,7 @@ def build_crops(src, date, cycle, tiles):
         with open(path, 'rb') as fp:   # plain decode: bulk work stays out of the tile LRU
             g = ec.codes_new_from_message(fp.read())
         try:
-            arr = ec.codes_get_values(g).reshape(p['Ny'], p['Nx'])
+            arr = grid_values(g, p)
         finally:
             ec.codes_release(g)
         for t, (j0, j1, i0, i1) in boxes.items():
