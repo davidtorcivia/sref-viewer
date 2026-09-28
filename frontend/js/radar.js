@@ -23,6 +23,13 @@ import { store as savedStore } from './config.js?v=__V__';
 // Embedded in the overview page (radar.html?embed=1 in an iframe): start
 // from the defaults and leave the user's saved radar settings alone
 const EMBED = new URLSearchParams(location.search).has('embed');
+// Times read in the place's zone when the overview passes one (?tz=), else the device's
+const TZ = (() => {
+    const z = new URLSearchParams(location.search).get('tz');
+    try { return z && /^[A-Za-z_]+\/[A-Za-z_\/+-]{1,40}$/.test(z) ? (new Intl.DateTimeFormat('en-US', { timeZone: z }), z) : undefined; } catch { return undefined; }
+})();
+// "4:10 PM EDT"; opts add a weekday where frames span days
+const clockAt = (ms, opts = {}) => new Date(ms).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', ...opts, timeZone: TZ, timeZoneName: 'short' });
 let setGestures = () => {};   // cooperative gestures on in the mini embed (page scroll wins), off full screen
 const store = EMBED ? { get: () => null, set() {} } : savedStore;
 if (EMBED) {
@@ -364,11 +371,8 @@ function updateFrameLabel() {
     const frame = frames[currentFrame];
     if (!frame) return;
     const d = new Date(frame.time * 1000);
-    els.frameTime.textContent = d.toLocaleTimeString('en-US', {
-        // Model frames span two days
-        weekday: frame.field ? 'short' : undefined,
-        hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
-    }) + ' ET';
+    // model frames span two days
+    els.frameTime.textContent = clockAt(d, frame.field ? { weekday: 'short' } : {});
 
     if (frame.field) {
         // The RRFS cycle is in the header pill
@@ -448,9 +452,7 @@ function showAlertPopup(e) {
     if (p.expires) {
         const until = document.createElement('div');
         until.className = 'alert-popup-until';
-        until.textContent = 'Until ' + new Date(Number(p.expires) * 1000).toLocaleString('en-US', {
-            weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
-        }) + ' ET';
+        until.textContent = 'Until ' + clockAt(Number(p.expires) * 1000, { weekday: 'short' });
         wrap.appendChild(until);
     }
     new maplibregl.Popup({ maxWidth: '320px', closeButton: true })
@@ -566,9 +568,7 @@ async function refreshFrames({ initial = false } = {}) {
             els.updated.textContent = `RRFS ${frames[0].cycle}Z run`;
         } else if (latest) {
             const d = new Date(latest.time * 1000);
-            els.updated.textContent = 'Updated ' + d.toLocaleTimeString('en-US', {
-                hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
-            }) + ' ET';
+            els.updated.textContent = 'Updated ' + clockAt(d);
         }
     } catch (err) {
         console.error('[RADAR]', err);
@@ -924,10 +924,8 @@ function inspectContent(v, frame) {
     if (v.refc && v.refc.dbz >= 10) line('inspect-row', `Radar ${Math.round(v.refc.dbz)} dBZ ${v.refc.snow ? 'snow' : 'rain'} (simulated)`);
     if (v.qpf >= 0.01) line('inspect-row', `Precip ${v.qpf.toFixed(2)}" since run start`);
     if (v.snowtot >= 0.1) line('inspect-row', `Snow ${v.snowtot.toFixed(1)}" since run start`);
-    const at = new Date(frame.time * 1000).toLocaleString('en-US', {
-        weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
-    });
-    line('inspect-src', `${at} ET \u00b7 ${frame.src === 'rtma' ? 'observed (RTMA)' : `RRFS ${frame.cycle}Z +${frame.fh}h`}`);
+    const at = clockAt(frame.time * 1000, { weekday: 'short' });
+    line('inspect-src', `${at} \u00b7 ${frame.src === 'rtma' ? 'observed (RTMA)' : `RRFS ${frame.cycle}Z +${frame.fh}h`}`);
     return wrap;
 }
 

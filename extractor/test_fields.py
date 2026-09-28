@@ -206,5 +206,25 @@ assert rows12[-1]['date'] == '2026-10-08', rows12[-1]
 # Winter (EST, UTC-5): the same windows land on the same dates
 w = X.daily_rows(X.frame_time('nbm', '20260115', '00', 0), hours, series('00', ('TMAX', 'TMIN')))
 assert w[0]['date'] == '2026-01-15' and w[0]['lo'] == round(X.K_TO_F(281)) and w[0]['hi'] == round(X.K_TO_F(302))
+# The New York zone passed explicitly gives the same rows as the default
+ny = X.daily_rows(X.frame_time('nbm', '20260928', '00', 0), hours, series('00', X.DAILY_MSGS), X.place_zone('America/New_York'))
+assert ny == rows
+# Los Angeles (PDT, UTC-7): the overnight low (00z-12z, ending 5am) lands on that
+# morning's date, not the evening before as its 06z midpoint would put it
+la = X.daily_rows(X.frame_time('nbm', '20260928', '00', 0), hours, series('00', X.DAILY_MSGS),
+                  X.place_zone('America/Los_Angeles'))
+lb = {r['date']: r for r in la}
+assert [r['date'] for r in la] == [r['date'] for r in rows], [r['date'] for r in la]
+d = lb['2026-09-28']
+assert (d['hi'], d['lo'], d['pop_day'], d['pop_night']) == (round(X.K_TO_F(302)), round(X.K_TO_F(281)), 24, 12), d
+assert lb['2026-09-29']['lo'] == round(X.K_TO_F(283)) and lb['2026-10-08']['lo'] == round(X.K_TO_F(301))
+# Pacific day: instantaneous values 12z, 18z, 00z, 06z (5am-11pm PDT) = f012..f030;
+# 6 h amounts 06z-06z (11pm-11pm PDT) = f012..f030 too
+assert (d['wind'], d['gust'], d['cloud'], d['qpf']) == (round(5 * 2.23694), round(10 * 2.23694), 36, 0.4), d
+# Snow at f042 (12z-18z on the 29th) is the 29th in Los Angeles as well
+assert lb['2026-09-29']['snow'] == 11.8
+# Zone names: anything unusable falls back to New York
+assert str(X.place_zone('America/Denver')) == 'America/Denver'
+assert all(X.place_zone(n) is X.DAILY_TZ for n in ('', None, 'Nowhere/Land', '../etc/passwd', 'UTC', 'America/' + 'x' * 60))
 
 print(f'fields: ok (grid round trip within {err:.4f} cells)')

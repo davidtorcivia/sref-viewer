@@ -1,6 +1,6 @@
 // Run: node test.js
 const assert = require('assert');
-const { latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations } = require('./server');
+const { latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
 
 // Latest ready run rolls back to yesterday before the first cycle is out
 const at = (iso) => Date.parse(iso);
@@ -89,5 +89,38 @@ const f19 = five.find(h => h.t === at('2026-09-28T19:00Z'));
 assert.strictEqual(f19.text, 'five');
 assert.strictEqual(f19.precip, 0.1);
 assert.strictEqual(five.find(h => h.t === at('2026-09-28T18:00Z')).tmp, 53.6);
+
+// Place zones: NWS names pass, anything else is refused; longitude fallback bands
+assert.ok(validZone('America/Los_Angeles') && validZone('America/Indiana/Indianapolis'));
+assert.ok(!validZone('Nowhere/Land') && !validZone('UTC') && !validZone('../x') && !validZone(null));
+assert.deepStrictEqual([-74, -90, -105, -118].map(zoneByLongitude),
+    ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles']);
+// Photon features become results named like the Nominatim ones
+{
+    const { photonResult, searchKey } = require('./server');
+    const feat = (props, lon = -74, lat = 40.7) => ({ geometry: { coordinates: [lon, lat] }, properties: { countrycode: 'US', ...props } });
+    assert.deepStrictEqual(photonResult(feat({ type: 'city', osm_key: 'place', osm_value: 'town', name: 'Hoboken',
+        county: 'Hudson', state: 'New Jersey', postcode: '07030' }, -74.03, 40.74)),
+        { name: 'Hoboken, New Jersey', detail: 'Hoboken, Hudson, New Jersey, 07030', address: false, lat: 40.74, lon: -74.03 });
+    const house = photonResult(feat({ type: 'house', housenumber: '123', street: 'Washington Street', city: 'Hoboken',
+        county: 'Hudson', state: 'New Jersey', postcode: '07030' }));
+    assert.strictEqual(house.name, '123 Washington Street, Hoboken');
+    assert.strictEqual(house.address, true);
+    assert.strictEqual(house.detail, '123 Washington Street, Hoboken, Hudson, New Jersey, 07030');
+    const poi = photonResult(feat({ type: 'house', housenumber: '1600', name: 'White House',
+        street: 'Pennsylvania Avenue Northwest', city: 'Washington', state: 'District of Columbia' }));
+    assert.strictEqual(poi.name, '1600 Pennsylvania Avenue Northwest, Washington');
+    assert.strictEqual(poi.detail, 'White House, 1600 Pennsylvania Avenue Northwest, Washington, District of Columbia');
+    const road = photonResult(feat({ type: 'street', osm_key: 'highway', name: 'Main Street', city: 'Hobart', state: 'Indiana' }));
+    assert.deepStrictEqual([road.name, road.address], ['Main Street, Hobart', true]);
+    assert.strictEqual(photonResult(feat({ type: 'other', osm_value: 'postcode', name: '10001', district: 'Manhattan',
+        city: 'New York', state: 'New York' })).name, 'New York, New York');
+    assert.strictEqual(photonResult(feat({ type: 'district', name: 'Brooklyn', state: 'New York' })).name, 'Brooklyn, New York');
+    assert.strictEqual(photonResult(feat({ type: 'state', name: 'New Jersey', state: 'New Jersey' })).name, 'New Jersey');
+
+    assert.strictEqual(searchKey('  Hoboken \t NJ  '), 'hoboken nj');
+    assert.strictEqual(searchKey(undefined), '');
+    assert.strictEqual(searchKey('x'.repeat(150)).length, 100);
+}
 
 console.log('backend: all checks passed');

@@ -39,10 +39,11 @@ export function precip(inches, u, snow = false) {
     return `${inches.toFixed(snow ? 1 : 2)}"`;
 }
 
-export function clock(ms, u, minutes = true) {
-    const opts = u.clock === '24'
+// timeZone: the place's IANA zone; undefined formats in the device's
+export function clock(ms, u, minutes = true, timeZone) {
+    const opts = { timeZone, ...(u.clock === '24'
         ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }
-        : { hour: 'numeric', ...(minutes ? { minute: '2-digit' } : {}) };
+        : { hour: 'numeric', ...(minutes ? { minute: '2-digit' } : {}) }) };
     const s = new Date(ms).toLocaleTimeString('en-US', opts);
     return u.clock === '24' && !minutes ? s.slice(0, 2) : s.replace(' ', minutes ? ' ' : '');
 }

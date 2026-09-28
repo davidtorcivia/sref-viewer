@@ -18,10 +18,11 @@ import { store, getLatestRunWithDate, previousCycle } from './config.js?v=__V__'
 import { applySiteSettings } from './site.js?v=__V__';
 import {
     hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
-    comfort, compass, monotonePath, dayKey, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex,
+    comfort, compass, monotonePath, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex,
 } from './forecast.js?v=__V__';
-import { rampColor, windArrow, spiral, spiralTimeAt, SPIRAL } from './signal.js?v=__V__';
+import { rampColor, lineColor, windArrow, spiral, spiralTimeAt, SPIRAL } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
+import * as Z from './zone.js?v=__V__';
 
 const PLACES_KEY = 'wx-places';
 const UNITS_KEY = 'wx-units';
@@ -72,20 +73,31 @@ const icon = (key, cls = '') => {
     return s;
 };
 // Formatting in the user's units (data stays °F, mph, inches)
+// ============ The place's time zone ============
+// Times, days and "tonight" read in the place's own zone (the forecast's tz); undefined is the device's
+let zone;
+const zDay = (ms, tz = zone) => Z.day(ms, tz);
+const zHour = ms => Z.hour(ms, zone);
+const zMidnight = ms => Z.midnight(ms, zone);
+const zNoon = ms => Z.noon(ms, zone);
+const zDate = (ms, opts) => Z.format(ms, opts, zone);
+const zMidnights = (a, b) => Z.midnights(a, b, zone);
+const zoneTag = ms => Z.tag(ms, zone);
+
 const deg = v => U.deg(v, units);
-const timeOf = ms => U.clock(ms, units);
-const hourOf = ms => U.clock(ms, units, false);
+const timeOf = ms => U.clock(ms, units, true, zone);
+const hourOf = ms => U.clock(ms, units, false, zone);
 const windStr = mph => U.wind(mph, units);
 const rain = (inches, snow) => U.precip(inches, units, snow);
-const weekday = ms => (dayKey(ms) === dayKey(Date.now()) ? 'Today' : new Date(ms).toLocaleDateString('en-US', { weekday: 'short' }));
+const weekday = ms => (zDay(ms) === zDay(Date.now()) ? 'Today' : zDate(ms, { weekday: 'short' }));
 
 // Words for a time ahead: "this afternoon", "tonight", "tomorrow morning"
 function partOfDay(t, now = Date.now()) {
-    const h = new Date(t).getHours();
-    const days = Math.round((new Date(t).setHours(12, 0, 0, 0) - new Date(now).setHours(12, 0, 0, 0)) / 86400000);
+    const h = zHour(t);
+    const days = Math.round((zNoon(t) - zNoon(now)) / 86400000);
     if (days === 0) return h < 12 ? 'this morning' : h < 17 ? 'this afternoon' : h < 21 ? 'this evening' : 'tonight';
     if (days === 1) return h < 6 ? 'overnight' : h < 12 ? 'tomorrow morning' : h < 17 ? 'tomorrow afternoon' : h < 21 ? 'tomorrow evening' : 'tomorrow night';
-    return new Date(t).toLocaleDateString('en-US', { weekday: 'long' });
+    return zDate(t, { weekday: 'long' });
 }
 
 function allPlaces() {
@@ -121,7 +133,7 @@ function shape(d, place) {
     const temp = obs.tmp ?? cur?.tmp;
     const dpt = obs.dpt ?? cur?.dpt;
     const wind = obs.wind?.mph ?? cur?.wind ?? 0;
-    const days = daysWithObserved(d.daily, temp);
+    const days = daysWithObserved(d.daily, temp, d.tz);
     return {
         raw: d, rows, upcoming, night, sun, obs: d.now, nowRow, days,
         cond: nowRow ? condition(nowRow, night) : { key: night ? 'clear-night' : 'clear', label: '' },
@@ -131,9 +143,14 @@ function shape(d, place) {
 }
 
 // NBM days, today's range widened by what has actually been observed
-function daysWithObserved(daily, temp) {
-    const days = daily?.length ? nbmDays(daily) : [];
-    const today = days.find(x => x.key === dayKey(Date.now()));
+function daysWithObserved(daily, temp, tz) {
+    // keyed by the NBM date itself, which is the place's calendar date
+    // t: noon of that date in the place (UTC noon of a date is on that date in every US zone)
+    const days = daily?.length ? nbmDays(daily).map((x, i) => {
+        const [y, m, d] = daily[i].date.split('-').map(Number);
+        return { ...x, key: daily[i].date, t: Z.noon(Date.UTC(y, m - 1, d, 12), tz) };
+    }) : [];
+    const today = days.find(x => x.key === zDay(Date.now(), tz));
     if (today && temp != null) {
         today.hi = Math.max(today.hi ?? temp, temp);
         today.lo = today.lo == null ? null : Math.min(today.lo, temp);
@@ -230,9 +247,9 @@ function contains(geom, { lat, lon }) {
 function nightsAround(place, now) {
     const out = [];
     for (let d = -1; d <= 1; d++) {
-        const day = now + d * 86400000;
-        const set = sunTimes(day, place.lat, place.lon).set;
-        const rise = sunTimes(day + 86400000, place.lat, place.lon).rise;
+        const day = zNoon(now) + d * 86400000;
+        const set = sunTimes(day, place.lat, place.lon, zone).set;
+        const rise = sunTimes(day + 86400000, place.lat, place.lon, zone).rise;
         if (set && rise) out.push([set, rise]);
     }
     return out;
@@ -251,31 +268,36 @@ function onCursor(node, fn) {
     const sub = t => { if (!node.isConnected) { cursor.subs.delete(sub); return; } fn(t); };
     cursor.subs.add(sub);
 }
-// A drag on a surface scrubs; letting go returns to now. Vertical page scroll still works on touch.
+// Pointing (a mouse) moves the cursor while it hovers; a drag or tap pins it where it is let go,
+// until a tap anywhere outside the scrub surfaces or Escape. A touch that becomes a page scroll lets go.
+let pinned = false;
+const unpin = () => { pinned = false; setCursor(null); };
+document.addEventListener('click', e => { if (pinned && !e.target.closest?.('.scrub')) unpin(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && pinned) unpin(); });
 function scrubSurface(node, timeAt) {
     let active = false;
+    node.classList.add('scrub');
     const move = e => setCursor(timeAt(e));
-    node.addEventListener('pointerdown', e => { active = true; node.setPointerCapture?.(e.pointerId); move(e); });
-    node.addEventListener('pointermove', e => { if (active || e.pointerType === 'mouse') move(e); });
-    const end = e => {
-        active = false;
-        if (e.type !== 'pointerleave' || e.pointerType === 'mouse') setCursor(null);
-    };
-    for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) node.addEventListener(ev, end);
+    node.addEventListener('pointerdown', e => { active = true; pinned = false; node.setPointerCapture?.(e.pointerId); move(e); });
+    node.addEventListener('pointermove', e => { if (active || (e.pointerType === 'mouse' && !pinned)) move(e); });
+    node.addEventListener('pointerup', () => { if (active) { active = false; pinned = cursor.t != null; } });
+    node.addEventListener('pointercancel', () => { active = false; unpin(); });
+    node.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !active && !pinned) setCursor(null); });
 }
 // Arrow keys step the cursor an hour at a time within [first, last]; Escape returns to now
 function keyScrub(node, first, last) {
     node.tabIndex = 0;
     node.addEventListener('keydown', e => {
         const step = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
-        if (e.key === 'Escape') { setCursor(null); return; }
+        if (e.key === 'Escape') { unpin(); return; }
         if (!step) return;
         e.preventDefault();
         const base = cursor.t ?? Math.floor(Date.now() / HOUR) * HOUR;
         const t = base + step * HOUR;
         setCursor(t < first ? null : Math.min(last, t));
+        pinned = cursor.t != null;
     });
-    node.addEventListener('blur', () => setCursor(null));
+    node.addEventListener('blur', () => { if (!pinned) setCursor(null); });
 }
 
 // The hourly row at time t (the hour containing it), falling back to the first
@@ -285,9 +307,11 @@ const rowAt = (f, t) => f.upcoming.find(r => r.t <= t && r.t + HOUR > t) ?? f.up
 
 function navigate(hash) {
     const url = !hash || hash === '#' ? location.pathname + location.search : hash;
+    history.replaceState({ ...history.state, y: scrollY }, '');   // where this page was, for back
     history.pushState(null, '', url);
     route();
 }
+history.scrollRestoration = 'manual';
 document.addEventListener('click', e => {
     const a = e.target.closest?.('a[href^="#"]');
     if (!a || e.defaultPrevented || e.metaKey || e.ctrlKey || e.button) return;
@@ -295,7 +319,7 @@ document.addEventListener('click', e => {
     navigate(a.getAttribute('href'));
 });
 // Back/forward and a typed #hash both arrive as popstate
-window.addEventListener('popstate', () => route());
+window.addEventListener('popstate', e => route(false, e.state?.y ?? null));
 
 // ============ Place chips ============
 
@@ -351,6 +375,7 @@ async function renderPlace(place) {
         return;
     }
     if (seq !== renderSeq) return;   // another render started meanwhile (navigation, refresh)
+    zone = f.raw.tz || undefined;
     num.classList.remove('sg-skeleton');
     const next24 = f.upcoming.slice(0, 25);
     top.style.background = fieldGradient(next24, f.temp);
@@ -406,7 +431,7 @@ async function renderPlace(place) {
                     const d = await (await fetch(`/api/forecast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`)).json();
                     if (d.daily?.length && !d.daily_building) {
                         Object.assign(f.raw, { daily: d.daily, daily_run: d.daily_run, daily_building: false });
-                        f.days = daysWithObserved(d.daily, f.temp);
+                        f.days = daysWithObserved(d.daily, f.temp, f.raw.tz);
                         if (seq !== renderSeq) return;
                         const d2 = daysSection(f);
                         if (d2) (daysSec ? daysSec.replaceWith(d2) : more.before(d2));
@@ -455,14 +480,15 @@ function hourStrip(rows) {
         c.tabIndex = 0;
         c.setAttribute('role', 'button');
         c.setAttribute('aria-label', `${hourOf(r.t)}, ${deg(r.tmp)}`);
-        c.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse') setCursor(t); });
-        // a mouse already moved the cursor on the way in; a tap or a key toggles it
-        c.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') setCursor(cursor.t === t ? null : t); });
-        c.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCursor(cursor.t === t ? null : t); } });
+        const toggle = () => { const on = !(pinned && cursor.t === t); setCursor(on ? t : null); pinned = on && t != null; };
+        c.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse' && !pinned) setCursor(t); });
+        c.addEventListener('pointerup', toggle);
+        c.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
         box.append(c);
         return [r, c];
     });
-    box.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') setCursor(null); });
+    box.classList.add('scrub');
+    box.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !pinned) setCursor(null); });
     onCursor(box, t => { for (const [r, c] of cells) c.classList.toggle('on', t != null && r.t <= t && r.t + HOUR > t); });
     return { el: box };
 }
@@ -472,7 +498,7 @@ function showHero({ label, num, place, f }, t, ens) {
     if (t == null) {
         const age = f.obs?.time ? Math.round((Date.now() - f.obs.time * 1000) / 60000) : null;
         label.textContent = f.obs?.time
-            ? `Now · observed ${timeOf(f.obs.time * 1000)}${age != null && age >= 2 ? `, ${age} min ago` : ''} · ${place.name}`
+            ? `Now · observed ${timeOf(f.obs.time * 1000)}${zoneTag(f.obs.time * 1000)}${age != null && age >= 2 ? `, ${age} min ago` : ''} · ${place.name}`
             : `Now · ${place.name}`;
         num.textContent = deg(f.temp);
         return;
@@ -490,11 +516,11 @@ function headline(f) {
     if (f.cond.label) parts.push(f.cond.label);
     const soon = nowcast(f.rows, Date.now(), hourOf);
     if (soon) parts.push(soon);
-    const wetDay = f.days.find(d => d.key !== dayKey(Date.now()) && (d.pop ?? 0) >= 40);
+    const wetDay = f.days.find(d => d.key !== zDay(Date.now()) && (d.pop ?? 0) >= 40);
     if (wetDay) {
         const n = Math.round(wetDay.pop / 5);
-        parts.push(`${wetDay.snow >= 0.1 ? 'Snow' : 'Rain'} likely ${new Date(wetDay.t).toLocaleDateString('en-US', { weekday: 'long' })}: ${n} of 20 outcomes wet`);
-    } else if (f.days.length > 3) parts.push(`No rain in sight through ${new Date(f.days[f.days.length - 1].t).toLocaleDateString('en-US', { weekday: 'long' })}`);
+        parts.push(`${wetDay.snow >= 0.1 ? 'Snow' : 'Rain'} likely ${zDate(wetDay.t, { weekday: 'long' })}: ${n} of 20 outcomes wet`);
+    } else if (f.days.length > 3) parts.push(`No rain in sight through ${zDate(f.days[f.days.length - 1].t, { weekday: 'long' })}`);
     return `${parts.join('. ')}.`;
 }
 
@@ -521,8 +547,7 @@ function spiralSvg(place, f, hist, sweep = true) {
     const id = `sw${Math.random().toString(36).slice(2, 8)}`;
     const mask = svgEl('mask', { id }, svgEl('defs', {}, s));
     svgEl('path', { d: sp.track, class: sweep ? 'sp-sweep' : '', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
-    const [c0] = sp.caps;
-    svgEl('circle', { cx: c0.x, cy: c0.y, r: c0.r, fill: '#000' }, mask);   // the start is concave: an arch into the band
+    svgEl('circle', { cx: sp.notch.x, cy: sp.notch.y, r: sp.notch.r, fill: '#000' }, mask);   // the start arches into the band
     const g = svgEl('g', { mask: `url(#${id})` }, s);
     for (const seg of sp.segs) {
         const p = seg.tmp == null ? svgEl('path', { d: seg.d, class: 'sp-missing' }, g)
@@ -586,6 +611,17 @@ function spiralSvg(place, f, hist, sweep = true) {
     return s;
 }
 
+// A vertical gradient in temperature colors for an SVG line or band: from fTop (°F) at yTop to
+// fBottom at yBottom, lightness kept legible on the page's theme. Returns a url() for style.
+function tempGradient(svg, yTop, yBottom, fTop, fBottom) {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    const id = `tg${Math.random().toString(36).slice(2, 8)}`;
+    const g = svgEl('linearGradient', { id, gradientUnits: 'userSpaceOnUse', x1: 0, x2: 0, y1: yTop, y2: yBottom }, svgEl('defs', {}, svg));
+    for (let i = 0; i <= 8; i++) svgEl('stop', { offset: i / 8, 'stop-color': lineColor(fTop + (fBottom - fTop) * i / 8, dark) }, g);
+    return `url(#${id})`;
+}
+const toF = v => (units.temp === 'C' ? v * 9 / 5 + 32 : v);
+
 // ============ Readouts at the cursor ============
 
 function gauge(v, a, b, marks) {
@@ -636,7 +672,7 @@ function band(lo, hi, v) {
 }
 function dayBar(rise, set, t) {
     const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
-    const d0 = new Date(t).setHours(0, 0, 0, 0), X = ms => (ms - d0) / 86400000 * 138;
+    const d0 = zMidnight(t), X = ms => (ms - d0) / 86400000 * 138;
     svgEl('rect', { x: 0, y: 10, width: 138, height: 10, class: 'mini-night' }, s);
     if (rise && set) svgEl('rect', { x: X(rise), y: 10, width: X(set) - X(rise), height: 10, class: 'mini-day' }, s);
     svgEl('line', { x1: X(t), x2: X(t), y1: 5, y2: 25, class: 'mini-mark' }, s);
@@ -729,10 +765,11 @@ function readouts(place, f) {
         const cloud = now ? f.nowRow?.cloud : r.cloud;
         const cover = cloud == null ? '' : cloud < 20 ? 'Clear' : cloud < 60 ? 'Partly cloudy' : cloud < 90 ? 'Mostly cloudy' : 'Overcast';
         put('sky', 'Sky', cloud == null ? '--' : `${Math.round(cloud)}%`, cover, cloud != null ? coverBar(cloud) : null);
-        const day = f.days.find(d => d.key === dayKey(tt));
+        const day = f.days.find(d => d.key === zDay(tt));
         if (day?.pop != null) {
             const n = Math.round(day.pop / 5);
-            put('rain', `Rain, ${weekday(tt).toLowerCase() === 'today' ? 'today' : weekday(tt)}`, `${n}/20`,
+            cells.rain.mini.classList.add('mini-rain');
+        put('rain', `Rain, ${weekday(tt).toLowerCase() === 'today' ? 'today' : weekday(tt)}`, `${n}/20`,
                 `outcomes wet, ${day.pop}%.${day.qpf >= 0.01 ? ` About ${rain(day.snow >= 0.1 ? day.snow : day.qpf, day.snow >= 0.1)}.` : ''}`, squares(n));
         } else put('rain', 'Rain, this hour', rain(r.qpf ?? 0), '', null);
         const ahead = (h, key) => {
@@ -743,7 +780,7 @@ function readouts(place, f) {
         };
         ahead(3, 'later3');
         ahead(12, 'later12');
-        const st = sunTimes(tt, place.lat, place.lon), st2 = sunTimes(tt + 86400000, place.lat, place.lon);
+        const st = sunTimes(zNoon(tt), place.lat, place.lon, zone), st2 = sunTimes(zNoon(tt) + 86400000, place.lat, place.lon, zone);
         const events = [[st.rise, 'Sunrise'], [st.set, 'Sunset'], [st2.rise, 'Sunrise'], [st2.set, 'Sunset']].filter(([x]) => x && x > tt);
         if (events.length) {
             const [when, name] = events[0];
@@ -781,12 +818,14 @@ function hoursSection(place, f, ens0) {
         const x0 = rows[0].t, x1 = rows[rows.length - 1].t;
         const X = t => L + (t - x0) / (x1 - x0) * (W - L - Rm);
         const ensIn = ens ? ens.filter(m => m.x >= x0 - 3 * HOUR && m.x <= x1 + 3 * HOUR) : [];
+        let paint = null;   // the temperature gradient, set once the scale is known
         const vals = [...rows.map(r => r.tmp), ...ensIn.flatMap(m => [m.p10, m.p90])].map(v => U.toTemp(v, units));
         let lo = Math.min(...vals), hi = Math.max(...vals);
         const pad = Math.max(1.5, (hi - lo) * 0.12);
         lo -= pad; hi += pad;
         const Y = v => 26 + (1 - (U.toTemp(v, units) - lo) / (hi - lo)) * (HT - 34);
         const s = svgEl('svg', { width: W, height: H, class: 'sg-svg', role: 'img', 'aria-label': 'Temperature and wind for the next 48 hours' });
+        paint = tempGradient(s, 26, HT - 8, toF(hi), toF(lo));
 
         // grid
         const step = (hi - lo) > 24 ? 10 : (hi - lo) > 12 ? 5 : 2;
@@ -796,9 +835,9 @@ function hoursSection(place, f, ens0) {
             svgEl('text', { x: 0, y: y + 4, class: 'g-axis' }, s).textContent = `${v}°`;
         }
         // days
-        for (let t = new Date(x0).setHours(24, 0, 0, 0); t < x1; t = new Date(t).setDate(new Date(t).getDate() + 1)) {
+        for (const t of zMidnights(x0, x1)) {
             svgEl('line', { x1: X(t), x2: X(t), y1: 0, y2: H - HRS, class: 'g-day' }, s);
-            svgEl('text', { x: X(t) + 8, y: 16, class: 'g-dayname' }, s).textContent = new Date(t).toLocaleDateString('en-US', { weekday: 'long' });
+            svgEl('text', { x: X(t) + 8, y: 16, class: 'g-dayname' }, s).textContent = zDate(t, { weekday: 'long' });
         }
         // the hours as color
         const bw = (W - L - Rm) / (rows.length - 1);
@@ -818,17 +857,18 @@ function hoursSection(place, f, ens0) {
             };
             area('p10', 'p90', 'g-band');
             area('p25', 'p75', 'g-band g-band-mid');
+            g.querySelectorAll('.g-band').forEach(b => { b.style.fill = paint; });
         }
         // rain and snow, hourly
         for (const r of rows) {
             const amt = r.snowy ? r.snow : r.qpf;
             if (!(r.qpf >= 0.01)) continue;
             const h = Math.min(40, 6 + r.qpf * 160);
-            const b = svgEl('rect', { x: X(r.t) - Math.max(2, bw * 0.3), y: HT - h, width: Math.max(4, bw * 0.6), height: h, class: 'g-rain' }, s);
+            const b = svgEl('rect', { x: X(r.t) - Math.max(2, bw * 0.3), y: HT - h, width: Math.max(4, bw * 0.6), height: h, class: r.snowy ? 'g-rain g-snow' : 'g-rain' }, s);
             svgTitle(b, `${weekday(r.t)} ${timeOf(r.t)} · ${rain(amt, r.snowy)}${r.snowy ? ' snow' : ''}`);
         }
         // the forecast
-        svgEl('path', { d: monotonePath(rows.map(r => [X(r.t), Y(r.tmp)])), class: 'g-line' }, s);
+        svgEl('path', { d: monotonePath(rows.map(r => [X(r.t), Y(r.tmp)])), class: 'g-line' }, s).style.stroke = paint;
         if (!narrow) {
             const lastR = rows[rows.length - 1];
             svgEl('text', { x: X(lastR.t) + 8, y: Y(lastR.tmp) + 4, class: 'g-end' }, s).textContent = 'forecast';
@@ -916,7 +956,7 @@ function daysSection(f) {
     if (!days.length) return null;
     const sec = el('section', 'sg-days');
     sec.setAttribute('aria-label', `${days.length} days`);
-    const lowOf = d => d.lo ?? (d.key === dayKey(Date.now()) ? f.temp : null) ?? d.hi;
+    const lowOf = d => d.lo ?? (d.key === zDay(Date.now()) ? f.temp : null) ?? d.hi;
     const his = days.map(d => d.hi).filter(v => v != null), los = days.map(lowOf).filter(v => v != null);
     const lo = Math.min(...los) - 2, hi = Math.max(...his) + 2;
     const pos = v => `${((v - lo) / (hi - lo) * 100).toFixed(2)}%`;
@@ -933,9 +973,9 @@ function daysSection(f) {
     table.append(axis);
     for (const d of days) {
         const row = el('div', 'sg-day');
-        const low = d.lo ?? (d.key === dayKey(Date.now()) ? f.temp : null) ?? null;
+        const low = d.lo ?? (d.key === zDay(Date.now()) ? f.temp : null) ?? null;
         const name = el('span', 'sg-day-name', weekday(d.t));
-        const date = el('span', 'sg-day-date', new Date(d.t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        const date = el('span', 'sg-day-date', zDate(d.t, { month: 'short', day: 'numeric' }));
         const barBox = el('div', 'sg-day-bar');
         if (d.hi != null) {
             const l = low ?? d.hi;
@@ -973,7 +1013,7 @@ function daysSection(f) {
 function dayMore(d, f) {
     const box = el('div', 'sg-day-more');
     const inner = el('div', 'sg-day-more-inner');
-    const hrs = f.rows.filter(r => dayKey(r.t) === d.key);
+    const hrs = f.rows.filter(r => zDay(r.t) === d.key);
     const snow = d.snow >= 0.1;
     if (hrs.length >= 6) {
         const grid = el('div', 'sg-ribbon');
@@ -1139,16 +1179,17 @@ function drawPlume(box, readout, d, spec, prevs) {
     lo = spec.total ? 0 : spec.key === 'wind' ? Math.max(0, lo - pad) : lo - pad;   // no negative wind
     const X = t => L + (t - x0) / (x1 - x0) * (W - L - R);
     const Y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
-    const s = svgEl('svg', { width: W, height: H, class: 'plume-svg', role: 'img', 'aria-label': `${spec.label} ensemble plume` });
+    const s = svgEl('svg', { width: W, height: H, class: `plume-svg plume-${spec.key}`, role: 'img', 'aria-label': `${spec.label} ensemble plume` });
+    const paint = spec.key === 'temp' ? tempGradient(s, Y(hi), Y(lo), toF(hi), toF(lo)) : null;
 
     for (let k = 0; k <= 3; k++) {
         const v = lo + (hi - lo) * k / 3;
         svgEl('line', { x1: L, x2: W - R, y1: Y(v), y2: Y(v), class: 'grid' }, s);
         svgEl('text', { x: L - 6, y: Y(v), class: 'axis axis-y', 'dominant-baseline': 'central' }, s).textContent = spec.fmt(v);
     }
-    for (let t = new Date(x0).setHours(24, 0, 0, 0); t < x1; t += 86400000) {
+    for (const t of zMidnights(x0, x1)) {
         svgEl('line', { x1: X(t), x2: X(t), y1: T, y2: H - B, class: 'grid grid-day' }, s);
-        svgEl('text', { x: X(t) + 4, y: H - 8, class: 'axis' }, s).textContent = new Date(t).toLocaleDateString('en-US', { weekday: 'short' });
+        svgEl('text', { x: X(t) + 4, y: H - 8, class: 'axis' }, s).textContent = zDate(t, { weekday: 'short' });
     }
     const area = (a, b, cls) => {
         const top = mean.map(m => [X(m.x), Y(c(m[b]))]);
@@ -1157,14 +1198,19 @@ function drawPlume(box, readout, d, spec, prevs) {
     };
     area('p10', 'p90', 'plume-outer');
     area('p25', 'p75', 'plume-inner');
+    if (paint) s.querySelectorAll('.plume-outer, .plume-inner').forEach(b => { b.style.fill = paint; });
     const clipT = p => p.x >= x0 && p.x <= x1;
     prevs.slice().reverse().forEach((p, k) => {
         const pts = p.mean.filter(clipT).map(m => [X(m.x), Y(c(m.y))]);
         if (pts.length > 1) svgEl('path', { d: monotonePath(pts), class: `plume-prev prev${prevs.length - 1 - k}` }, s);
     });
     const detIn = det.filter(clipT);
-    if (detIn.length > 1) svgEl('path', { d: monotonePath(detIn.map(p => [X(p.x), Y(c(p.y))])), class: 'plume-det' }, s);
-    svgEl('path', { d: monotonePath(mean.map(m => [X(m.x), Y(c(m.y))])), class: 'plume-mean' }, s);
+    if (detIn.length > 1) {
+        const det = svgEl('path', { d: monotonePath(detIn.map(p => [X(p.x), Y(c(p.y))])), class: 'plume-det' }, s);
+        if (paint) det.style.stroke = paint;
+    }
+    const meanPath = svgEl('path', { d: monotonePath(mean.map(m => [X(m.x), Y(c(m.y))])), class: 'plume-mean' }, s);
+    if (paint) meanPath.style.stroke = paint;
 
     const cursorLine = svgEl('line', { y1: T, y2: H - B, class: 'plume-cursor' }, s);
     const dot = svgEl('circle', { r: 4, class: 'plume-dot' }, s);
@@ -1176,7 +1222,7 @@ function drawPlume(box, readout, d, spec, prevs) {
         dot.setAttribute('cx', X(t));
         dot.setAttribute('cy', Y(c(m)));
         const r = interp(det, t);
-        const when = `${new Date(t).toLocaleDateString('en-US', { weekday: 'short' })} ${timeOf(t)}`;
+        const when = `${zDate(t, { weekday: 'short' })} ${timeOf(t)}`;
         readout.replaceChildren(el('b', null, when), el('span', null, `Mean ${spec.fmt(c(m))}`),
             el('span', null, `Range ${spec.fmt(c(interp(mean, t, 'p10')))} to ${spec.fmt(c(interp(mean, t, 'p90')))}`),
             ...(r != null ? [el('span', 'det', `RRFS ${spec.fmt(c(r))}`)] : []),
@@ -1221,7 +1267,7 @@ function radarPanel(place) {
         iframe = el('iframe');
         iframe.title = 'Radar map';
         iframe.loading = 'lazy';
-        iframe.src = `/radar?embed=1&theme=${document.documentElement.dataset.theme}#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
+        iframe.src = `/radar?embed=1&theme=${document.documentElement.dataset.theme}${zone ? `&tz=${encodeURIComponent(zone)}` : ''}#7.6/${place.lat.toFixed(4)}/${place.lon.toFixed(4)}`;
         frame.prepend(iframe);
     };
     new IntersectionObserver(([e]) => {
@@ -1264,22 +1310,21 @@ function placeFooter(place, f) {
 
 // Today's hourly UV estimate from the sun's elevation and the forecast cloud cover
 function uvHours(place, f) {
-    const today = dayKey(Date.now());
-    return f.rows.filter(r => dayKey(r.t) === today).map(r => ({ t: r.t, uv: uvIndex(sunAltitude(r.t, place.lat, place.lon), r.cloud) }));
+    const today = zDay(Date.now());
+    return f.rows.filter(r => zDay(r.t) === today).map(r => ({ t: r.t, uv: uvIndex(sunAltitude(r.t, place.lat, place.lon), r.cloud) }));
 }
 
 // The sun's altitude over the whole local day: above the horizon lit, below it dim; the sun where it is now
 function sunCurve(place) {
     const W = 160, H = 90, BASE = 56;
-    const day = new Date();
-    day.setHours(0, 0, 0, 0);
-    const noon = solarNoon(Date.now(), place.lat, place.lon);
+    const day = zMidnight(Date.now());
+    const noon = solarNoon(zNoon(Date.now()), place.lat, place.lon, zone);
     const up = Math.max(noon.alt, 10), down = 28;
-    const X = t => (t - day.getTime()) / 86400000 * W;
+    const X = t => (t - day) / 86400000 * W;
     // Night side capped at `down` degrees below the horizon, so the curve stays in its box
     const Y = alt => BASE - (alt >= 0 ? alt / up * (BASE - 6) : Math.max(alt, -down) / down * (H - BASE - 4));
     const pts = [];
-    for (let t = day.getTime(); t <= day.getTime() + 86400000; t += 15 * 60000) pts.push([X(t), Y(sunAltitude(t, place.lat, place.lon))]);
+    for (let t = day; t <= day + 86400000; t += 15 * 60000) pts.push([X(t), Y(sunAltitude(t, place.lat, place.lon))]);
     const s = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'sun-arc', 'aria-hidden': 'true' });
     const path = monotonePath(pts);
     svgEl('path', { d: path, class: 'sun-night' }, s);
@@ -1318,17 +1363,18 @@ function renderDetail(body, key, place, f) {
     const content = {
         sun: () => {
             const now = Date.now();
-            const c = h => sunCross(now, place.lat, place.lon, h);
+            const noonMs = zNoon(now);
+            const c = h => sunCross(noonMs, place.lat, place.lon, h, zone);
             const [ast, nau, civ, rs, gold] = [-18, -12, -6, -0.833, 6].map(c);
-            const noon = solarNoon(now, place.lat, place.lon);
+            const noon = solarNoon(noonMs, place.lat, place.lon, zone);
             const len = rs.up && rs.down ? rs.down - rs.up : null;
-            const y = sunTimes(now - 86400000, place.lat, place.lon);
+            const y = sunTimes(noonMs - 86400000, place.lat, place.lon, zone);
             const change = len && y.rise && y.set ? Math.round((len - (y.set - y.rise)) / 1000) : null;
             const t = v => (v ? timeOf(v) : '--');
             const m = moonPhase(now);
-            const today = moonTimes(now, place.lat, place.lon), tmr = moonTimes(now + 86400000, place.lat, place.lon);
+            const today = moonTimes(noonMs, place.lat, place.lon, zone), tmr = moonTimes(noonMs + 86400000, place.lat, place.lon, zone);
             const tm = v => (v ? timeOf(v) : 'none');
-            const date = ms => new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            const date = ms => zDate(ms, { weekday: 'short', month: 'short', day: 'numeric' });
             const u = uvHours(place, f), peak = u.reduce((a, h) => (h.uv > (a?.uv ?? -1) ? h : a), null);
             return [sunCurve(place), rowsList([
                 ['Astronomical dawn', t(ast.up)], ['Nautical dawn', t(nau.up)], ['Civil dawn', t(civ.up)],
@@ -1382,9 +1428,9 @@ function seriesChart(rows, lines, opts) {
         svgEl('line', { x1: L, x2: W - R, y1: Y(v), y2: Y(v), class: 'grid' }, s);
         svgEl('text', { x: L - 6, y: Y(v), class: 'axis axis-y', 'dominant-baseline': 'central' }, s).textContent = opts.fmt(v);
     }
-    for (let t = new Date(x0).setHours(24, 0, 0, 0); t < x1; t += 86400000) {
+    for (const t of zMidnights(x0, x1)) {
         svgEl('line', { x1: X(t), x2: X(t), y1: T, y2: H - B, class: 'grid grid-day' }, s);
-        svgEl('text', { x: X(t) + 4, y: H - 7, class: 'axis' }, s).textContent = new Date(t).toLocaleDateString('en-US', { weekday: 'short' });
+        svgEl('text', { x: X(t) + 4, y: H - 7, class: 'axis' }, s).textContent = zDate(t, { weekday: 'short' });
     }
     if (opts.bars) {
         const bw = Math.max(2, (W - L - R) / rows.length - 2);
@@ -1448,7 +1494,7 @@ let searchTimer = 0;
 let searchSeq = 0;
 searchInput.addEventListener('input', () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(search, 450);   // the server allows one lookup a second
+    searchTimer = setTimeout(search, 200);
 });
 
 function resultRow(iconKey, title, detail, onClick) {
@@ -1605,9 +1651,12 @@ function renderEmpty() {
 }
 
 // keepScroll: a redraw of the same page (settings, refresh) stays where the user was
-function route(keepScroll = false) {
+// restoreY: a scroll position to return to (back and forward)
+function route(keepScroll = false, restoreY = null) {
     document.body.classList.remove('no-scroll');   // a full-screen radar left by back or refresh
-    const y = scrollY;
+    const y = restoreY ?? scrollY;
+    cursor.t = null;
+    pinned = false;
     const m = location.hash.match(/^#p=(.+)$/);
     const ps = allPlaces();
     const place = (m && ps.find(p => p.id === decodeURIComponent(m[1]))) || ps[0];
@@ -1615,7 +1664,7 @@ function route(keepScroll = false) {
     const done = place ? renderPlace(place) : renderEmpty();
     // once the redraw is in: a place page waits on its forecast before its sections exist
     const seq = renderSeq;
-    if (keepScroll) Promise.resolve(done).then(() => { if (seq === renderSeq) requestAnimationFrame(() => window.scrollTo(0, y)); });
+    if (keepScroll || restoreY != null) Promise.resolve(done).then(() => { if (seq === renderSeq) requestAnimationFrame(() => window.scrollTo(0, y)); });
     else window.scrollTo(0, 0);
 }
 

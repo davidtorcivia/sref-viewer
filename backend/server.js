@@ -914,10 +914,13 @@ app.get('/api/forecast', async (req, res) => {
     if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).json({ error: 'Invalid lat/lon' });
     if (rateLimited(req, res)) return;
     try {
-        const up = await fetch(`${EXTRACTOR_URL}/forecast?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`,
+        // Daily rows are cut on the place's calendar, so the zone goes first
+        const tz = await placeZone(lat, lon);
+        const up = await fetch(`${EXTRACTOR_URL}/forecast?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}&tz=${encodeURIComponent(tz)}`,
             { signal: AbortSignal.timeout(60000) });
         const body = await up.json();
         if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).json(body);
+        body.tz = tz;
         // Observations turn over every 15 minutes; a building answer must not stick
         res.set('Cache-Control', body.building || body.daily_building ? 'no-store' : 'public, max-age=120');
         res.json(body);
@@ -925,6 +928,26 @@ app.get('/api/forecast', async (req, res) => {
         res.status(502).json({ error: 'Forecast unavailable', details: err.message });
     }
 });
+
+// IANA zone for a place: NWS /points (cached with the station lookup), or
+// the longitude guess when NWS has no answer within 1.5 s (the lookup keeps
+// going and fills the cache for the next request) or none at all.
+const TZ_NAME = /^[A-Za-z_]+\/[A-Za-z_\/+-]+$/;
+const validZone = z => {
+    if (typeof z !== 'string' || z.length > 48 || !TZ_NAME.test(z)) return false;
+    try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return true; } catch { return false; }
+};
+// ponytail: lower-48 longitude bands, an approximation (Arizona, the Indiana
+// and Dakota splits, Alaska and Hawaii come out wrong); NWS answers cover those
+const zoneByLongitude = lon => lon > -87.5 ? 'America/New_York' : lon > -101 ? 'America/Chicago'
+    : lon > -114.5 ? 'America/Denver' : 'America/Los_Angeles';
+async function placeZone(lat, lon, waitMs = 1500) {
+    let timer;
+    const late = new Promise(r => { timer = setTimeout(r, waitMs, null); });
+    const zone = await Promise.race([nwsPoint(lat, lon).then(p => p.timeZone, () => null), late]);
+    clearTimeout(timer);
+    return validZone(zone) ? zone : zoneByLongitude(lon);
+}
 
 // OpenStreetMap Nominatim: identifying User-Agent, at most one request a
 // second across all users (its usage policy), answers cached for a day.
@@ -950,26 +973,89 @@ const placeName = a => [a.city || a.town || a.village || a.hamlet || a.suburb ||
 const streetName = a => a.road && [[a.house_number, a.road].filter(Boolean).join(' '),
     a.city || a.town || a.village || a.hamlet || a.suburb].filter(Boolean).join(', ');
 
+function nominatimResult(r) {
+    const a = r.address || {};
+    const street = (a.house_number || r.category === 'highway' || r.type === 'house') && streetName(a);
+    return { name: street || placeName(a) || r.display_name, detail: r.display_name, address: !!street,
+        lat: Number(r.lat), lon: Number(r.lon) };
+}
+
+/** One Photon GeoJSON feature as a search result, named the way nominatimResult names them. */
+function photonResult(f) {
+    const p = f.properties || {};
+    const town = p.city || p.locality || p.district;
+    const road = p.housenumber ? p.street : p.type === 'street' && p.name;
+    const street = road && streetName({ house_number: p.housenumber, road, city: town });
+    const place = p.osm_value === 'postcode' ? town || p.county : p.name || town || p.county;
+    const uniq = xs => [...new Set(xs.filter(Boolean))].join(', ');
+    return {
+        name: street || (p.type === 'state' ? p.name : [place, p.state].filter(Boolean).join(', ')),
+        detail: uniq([p.name, [p.housenumber, p.street].filter(Boolean).join(' '), p.city, p.county, p.state, p.postcode]),
+        address: !!street,
+        lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0]
+    };
+}
+
+// Forward search goes to Photon (komoot): built for type-ahead, no one-a-second
+// queue. A few requests at a time; Nominatim is the fallback when it fails.
+const PHOTON_MAX_ACTIVE = 4;
+let photonActive = 0;
+const photonWaiting = [];
+async function photon(q) {
+    if (photonActive >= PHOTON_MAX_ACTIVE) await new Promise(r => photonWaiting.push(r));   // slot handed over
+    else photonActive++;
+    try {
+        return await getJson('https://photon.komoot.io/api/?limit=6&lang=en&bbox=-125,24,-66,50'
+            + `&osm_tag=!highway:bus_stop&q=${encodeURIComponent(q)}`, 2500);
+    } finally {
+        const next = photonWaiting.shift();
+        if (next) next(); else photonActive--;
+    }
+}
+
+async function forwardSearch(q) {
+    let results;
+    try {
+        const data = await photon(q);
+        results = (data.features || []).filter(f => f.properties?.countrycode === 'US' && f.geometry).map(photonResult);
+    } catch (err) {
+        console.warn(`Photon search failed (${err.message}); using Nominatim`);
+        // Bounded to the forecast area (the lower 48): the models cover nothing else
+        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6`
+            + `&viewbox=-134,53,-61,21&bounded=1&q=${encodeURIComponent(q)}`);
+        results = rows.map(nominatimResult);
+    }
+    const seen = new Set();
+    return results.filter(r => !seen.has(r.name + '|' + r.detail) && seen.add(r.name + '|' + r.detail));
+}
+
+// Forward answers cached a day by normalized query; concurrent identical queries share one lookup
+const searchKey = q => String(q || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 100);
+const searchCache = new Map();
+function searchPlaces(key) {
+    const hit = searchCache.get(key);
+    if (hit && Date.now() - hit.at < GEOCODE_TTL_MS) return hit.promise;
+    const promise = forwardSearch(key);
+    searchCache.delete(key);
+    if (searchCache.size >= 500) searchCache.delete(searchCache.keys().next().value);
+    searchCache.set(key, { at: Date.now(), promise });
+    promise.catch(() => { if (searchCache.get(key)?.promise === promise) searchCache.delete(key); });
+    return promise;
+}
+
 app.get('/api/geocode', async (req, res) => {
     if (rateLimited(req, res)) return;
     try {
         if (req.query.lat !== undefined) {
             const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
             if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).json({ error: 'Invalid lat/lon' });
+            // Rounded to 3 decimals, so the day-long nominatim() cache catches nearby fixes
             const r = await nominatim(`reverse?format=jsonv2&zoom=14&addressdetails=1&lat=${lat.toFixed(3)}&lon=${lon.toFixed(3)}`);
             return res.json({ name: r.address ? placeName(r.address) : '' });
         }
-        const q = String(req.query.q || '').trim().slice(0, 100);
-        if (q.length < 2) return res.json([]);
-        // Bounded to the forecast area (the lower 48): the models cover nothing else
-        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6`
-            + `&viewbox=-134,53,-61,21&bounded=1&q=${encodeURIComponent(q.toLowerCase())}`);
-        res.json(rows.map(r => {
-            const a = r.address || {};
-            const street = (a.house_number || r.category === 'highway' || r.type === 'house') && streetName(a);
-            return { name: street || placeName(a) || r.display_name, detail: r.display_name, address: !!street,
-                lat: Number(r.lat), lon: Number(r.lon) };
-        }));
+        const key = searchKey(req.query.q);
+        if (key.length < 2) return res.json([]);
+        res.json(await searchPlaces(key));
     } catch (err) {
         res.status(502).json({ error: 'Place search unavailable', details: err.message });
     }
@@ -1032,26 +1118,38 @@ const kmBetween = (lat1, lon1, lat2, lon2) => {
     return 12742 * Math.asin(Math.sqrt(a));
 };
 
-// Place -> station changes only when NWS redraws its grid; observations
-// every 10 minutes per station, concurrent askers share one request.
+// NWS /points for a place (its station list and time zone) and place ->
+// station change only when NWS redraws its grid; observations every 10
+// minutes per station. Concurrent askers share one request.
 // ponytail: unbounded Maps, fine at personal-tool scale; add an LRU cap if traffic grows
+const pointsCache = new Map();
 const stationCache = new Map();
 const obsCache = new Map();
+function nwsPoint(lat, lon) {
+    const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+    const hit = pointsCache.get(key);
+    if (hit && (hit.pending || Date.now() - hit.at < (hit.ok ? 7 * DAY : DAY))) return hit.promise;
+    const promise = getJson(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`, 10000)
+        .then(d => d.properties);
+    const entry = { promise, pending: true };
+    pointsCache.set(key, entry);
+    promise.then(() => Object.assign(entry, { pending: false, ok: true, at: Date.now() }),
+        err => {
+            // Outside NWS coverage stays known for a day; other failures retry next time
+            if (err.status !== 404) return pointsCache.delete(key);
+            Object.assign(entry, { pending: false, ok: false, at: Date.now(),
+                promise: Promise.reject(Object.assign(new Error('Outside NWS coverage'), { status: 404 })) });
+            entry.promise.catch(() => {});
+        });
+    return promise;
+}
+
 async function nearestStation(lat, lon) {
     const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
     const hit = stationCache.get(key);
-    if (hit && Date.now() - hit.at < (hit.station ? 7 * DAY : DAY)) {
-        if (!hit.station) throw Object.assign(new Error('Outside NWS coverage'), { status: 404 });
-        return hit.station;
-    }
-    let point;
-    try {
-        point = await getJson(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`, 10000);
-    } catch (err) {
-        if (err.status === 404) stationCache.set(key, { station: null, at: Date.now() });
-        throw err;
-    }
-    const list = await getJson(point.properties.observationStations, 10000);
+    if (hit && Date.now() - hit.at < 7 * DAY) return hit.station;
+    const point = await nwsPoint(lat, lon);
+    const list = await getJson(point.observationStations, 10000);
     const f = list.features?.[0];
     if (!f) throw Object.assign(new Error('No observation station near this place'), { status: 404 });
     const [slon, slat] = f.geometry.coordinates;
@@ -1203,4 +1301,4 @@ if (require.main === module) {
     setInterval(sweep, 10 * MINUTE);
 }
 
-module.exports = { shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations };
+module.exports = { shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };

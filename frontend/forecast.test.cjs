@@ -171,5 +171,30 @@ const assert = require('node:assert/strict');
         const tp = sg.spiralTimeAt(260 + 5, 260 - (120 + 1 / 48 * 100), now);
         assert.ok(tp < now - 20 * H, 'inner lap is the past');
     }
+    // Place time zones
+    const z = await import('./js/zone.js');
+    const LA = 'America/Los_Angeles', NY = 'America/New_York';
+    const t0 = Date.parse('2026-09-29T03:30:00Z');             // 11:30 PM EDT Sep 28, 8:30 PM PDT Sep 28
+    assert.equal(z.day(t0, NY), '2026-09-28');
+    assert.equal(z.day(Date.parse('2026-09-29T05:30:00Z'), NY), '2026-09-29');
+    assert.equal(z.day(Date.parse('2026-09-29T05:30:00Z'), LA), '2026-09-28');
+    assert.equal(z.hour(t0, LA), 20);
+    assert.equal(z.midnight(t0, LA), Date.parse('2026-09-28T07:00:00Z'));
+    assert.equal(z.noon(t0, LA), Date.parse('2026-09-28T19:00:00Z'));
+    // across the November change the day is 25 hours and the midnights still land on 00:00
+    const ms = z.midnights(Date.parse('2026-10-31T12:00:00Z'), Date.parse('2026-11-03T12:00:00Z'), LA);
+    assert.deepEqual(ms.map(m => z.hour(m, LA)), [0, 0, 0]);
+    assert.equal(ms[1] - ms[0], 25 * H);
+    assert.equal(z.format(t0, { weekday: 'short' }, LA), 'Mon');
+    assert.equal(u.clock(t0, u.DEFAULT_UNITS, true, LA), '8:30 PM');
+    assert.equal(z.tag(t0, 'America/New_York'), '');         // the test runs in New York time
+    assert.equal(z.tag(t0, LA), ' PDT');
+    // sun searches run over the place's day whatever the device's zone (run this file under TZ=Asia/Tokyo too)
+    const la = { lat: 34.05, lon: -118.24 };
+    const sc = f.sunCross(z.noon(t0, LA), la.lat, la.lon, -0.833, LA);
+    assert.ok(sc.up < sc.down, 'sunrise before sunset');
+    assert.equal(z.day(sc.up, LA), '2026-09-28');
+    assert.equal(z.hour(sc.down, LA), 18);                    // sunset 6:4x PM PDT
+    assert.equal(z.day(f.sunTimes(z.noon(t0, LA), la.lat, la.lon, LA).set, LA), '2026-09-28');
     console.log('Forecast checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

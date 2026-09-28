@@ -17,6 +17,13 @@
     --ink-rgb: 20, 19, 18;
     --card: #ebe7dc;
     --missing: #dcd7cb;
+    /* variable colors and previous runs, shared with the plume viewer (styles.css) */
+    --c-rain: oklch(0.58 0.14 248);
+    --c-snow: oklch(0.6 0.12 290);
+    --c-wind: oklch(0.56 0.09 175);
+    --run-1: oklch(0.56 0.22 350);
+    --run-2: oklch(0.66 0.15 70);
+    --run-3: oklch(0.5 0.17 300);
     --ink-2: #5b5750;
     --rule: rgba(var(--ink-rgb), 0.28);
     --faint: rgba(var(--ink-rgb), 0.12);
@@ -37,6 +44,12 @@
     --dark: #0d0c0b;
     --card: #1f1e1b;
     --missing: #3a3834;
+    --c-rain: oklch(0.72 0.13 245);
+    --c-snow: oklch(0.8 0.09 290);
+    --c-wind: oklch(0.74 0.09 175);
+    --run-1: oklch(0.72 0.19 350);
+    --run-2: oklch(0.8 0.14 78);
+    --run-3: oklch(0.72 0.15 300);
     color-scheme: dark;
 }
 
@@ -64,6 +77,9 @@ a { color: inherit; }
 .ic-xs { width: 14px; height: 14px; }
 
 body.no-scroll { overflow: hidden; }
+body { -webkit-tap-highlight-color: transparent; }
+.scrub, .sg-svg, .spiral, .plume-svg { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.sg-svg:focus:not(:focus-visible), .spiral:focus:not(:focus-visible), .sg-strip-h:focus:not(:focus-visible) { outline: none; }
 
 /* ============ Nav: place chips ============ */
 .sg-nav {
@@ -207,14 +223,14 @@ body.no-scroll { overflow: hidden; }
 .sg-spiral { width: 100%; max-width: 700px; justify-self: end; padding-bottom: 12px; }
 .spiral { display: block; width: 100%; height: auto; touch-action: pan-y; cursor: crosshair; user-select: none; }
 .spiral .sp-disk { fill: var(--paper); }
-:root[data-theme="dark"] .spiral .sp-disk { fill: #34322e; }
-.spiral .sp-drop { fill: var(--ink); }
+:root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
+.spiral .sp-drop { fill: var(--c-rain); }
 .spiral .sp-missing { fill: var(--missing); stroke: var(--missing); stroke-width: 0.6; }
 .spiral .sp-night { fill: #141312; opacity: 0.34; }
 :root[data-theme="dark"] .spiral .sp-night { fill: #000; opacity: 0.62; }
 .spiral .sp-sweep { stroke-dasharray: 1; animation: sp-draw 2.2s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
-.spiral .sp-wind line { stroke: var(--ink); stroke-width: 2; stroke-linecap: round; }
-.spiral .sp-wind path { fill: var(--ink); }
+.spiral .sp-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
+.spiral .sp-wind path { fill: var(--c-wind); }
 .spiral .sp-now { fill: var(--paper); stroke: var(--ink); stroke-width: 3; }
 .spiral .sp-now-label { font-size: 12px; font-weight: 800; letter-spacing: 1.5px; fill: var(--ink); }
 .spiral .sp-th { font-size: 12px; font-weight: 700; fill: var(--ink); }
@@ -270,6 +286,9 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 :root[data-theme="dark"] .mini-day { fill: #efe9db; }
 .mini .sq { fill: none; stroke: var(--ink); stroke-width: 1.2; }
 .mini .sq-on { fill: var(--ink); }
+.mini-rain .mini .sq-on { fill: var(--c-rain); }
+.mini-shaft { stroke: var(--c-wind) !important; }
+.mini-head { fill: var(--c-wind) !important; }
 
 /* ============ Card details, sliding open under the row ============ */
 .sg-detail {
@@ -309,17 +328,18 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .sg-svg .g-axis { font-size: 13px; font-weight: 600; fill: var(--ink); }
 .sg-svg .g-day { stroke: var(--ink); stroke-width: 1; opacity: 0.25; }
 .sg-svg .g-dayname { font-size: 14px; font-weight: 700; fill: var(--ink); }
-.sg-svg .g-band { fill: var(--ink); opacity: 0.1; }
-.sg-svg .g-band-mid { opacity: 0.12; }
+.sg-svg .g-band { fill: var(--ink); opacity: 0.16; }
+.sg-svg .g-band-mid { opacity: 0.2; }
 .sg-svg .g-lane-bg { fill: var(--wash); }
 .sg-svg .g-cloud { fill: var(--ink); opacity: 0.32; }
 .sg-svg .g-line { fill: none; stroke: var(--ink); stroke-width: 3.5; stroke-linejoin: round; }
 .sg-svg .g-end { font-size: 13px; font-weight: 800; fill: var(--ink); }
 .sg-svg .g-end-soft { font-weight: 500; }
-.sg-svg .g-rain { fill: var(--ink); }
+.sg-svg .g-rain { fill: var(--c-rain); }
+.sg-svg .g-snow { fill: var(--c-snow); }
 .sg-svg .g-lane { font-size: 13px; font-weight: 700; fill: var(--ink); }
-.sg-svg .g-wind line { stroke: var(--ink); stroke-width: 2; stroke-linecap: round; }
-.sg-svg .g-wind path, .sg-svg .g-wind circle { fill: var(--ink); }
+.sg-svg .g-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
+.sg-svg .g-wind path, .sg-svg .g-wind circle { fill: var(--c-wind); }
 .sg-svg .g-speed { font-size: 12px; font-weight: 500; fill: var(--ink); }
 .sg-svg .g-speed.strong { font-weight: 800; }
 .sg-svg .g-hour { font-size: 12px; font-weight: 600; fill: var(--ink); }
@@ -365,7 +385,7 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .sg-rb-c, .sg-rb-r { position: relative; height: 26px; background: var(--wash); }
 .sg-rb-r { height: 18px; }
 .sg-rb-c i { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(var(--ink-rgb), 0.38); }
-.sg-rb-r i { position: absolute; left: 20%; right: 20%; bottom: 0; background: var(--ink); }
+.sg-rb-r i { position: absolute; left: 20%; right: 20%; bottom: 0; background: var(--c-rain); }
 .sg-rb-h { font-size: 11px; font-weight: 600; white-space: nowrap; padding-left: 2px; }
 .sg-day-stats { display: flex; flex-wrap: wrap; gap: 10px 36px; padding-top: 2px; }
 .sg-stat { display: flex; flex-direction: column; min-width: 120px; }
@@ -391,7 +411,7 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .sg-day-hi { top: 10px; padding-left: 10px; font-size: 30px; font-weight: 800; font-variation-settings: 'wdth' 58; }
 .sg-squares { display: grid; grid-template-columns: repeat(10, 12px); gap: 3px; align-content: center; }
 .sg-squares i { width: 12px; height: 12px; background: rgba(var(--ink-rgb), 0.13); }
-.sg-squares i.on { background: var(--ink); }
+.sg-squares i.on { background: var(--c-rain); }
 .sg-day-amt { font-size: 14px; font-weight: 600; padding-right: 10px; }
 
 /* ============ Radar and plumes ============ */
@@ -427,12 +447,17 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .plume-svg .grid-day { stroke-dasharray: 3 4; opacity: 0.5; }
 .plume-svg .axis { font-size: 11px; font-weight: 600; fill: var(--ink); }
 .plume-svg .axis-y { text-anchor: end; }
-.plume-outer { fill: rgba(var(--ink-rgb), 0.1); }
-.plume-inner { fill: rgba(var(--ink-rgb), 0.16); }
-.plume-mean { fill: none; stroke: var(--ink); stroke-width: 2.5; }
-.plume-det { fill: none; stroke: var(--ink); stroke-width: 1.4; stroke-dasharray: 5 4; }
-.plume-prev { fill: none; stroke: var(--ink); stroke-width: 1; opacity: 0.45; }
-.plume-prev.prev1 { opacity: 0.25; }
+.plume-svg { --plume: var(--ink); }
+.plume-precip { --plume: var(--c-rain); }
+.plume-snow { --plume: var(--c-snow); }
+.plume-wind { --plume: var(--c-wind); }
+.plume-outer { fill: var(--plume); opacity: 0.16; }
+.plume-inner { fill: var(--plume); opacity: 0.24; }
+.plume-mean { fill: none; stroke: var(--plume); stroke-width: 3; }
+.plume-det { fill: none; stroke: var(--plume); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.plume-prev { fill: none; stroke-width: 2; }
+.plume-prev.prev0 { stroke: var(--run-1); }
+.plume-prev.prev1 { stroke: var(--run-2); }
 .plume-cursor { stroke: var(--ink); stroke-width: 1; }
 .plume-dot { fill: var(--ink); }
 .series-line { fill: none; stroke-width: 2.2; }
@@ -445,7 +470,10 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .plume-legend .key { display: inline-flex; align-items: center; gap: 6px; }
 .plume-legend .key i { width: 18px; height: 2.5px; background: var(--ink); }
 .plume-legend .key-det i { height: 1.5px; background: repeating-linear-gradient(90deg, var(--ink) 0 4px, transparent 4px 7px); }
-.plume-legend .key-prev i { height: 1px; opacity: 0.45; }
+.plume-legend .key-prev i { height: 2px; }
+.plume-legend .prev0 i { background: var(--run-1); }
+.plume-legend .prev1 i { background: var(--run-2); }
+.plume-readout .prev:nth-of-type(1) { color: var(--run-1); }
 
 .seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: var(--wash); border-radius: 999px; }
 .seg-btn { padding: 5px 11px; border-radius: 999px; font-size: 13px; font-weight: 600; }

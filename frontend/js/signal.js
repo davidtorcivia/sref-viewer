@@ -11,6 +11,13 @@
 const RAMP = [[-10, .42, .09, 290], [10, .5, .11, 272], [20, .55, .10, 262], [32, .63, .09, 238], [40, .68, .09, 225],
     [55, .79, .07, 170], [65, .85, .11, 98], [75, .77, .15, 58], [85, .65, .19, 34], [95, .53, .18, 22], [110, .42, .15, 12]];
 
+// The ramp for a line on the page: lightness capped on paper, floored on dark, a little more chroma
+export function lineColor(f, dark, alpha = 1) {
+    const [l, c, h] = rampColor(f).match(/[\d.]+/g).map(Number);
+    const L = dark ? Math.max(l, 0.68) : Math.min(l, 0.64);
+    return `oklch(${L.toFixed(3)} ${(c * 1.2).toFixed(3)} ${h}${alpha < 1 ? ` / ${alpha}` : ''})`;
+}
+
 export function rampColor(f) {
     const r = RAMP;
     const at = (a, b, x) => a + (b - a) * x;
@@ -100,7 +107,7 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
 
     const segs = [];
     for (let q = 0; q < 192; q++) {
-        const a = q / 4, b = (q + 1) / 4, v = temp(a + 0.125);
+        const a = q / 4, b = Math.min(48, (q + 1) / 4 + 0.04), v = temp(a + 0.125);
         const p1 = P(R(a) - W, a), p2 = P(R(a) + W, a), p3 = P(R(b) + W, b), p4 = P(R(b) - W, b);
         segs.push({ s: a, t: tOf(a), tmp: v, observed: a < 24,
             d: `M${f1(p1[0])},${f1(p1[1])} L${f1(p2[0])},${f1(p2[1])} L${f1(p3[0])},${f1(p3[1])} L${f1(p4[0])},${f1(p4[1])} Z` });
@@ -109,6 +116,10 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     for (let q = 0; q <= 192; q++) { const s = q / 4, m = P(R(s), s); track.push(`${f1(m[0])},${f1(m[1])}`); }
     // round ends: the start turns in, the end turns out
     const cap = s => { const [x, y] = P(R(s), s); return { x: f1(x), y: f1(y), r: W, tmp: temp(Math.min(47.9, Math.max(0.05, s))) }; };
+    // the start turns in with a shallow arch: a circle behind the start edge that bites DEPTH into the band
+    const DEPTH = 5, back = (W * W - DEPTH * DEPTH) / (2 * DEPTH), a0 = A(0);
+    const [sx, sy] = P(R(0), 0);
+    const notch = { x: f1(sx + Math.sin(a0) * back), y: f1(sy - Math.cos(a0) * back), r: f1(back + DEPTH) };
 
     // rain: a drop on the band for each wet hour, sized by the amount (0.01 in to 0.25 in and up)
     const rain = [];
@@ -147,7 +158,7 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     const pastTemps = past.map(h => h.tmp).filter(v => v != null);
     return {
         segs, rain, wedges, wind, track: `M${track.join('L')}`,
-        caps: [cap(0), cap(48)],
+        caps: [cap(0), cap(48)], notch,
         now: { x: f1(nowPt[0]), y: f1(nowPt[1]) },
         table: {
             pastRain: past.length ? pastRain : null, nextRain: ahead.reduce((a, r) => a + (r.qpf || 0), 0),

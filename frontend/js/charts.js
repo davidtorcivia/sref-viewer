@@ -35,6 +35,7 @@ function getThemeColors() {
         gridColor: token('--chart-grid'),
         tickColor: token('--chart-tick'),
         meanLineColor: token('--chart-mean'),
+        runs: [1, 2, 3].map(i => token(`--run-${i}`)),
         hue: { precip: token('--c-rain'), snow: token('--c-snow'), wind: token('--c-wind') },
         dark: document.documentElement?.dataset.theme === 'dark',
         surface: token('--surface'),
@@ -45,9 +46,8 @@ function getThemeColors() {
     };
 }
 
-// Line and fill alphas: members and bands are tints of the variable's color,
-// previous runs fade with age (rank 0 = most recent)
-const ALPHA = { member: 0.34, bandOuter: 0.15, bandInner: 0.28, runs: [0.72, 0.48, 0.3] };
+// Line and fill alphas: members and bands are tints of the variable's color
+const ALPHA = { member: 0.34, bandOuter: 0.15, bandInner: 0.28 };
 
 /** oklch(L C h) with an alpha; other color formats pass through */
 const withAlpha = (c, a) => a >= 1 || !/^oklch\([^/]*\)$/.test(c) ? c : c.replace(')', ` / ${a})`);
@@ -133,9 +133,11 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
             datasets.push({
                 label: overlay.label,
                 data: chartPoints,
-                borderColor: paint.stroke(ALPHA.runs[overlay.rank] ?? 0.3),
-                _colorAt: y => paint.at(y, ALPHA.runs[overlay.rank] ?? 0.3),
-                borderWidth: 1.5,
+                // Previous runs: one hue per run (--run-N, as on the Compare
+                // chips), solid and clearly visible under the heavier mean
+                borderColor: theme.runs[overlay.rank] || theme.meanLineColor,
+                _colorAt: () => theme.runs[overlay.rank] || theme.meanLineColor,
+                borderWidth: 2.25,
                 pointRadius: 0,
                 pointHitRadius: 20,
                 pointHoverRadius: 0,

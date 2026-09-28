@@ -7,6 +7,8 @@
  * the model shows rather than a probability.
  */
 
+import * as Z from './zone.js?v=__V__';
+
 const PRECIP_IN = 0.01;     // in/hr that counts as precipitating
 const ECHO_DBZ = 20;        // simulated reflectivity that counts as precipitating
 const STORM_DBZ = 50;       // convective cores
@@ -183,19 +185,23 @@ export function sunPosition(ms, lat, lon) {
  * the sun's center crosses -0.833 degrees (refraction plus the disk).
  * null for a crossing that does not happen (polar day or night).
  */
-export function sunTimes(ms, lat, lon) {
-    const day = new Date(ms);
-    day.setHours(0, 0, 0, 0);
-    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
+export function sunTimes(ms, lat, lon, tz) {
+    const [start, end] = placeDay(ms, tz);
     const f = t => sunAltitude(t, lat, lon) + 0.833;
     let rise = null, set = null;
     const step = 10 * 60000;
-    for (let t = day.getTime(); t < end; t += step) {
+    for (let t = start; t < end; t += step) {
         const a = f(t), b = f(t + step);
         if (a < 0 && b >= 0 && rise === null) rise = t + step * a / (a - b);
         if (a >= 0 && b < 0 && set === null) set = t + step * a / (a - b);
     }
     return { rise, set };
+}
+
+// The place's calendar day holding ms, [start, end): 23 or 25 hours on a DST day; tz undefined is the device's
+function placeDay(ms, tz) {
+    const start = Z.midnight(ms, tz);
+    return [start, Z.midnight(start + 26 * 3600000, tz)];
 }
 
 const SYNODIC = 29.530588853;
@@ -345,14 +351,12 @@ export function nbmDays(daily) {
  * sunset; -6, -12 and -18 the civil, nautical and astronomical twilights;
  * +6 the edge of golden hour.
  */
-export function sunCross(ms, lat, lon, h) {
-    const day = new Date(ms);
-    day.setHours(0, 0, 0, 0);
-    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
+export function sunCross(ms, lat, lon, h, tz) {
+    const [start, end] = placeDay(ms, tz);
     const f = t => sunAltitude(t, lat, lon) - h;
     let up = null, down = null;
     const step = 10 * 60000;
-    for (let t = day.getTime(); t < end; t += step) {
+    for (let t = start; t < end; t += step) {
         const a = f(t), b = f(t + step);
         if (a < 0 && b >= 0 && up === null) up = t + step * a / (a - b);
         if (a >= 0 && b < 0 && down === null) down = t + step * a / (a - b);
@@ -361,12 +365,10 @@ export function sunCross(ms, lat, lon, h) {
 }
 
 /** Solar noon on the local day of `ms`: {t, alt} at the sun's highest */
-export function solarNoon(ms, lat, lon) {
-    const day = new Date(ms);
-    day.setHours(0, 0, 0, 0);
-    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
-    let best = { t: day.getTime(), alt: -90 };
-    for (let t = day.getTime(); t < end; t += 5 * 60000) {
+export function solarNoon(ms, lat, lon, tz) {
+    const [start, end] = placeDay(ms, tz);
+    let best = { t: start, alt: -90 };
+    for (let t = start; t < end; t += 5 * 60000) {
         const alt = sunAltitude(t, lat, lon);
         if (alt > best.alt) best = { t, alt };
     }
@@ -417,14 +419,12 @@ export function moonAltitude(ms, lat, lon) {
 }
 
 /** Moonrise and moonset on the local day of `ms` (+0.125 degrees: refraction, radius, parallax) */
-export function moonTimes(ms, lat, lon) {
-    const day = new Date(ms);
-    day.setHours(0, 0, 0, 0);
-    const end = new Date(day).setDate(day.getDate() + 1);   // 23 or 25 hours on a DST day
+export function moonTimes(ms, lat, lon, tz) {
+    const [start, end] = placeDay(ms, tz);
     const f = t => moonAltitude(t, lat, lon) - 0.125;
     let rise = null, set = null;
     const step = 10 * 60000;
-    for (let t = day.getTime(); t < end; t += step) {
+    for (let t = start; t < end; t += step) {
         const a = f(t), b = f(t + step);
         if (a < 0 && b >= 0 && rise === null) rise = t + step * a / (a - b);
         if (a >= 0 && b < 0 && set === null) set = t + step * a / (a - b);

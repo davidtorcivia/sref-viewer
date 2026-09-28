@@ -38,9 +38,11 @@
     --chart-band-inner: rgba(20, 19, 18, 0.13);
     --chart-now: rgba(20, 19, 18, 0.5);
     --chart-crosshair: rgba(20, 19, 18, 0.6);
-    --run-1: rgba(20, 19, 18, 0.62);
-    --run-2: rgba(20, 19, 18, 0.42);
-    --run-3: rgba(20, 19, 18, 0.26);
+    /* Previous runs, one hue each (Compare chips, lines, readout dots),
+       kept apart from the variable hues below */
+    --run-1: oklch(0.56 0.22 350);
+    --run-2: oklch(0.66 0.15 70);
+    --run-3: oklch(0.5 0.17 300);
 
     /* Variable hues (oklch, read by charts.js; alpha is added there).
        Temperature takes the overview's ramp instead (signal.js). */
@@ -80,9 +82,9 @@ html[data-theme="dark"] {
     --chart-band-inner: rgba(239, 235, 226, 0.13);
     --chart-now: rgba(239, 235, 226, 0.5);
     --chart-crosshair: rgba(239, 235, 226, 0.6);
-    --run-1: rgba(239, 235, 226, 0.62);
-    --run-2: rgba(239, 235, 226, 0.42);
-    --run-3: rgba(239, 235, 226, 0.26);
+    --run-1: oklch(0.72 0.19 350);
+    --run-2: oklch(0.8 0.14 78);
+    --run-3: oklch(0.72 0.15 300);
 
     --c-rain: oklch(0.72 0.13 245);
     --c-snow: oklch(0.8 0.09 290);
@@ -502,10 +504,10 @@ select:disabled { opacity: 0.5; cursor: not-allowed; }
     -webkit-appearance: none;
     appearance: none;
     width: 16px;
-    height: 3px;
+    height: 4px;
     border-radius: 2px;
     background: var(--dot);
-    opacity: 0.35;
+    opacity: 0.3;
     cursor: pointer;
 }
 

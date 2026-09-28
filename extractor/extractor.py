@@ -64,7 +64,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import eccodes as ec
 import numpy as np
@@ -1392,21 +1392,34 @@ def hourly_series(date, cycle, lat, lon):
     }
 
 
-# ponytail: one zone for every place; each place's own zone once the page serves the West
-DAILY_TZ = ZoneInfo('America/New_York')
+DAILY_TZ = ZoneInfo('America/New_York')   # when the caller gives no usable zone
+TZ_NAME = re.compile(r'[A-Za-z_]+/[A-Za-z_/+-]+')
+
+
+def place_zone(name):
+    """ZoneInfo for an IANA name like America/Denver, New York for anything else."""
+    if name and len(name) <= 48 and TZ_NAME.fullmatch(name):
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return DAILY_TZ
 DAILY_SPAN = {'TMAX': 12, 'TMIN': 12, 'POP12': 12, 'APCP': 6, 'ASNOW': 6, 'FICEAC': 6}   # hours before fh a value covers
 
 
-def daily_rows(start, hours, v):
-    """Daily summary per New York calendar date from NBM point series
-    v {msg: value per forecast hour, NaN where absent}, start = run time
-    (epoch). Every value goes to the date at the middle of the window it
-    covers (instantaneous ones at their valid time), so a date gets:
-      hi        TMAX 12z-00z (8am-8pm EDT, 7am-7pm EST), deg F
-      lo        TMIN 00z-12z (the evening before to 8am EDT), deg F
+def daily_rows(start, hours, v, tz=DAILY_TZ):
+    """Daily summary per local calendar date in zone tz (a US zone) from NBM
+    point series v {msg: value per forecast hour, NaN where absent}, start =
+    run time (epoch). A value goes to the local date at the middle of the
+    window it covers (instantaneous ones at their valid time), except the
+    overnight TMIN and night PoP, which go to the date their window ends on:
+    the morning the low happens (a midpoint of 06z is still the evening
+    before west of Eastern time). So a date gets:
+      hi        TMAX 12z-00z (8am-8pm EDT, 5am-5pm PDT), deg F
+      lo        TMIN 00z-12z, ending that morning (8am EDT, 5am PDT), deg F
       pop_day   12 h PoP (>0.254 mm) 12z-00z, %
       pop_night 12 h PoP 00z-12z, the same night as lo, %
-      qpf/snow  6 h amounts summed 06z-06z (2am-2am EDT), in
+      qpf/snow  6 h amounts summed 06z-06z (2am-2am EDT, 11pm-11pm PDT), in
       wind/gust max of the 6-hourly 10 m speeds, mph; cloud their mean cover, %
       ptype     on days with 0.01 in or more: 'rain', 'snow' or 'ice' (freezing
                 rain), whichever has the largest liquid share, snow at 10:1
@@ -1417,8 +1430,8 @@ def daily_rows(start, hours, v):
             if np.isnan(x):
                 continue
             key = msg if msg != 'POP12' else 'pop_day' if time.gmtime(start + fh * 3600).tm_hour == 0 else 'pop_night'
-            mid = start + (fh - DAILY_SPAN.get(msg, 0) / 2) * 3600
-            days.setdefault(datetime.fromtimestamp(mid, DAILY_TZ).strftime('%Y-%m-%d'), {}).setdefault(key, []).append(float(x))
+            back = 0 if key in ('TMIN', 'pop_night') else DAILY_SPAN.get(msg, 0) / 2
+            days.setdefault(datetime.fromtimestamp(start + (fh - back) * 3600, tz).strftime('%Y-%m-%d'), {}).setdefault(key, []).append(float(x))
     rows = []
     for date, d in sorted(days.items()):
         pick = lambda k, f, n=0: None if k not in d else round(f(d[k]), n) if n else round(f(d[k]))
@@ -1442,10 +1455,10 @@ def daily_rows(start, hours, v):
     return rows[first:last + 1]
 
 
-def daily_series(date, cycle, lat, lon):
-    """NBM daily rows at a point, or None outside the grid."""
+def daily_series(date, cycle, lat, lon, tz=DAILY_TZ):
+    """NBM daily rows at a point on tz's calendar, or None outside the grid."""
     s = crop_series(load_crop(crop_path('nbm', date, cycle, forecast_tile(lat, lon))), lat, lon)
-    return None if s is None else daily_rows(frame_time('nbm', date, cycle, 0), CROPS['nbm'][1], dict(zip(DAILY_MSGS, s)))
+    return None if s is None else daily_rows(frame_time('nbm', date, cycle, 0), CROPS['nbm'][1], dict(zip(DAILY_MSGS, s)), tz)
 
 
 def nearest_station(lat, lon):
@@ -1522,9 +1535,9 @@ def now_frame():
     return ('rtma', *newest, 0)
 
 
-def forecast(lat, lon):
+def forecast(lat, lon, tz=DAILY_TZ):
     """Overview payload: observed now (RTMA), hourly RRFS series, daily NBM
-    rows from today (New York), nearest plume station."""
+    rows from today on the place's calendar (zone tz), nearest plume station."""
     frame = now_frame()
     now = None
     if frame:
@@ -1535,9 +1548,9 @@ def forecast(lat, lon):
     # Tiles the model grids do not reach get observations only, and are not kept
     if hrun or building or drun or daily_building:
         note_tile(tile)
-    daily = drun and daily_series(*drun, lat, lon)
+    daily = drun and daily_series(*drun, lat, lon, tz)
     if daily:
-        today = datetime.now(DAILY_TZ).strftime('%Y-%m-%d')
+        today = datetime.now(tz).strftime('%Y-%m-%d')
         daily = [d for d in daily if d['date'] >= today]
     return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hrun and hourly_series(*hrun, lat, lon), 'building': building,
             'daily': daily or None, 'daily_run': ''.join(drun) if daily else None, 'daily_building': daily_building,
@@ -1588,7 +1601,7 @@ class Handler(BaseHTTPRequestHandler):
             if not (FIELD_BBOX[1] <= lat <= FIELD_BBOX[3] and FIELD_BBOX[0] <= lon <= FIELD_BBOX[2]):
                 return self.send_json(400, {'error': 'lat/lon outside the forecast area'})
             try:
-                return self.send_json(200, forecast(round(lat, 4), round(lon, 4)))
+                return self.send_json(200, forecast(round(lat, 4), round(lon, 4), place_zone(q.get('tz', [''])[0])))
             except Exception as err:  # noqa: BLE001 - report any failure upstream
                 print(f'[FORECAST] {lat},{lon}: {err}', flush=True)
                 return self.send_json(502, {'error': str(err)})

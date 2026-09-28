@@ -37,8 +37,8 @@ const state = {
 const COMPARE_CYCLES = 3;
 const isRunVisible = run => state.visibleRuns[run] ?? !isMobile();
 
-// Comparison chips fade with age (--run-1 is the most recent previous
-// cycle); on the charts the same rank fades the variable's own color
+// Each previous run has its own hue (--run-1 is the most recent previous
+// cycle): the Compare chips here, the lines and readout dots in charts.js
 const runToken = i => `--run-${i + 1}`;
 
 const $ = id => document.getElementById(id);
