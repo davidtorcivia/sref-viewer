@@ -30,7 +30,7 @@ const SAT_OPACITY = 0.8;
 // from mixing hour-cached tiles of the old scheme into the loop
 const TILE_STYLE_V = 'twc';
 // Field tiles and grids are cached immutable per URL: bump with any extractor palette/format change
-const FIELD_STYLE_V = '2';
+const FIELD_STYLE_V = '3';
 const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past this instead of fetching
 const FRAME_MS = 500;               // ms per frame at 1x
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final nowcast frame
