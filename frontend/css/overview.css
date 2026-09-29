@@ -22,6 +22,15 @@
     --missing: #dcd7cb;
     /* variable colors and previous runs, shared with the plume viewer (styles.css) */
     --c-rain: oklch(0.58 0.14 248);
+    /* weather glyphs */
+    --wx-sun: oklch(0.8 0.16 72);
+    --wx-moon: oklch(0.8 0.07 95);
+    --wx-cloud: oklch(0.8 0.012 85);
+    --wx-cloud-back: oklch(0.88 0.008 85);
+    --wx-cloud-wet: oklch(0.66 0.02 250);
+    --wx-cloud-storm: oklch(0.45 0.03 270);
+    --wx-snow: oklch(0.66 0.11 235);
+    --wx-bolt: oklch(0.83 0.17 88);
     --c-snow: oklch(0.6 0.12 290);
     --c-wind: oklch(0.56 0.09 175);
     --run-1: oklch(0.56 0.22 350);
@@ -51,6 +60,14 @@
     --alert-severe: #c2362a;
     --missing: #3a3834;
     --c-rain: oklch(0.72 0.13 245);
+    --wx-sun: oklch(0.82 0.15 75);
+    --wx-moon: oklch(0.86 0.06 95);
+    --wx-cloud: oklch(0.7 0.012 85);
+    --wx-cloud-back: oklch(0.52 0.01 85);
+    --wx-cloud-wet: oklch(0.6 0.025 250);
+    --wx-cloud-storm: oklch(0.42 0.03 270);
+    --wx-snow: oklch(0.82 0.08 230);
+    --wx-bolt: oklch(0.85 0.16 90);
     --c-snow: oklch(0.8 0.09 290);
     --c-wind: oklch(0.74 0.09 175);
     --run-1: oklch(0.72 0.19 350);
@@ -246,11 +263,11 @@ body { -webkit-tap-highlight-color: transparent; }
 :root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
 .spiral .sp-drop { fill: var(--c-rain); }
 .spiral .sp-missing { fill: var(--missing); stroke: var(--missing); stroke-width: 0.6; }
-/* hours: a faint wedge by day, darker by night; the sky band at the outer edge, filled as deep as it is covered */
+/* hours: a faint wedge by day, darker by night, filled from its outer edge as deep as the sky is covered;
+   the cursor's hour lit in its temperature color (set inline) */
 .spiral .sp-wedge { fill: rgba(var(--ink-rgb), 0.035); }
 .spiral .sp-dark .sp-wedge { fill: rgba(var(--ink-rgb), 0.16); }
 :root[data-theme="dark"] .spiral .sp-dark .sp-wedge { fill: rgba(0, 0, 0, 0.5); }
-.spiral .sp-sky { fill: rgba(var(--ink-rgb), 0.05); }
 .spiral .sp-cover { fill: var(--ink); opacity: 0.32; }   /* the hours chart's cloud columns */
 .spiral .sp-sweep { stroke-dasharray: 1; animation: sp-draw 2.2s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
 .spiral .sp-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
@@ -425,7 +442,7 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .sg-day-name { padding-left: 10px; font-size: 34px; font-weight: 800; font-variation-settings: 'wdth' 58; }
 .sg-day-date { font-size: 13px; font-weight: 500; }
 .sg-day-ic { display: flex; }
-.sg-day-ic .ic { width: 28px; height: 28px; }
+.sg-day-ic .ic { width: 32px; height: 32px; }
 .sg-day-bar { position: relative; height: 100%; margin: 0 56px 0 64px; }
 .sg-tick { position: absolute; bottom: 4px; transform: translateX(-50%); }
 .sg-day-fill {

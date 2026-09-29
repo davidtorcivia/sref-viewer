@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>Weather</title>
+    <title>WX-Plumes</title>
     <meta name="description" content="Observed conditions and hourly forecasts for your places">
     <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/icons/icon-180.png">
@@ -92,45 +92,54 @@
     </dialog>
 
 
-    <!-- Line icons. Colored parts read --sun/--moon/--drop/--flake/--bolt, which
-         reach inside <use> because custom properties inherit. -->
+    <!-- Icons: UI line icons in currentColor; the weather glyphs are solid, in the --wx-* colors -->
     <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <!-- Weather glyphs: solid shapes in the --wx-* colors; a cloud is opaque, so what sits
+             behind it (the sun, the moon) is hidden where they overlap -->
         <defs>
-            <g id="g-cloud"><path d="M7.5 17.3h9.2a3.8 3.8 0 0 0 .5-7.57 5.6 5.6 0 0 0-10.6-1A4.3 4.3 0 0 0 7.5 17.3z" /></g>
-            <g id="g-cloud-up"><path d="M7.5 15h9.2a3.8 3.8 0 0 0 .5-7.57 5.6 5.6 0 0 0-10.6-1A4.3 4.3 0 0 0 7.5 15z" /></g>
+            <path id="g-cloud" d="M7 20h10.6a4.4 4.4 0 0 0 .5-8.77A6.3 6.3 0 0 0 6.1 10.4 4.8 4.8 0 0 0 7 20z" />
+            <path id="g-cloud-up" d="M7 16.4h10.6a4.4 4.4 0 0 0 .5-8.77A6.3 6.3 0 0 0 6.1 6.8 4.8 4.8 0 0 0 7 16.4z" />
+            <g id="g-rays" stroke-width="2.1" stroke-linecap="round">
+                <path d="M12 1.6v2.3M12 20.1v2.3M1.6 12h2.3M20.1 12h2.3M4.65 4.65l1.6 1.6M17.75 17.75l1.6 1.6M4.65 19.35l1.6-1.6M17.75 6.25l1.6-1.6" />
+            </g>
         </defs>
-        <symbol id="i-clear" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round">
-            <circle cx="12" cy="12" r="4.2" stroke="var(--sun, currentColor)" fill="var(--sun, none)" fill-opacity=".25" />
-            <path stroke="var(--sun, currentColor)" d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5l1.5 1.5M17 17l1.5 1.5M5.5 18.5L7 17M17 7l1.5-1.5" />
+        <symbol id="i-clear" viewBox="0 0 24 24">
+            <use href="#g-rays" stroke="var(--wx-sun)" />
+            <circle cx="12" cy="12" r="5.3" fill="var(--wx-sun)" />
         </symbol>
-        <symbol id="i-clear-night" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linejoin="round">
-            <path stroke="var(--moon, currentColor)" fill="var(--moon, none)" fill-opacity=".2" d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z" />
+        <symbol id="i-clear-night" viewBox="0 0 24 24">
+            <path fill="var(--wx-moon)" d="M20.3 14.9A8.6 8.6 0 0 1 9.1 3.7a8.6 8.6 0 1 0 11.2 11.2z" />
         </symbol>
-        <symbol id="i-partly" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="9" cy="8.5" r="3.2" stroke="var(--sun, currentColor)" />
-            <path stroke="var(--sun, currentColor)" d="M9 2.6v1.2M3.1 8.5h1.2M4.8 4.3l.9.9M13.2 4.3l-.9.9" />
-            <use href="#g-cloud" stroke="currentColor" fill="var(--cloud-fill, none)" transform="translate(2 1.5) scale(.92)" />
+        <symbol id="i-partly" viewBox="0 0 24 24">
+            <g transform="translate(.1 -.4) scale(.7)"><use href="#g-rays" stroke="var(--wx-sun)" /><circle cx="12" cy="12" r="5.3" fill="var(--wx-sun)" /></g>
+            <use href="#g-cloud" fill="var(--wx-cloud)" transform="translate(1.6 .6) scale(.93)" />
         </symbol>
-        <symbol id="i-partly-night" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linejoin="round">
-            <path stroke="var(--moon, currentColor)" d="M13.5 8.6A4.6 4.6 0 0 1 7.4 2.5a4.6 4.6 0 1 0 6.1 6.1z" />
-            <use href="#g-cloud" stroke="currentColor" fill="var(--cloud-fill, none)" transform="translate(2 1.5) scale(.92)" />
+        <symbol id="i-partly-night" viewBox="0 0 24 24">
+            <path fill="var(--wx-moon)" d="M13.6 9.6A6 6 0 0 1 5.8 1.8a6 6 0 1 0 7.8 7.8z" />
+            <use href="#g-cloud" fill="var(--wx-cloud)" transform="translate(1.6 .6) scale(.93)" />
         </symbol>
-        <symbol id="i-cloudy" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linejoin="round">
-            <use href="#g-cloud" stroke="currentColor" fill="var(--cloud-fill, none)" />
+        <symbol id="i-cloudy" viewBox="0 0 24 24">
+            <use href="#g-cloud" fill="var(--wx-cloud-back)" transform="translate(5.2 -4.2) scale(.8)" />
+            <use href="#g-cloud" fill="var(--wx-cloud)" transform="translate(-1.2 .3)" />
         </symbol>
-        <symbol id="i-rain" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <use href="#g-cloud-up" stroke="currentColor" fill="var(--cloud-fill, none)" />
-            <path stroke="var(--drop, currentColor)" d="M8.5 17.5l-1 2.5M12.5 17.5l-1 2.5M16.5 17.5l-1 2.5" />
-        </symbol>
-        <symbol id="i-snow" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <use href="#g-cloud-up" stroke="currentColor" fill="var(--cloud-fill, none)" />
-            <g fill="var(--flake, currentColor)" stroke="none">
-                <circle cx="8" cy="18.6" r="1.1" /><circle cx="12" cy="20.4" r="1.1" /><circle cx="16" cy="18.6" r="1.1" />
+        <symbol id="i-rain" viewBox="0 0 24 24">
+            <use href="#g-cloud-up" fill="var(--wx-cloud-wet)" />
+            <g fill="var(--c-rain)">
+                <path d="M8.2 17.6c.9 1.3 1.5 2.3 1.5 3.1a1.5 1.5 0 0 1-3 0c0-.8.6-1.8 1.5-3.1z" />
+                <path d="M12.4 17.6c.9 1.3 1.5 2.3 1.5 3.1a1.5 1.5 0 0 1-3 0c0-.8.6-1.8 1.5-3.1z" />
+                <path d="M16.6 17.6c.9 1.3 1.5 2.3 1.5 3.1a1.5 1.5 0 0 1-3 0c0-.8.6-1.8 1.5-3.1z" />
             </g>
         </symbol>
-        <symbol id="i-storm" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <use href="#g-cloud-up" stroke="currentColor" fill="var(--cloud-fill, none)" />
-            <path stroke="var(--bolt, currentColor)" fill="var(--bolt, none)" fill-opacity=".3" d="M12.8 15.5l-2.6 3.6h2.6l-1.6 3.2" />
+        <symbol id="i-snow" viewBox="0 0 24 24">
+            <use href="#g-cloud-up" fill="var(--wx-cloud-wet)" />
+            <g stroke="var(--wx-snow)" stroke-width="1.5" stroke-linecap="round">
+                <path d="M8.2 17.6v4.2M6.4 18.65l3.6 2.1M6.4 20.75l3.6-2.1" />
+                <path d="M15.8 17.6v4.2M14 18.65l3.6 2.1M14 20.75l3.6-2.1" />
+            </g>
+        </symbol>
+        <symbol id="i-storm" viewBox="0 0 24 24">
+            <use href="#g-cloud-up" fill="var(--wx-cloud-storm)" />
+            <path fill="var(--wx-bolt)" d="M13.4 13.2l-4.3 5.6h3l-1.5 4.6 5-6.4h-3.1l1.9-3.8z" />
         </symbol>
         <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
             <path d="M12 5v14M5 12h14" />

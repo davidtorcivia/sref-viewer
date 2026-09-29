@@ -1,6 +1,6 @@
 {
-    "name": "Weather",
-    "short_name": "Weather",
+    "name": "WX-Plumes",
+    "short_name": "WX-Plumes",
     "description": "Hyperlocal weather: observed conditions, hourly and 11-day forecasts, radar and ensemble plumes",
     "start_url": "/",
     "display": "standalone",

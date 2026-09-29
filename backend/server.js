@@ -249,7 +249,7 @@ const ADMIN_ENABLED = ADMIN_PASS !== '' && ADMIN_PASS !== 'changeme';
 if (!ADMIN_ENABLED) console.warn('[ADMIN] Disabled: set ADMIN_PASSWORD (not "changeme") to enable');
 
 const DEFAULT_SETTINGS = {
-    siteName: 'NYC SREF Ensemble Plumes',
+    siteName: 'WX-Plumes',
     siteDescription: 'SREF ensemble plume diagrams for weather forecasting',
     favicon: '',
     defaultStations: ['JFK', 'LGA', 'EWR'],

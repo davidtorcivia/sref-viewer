@@ -32,6 +32,7 @@ const DEFAULT_PLACES = [{ id: 'nyc', name: 'New York, NY', lat: 40.7128, lon: -7
 const POLL_MS = 4000;                  // a new region's hourly series is cut in ~7 s
 const POLL_TRIES = 10;
 const HOURS_SHOWN = 48;
+const HOLD_MS = 180;                   // a touch held this long scrubs instead of scrolling
 const HOUR = 3600000;
 const ENSEMBLE_MAX_KM = 40;            // farther than this, the station's spread says little about the place
 const NS = 'http://www.w3.org/2000/svg';
@@ -323,6 +324,24 @@ function scrubSurface(node, timeAt) {
     node.addEventListener('pointerup', () => { if (active) { active = false; pinned = cursor.t != null; } });
     node.addEventListener('pointercancel', () => { active = false; unpin(); });
     node.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !active && !pinned) setCursor(null); });
+    // Touch: a finger held still for a moment grabs the cursor, and sliding then moves it
+    // instead of scrolling the page; a quick swipe still scrolls
+    let hold = 0, from = null, held = false;
+    node.addEventListener('touchstart', e => {
+        clearTimeout(hold);
+        held = false;
+        from = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+        if (from) hold = setTimeout(() => { held = true; }, HOLD_MS);
+    }, { passive: true });
+    node.addEventListener('touchmove', e => {
+        if (held) { if (e.cancelable) e.preventDefault(); return; }   // the pointer events move the cursor
+        const t = e.touches[0];
+        // moving first is a scroll (under the browser's own threshold, so the hold never lands mid-scroll)
+        if (from && Math.hypot(t.clientX - from.x, t.clientY - from.y) > 6) { clearTimeout(hold); from = null; }
+    }, { passive: false });
+    const release = () => { clearTimeout(hold); held = false; from = null; };
+    node.addEventListener('touchend', release);
+    node.addEventListener('touchcancel', release);
 }
 // Arrow keys step the cursor an hour at a time within [first, last]; Escape returns to now
 function keyScrub(node, first, last) {
@@ -414,7 +433,7 @@ async function renderPlace(place, quiet = false) {
     heroText.append(label, num);
     top.append(heroText);
     view.append(top);
-    document.title = `${place.name} · Weather`;
+    document.title = `${place.name} · WX-Plumes`;
 
     let f;
     try {
@@ -639,12 +658,13 @@ function spiralSvg(place, f, hist, sweep = true) {
         'aria-label': `The last 24 hours observed and the next 24 forecast, as a spiral colored by temperature` });
 
     svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272, class: 'sp-disk' }, s);
-    // the hours: a wedge each, its sky band at the outer edge (the wind drawn over the band below)
+    // the hours: a wedge each, filled with its cloud cover from the outer edge (the wind drawn over it below)
+    const wedgeAt = new Map();   // hour -> its wedge's group, lit under the cursor
     for (const h of sp.hours) {
         const g = svgEl('g', { class: h.night ? 'sp-hour sp-dark' : 'sp-hour' }, s);
         svgEl('path', { d: h.d, class: 'sp-wedge' }, g);
-        svgEl('path', { d: h.sky, class: 'sp-sky' }, g);
         if (h.cover) svgEl('path', { d: h.cover, class: 'sp-cover' }, g);
+        wedgeAt.set(h.t, g);
         const cover = h.cloud == null ? '' : ` · ${sky(h.cloud, h.night).toLowerCase()} (${Math.round(h.cloud)}% cloud)`;
         const wind = h.wind == null ? '' : ` · wind ${windText(h.dir, h.wind, h.gust).replace(/^Calm/, 'calm')}`;
         h.title = `${dayName(h.t)} ${hourText(h.t)}${h.night ? ', night' : ''}${cover}${wind}${h.observed ? ', observed' : ''}`;
@@ -705,9 +725,20 @@ function spiralSvg(place, f, hist, sweep = true) {
     // The cursor on the spiral
     const mark = svgEl('circle', { r: 17, class: 'sp-cursor', visibility: 'hidden' }, s);
     const R = sv => SPIRAL.r0 + sv / 48 * (SPIRAL.r1 - SPIRAL.r0);
+    let lit = null;
     onCursor(s, t => {
-        const sv = t == null ? null : 24 + (t - now) / HOUR;
-        if (sv == null || sv < 24 || sv > 48) { mark.setAttribute('visibility', 'hidden'); return; }
+        // the cursor's hour lights its whole wedge, in its temperature's color
+        const g = t == null ? null : wedgeAt.get(Math.floor(t / HOUR) * HOUR);
+        if (g !== lit) {
+            lit?.firstChild.style.removeProperty('fill');
+            const r = g && f.upcoming.find(x => x.t === Math.floor(t / HOUR) * HOUR);
+            if (r?.tmp != null) g.firstChild.style.fill = rampColor(r.tmp);
+            lit = g;
+        }
+        const s0 = t == null ? null : 24 + (t - now) / HOUR;
+        if (s0 == null || s0 < 23 || s0 > 48) { mark.setAttribute('visibility', 'hidden'); return; }
+        // centered on its hour's wedge (the part of the current hour still ahead)
+        const sv = Math.min(47.9, (Math.max(24, s0) + Math.min(48, s0 + 1)) / 2);
         const a = ((sv % 24) / 24) * 2 * Math.PI - Math.PI / 2;
         mark.setAttribute('cx', (C + R(sv) * Math.cos(a)).toFixed(1));
         mark.setAttribute('cy', (C + R(sv) * Math.sin(a)).toFixed(1));
@@ -721,7 +752,8 @@ function spiralSvg(place, f, hist, sweep = true) {
         const x = -40 + (e.clientX - b.left) / b.width * 600, y = -40 + (e.clientY - b.top) / b.height * 612;
         if (Math.hypot(x - C, y - C) < SPIRAL.r0 - 20) return null;   // the table, not the ring
         const t = spiralTimeAt(x, y, now);
-        return t < now || !f.upcoming.length ? null : Math.min(last, Math.ceil(t / HOUR) * HOUR);
+        // the hour whose wedge is under the finger (the current one included)
+        return t < now || !f.upcoming.length ? null : Math.min(last, Math.max(f.upcoming[0].t, Math.floor(t / HOUR) * HOUR));
     });
     return s;
 }
