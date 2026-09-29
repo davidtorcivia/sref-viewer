@@ -433,14 +433,16 @@ async function renderPlace(place, quiet = false) {
     const strip = hourStrip(next24);
 
     const sentence = el('p', 'sg-sentence', headline(f));
-    const alerts = el('div', 'sg-alerts');
-    heroText.append(sentence, alerts);
+    heroText.append(sentence);
+    const alerts = el('section', 'sg-alertbox');   // empty (hidden) unless an alert covers the place
+    alerts.setAttribute('aria-label', 'Weather alerts');
+    top.after(alerts);
     const hero = { label, num, place, f };
     showHero(hero, null, null);
 
     const spiralBox = el('div', 'sg-spiral');
     placeSpiral = () => {
-        if (narrowScreen.matches) { top.append(strip.el); top.after(spiralBox); } else top.append(spiralBox, strip.el);
+        if (narrowScreen.matches) { top.append(strip.el); alerts.after(spiralBox); } else top.append(spiralBox, strip.el);
     };
     placeSpiral();
     const cells = readouts(place, f);
@@ -476,6 +478,7 @@ async function renderPlace(place, quiet = false) {
         if (!e || seq !== renderSeq) return;
         ens = e;
         cells.update(cursor.t, ens);
+        cells.lock();   // the ensemble's ranges lengthen the later cards' lines
         hours?.setEnsemble(ens);
     });
     // A new region's days are cut after its hourly series: ask again until they land
@@ -581,12 +584,47 @@ function headline(f) {
     return parts.length ? `${parts.join('. ')}.` : '';
 }
 
+// NWS text in its parts: "* WHAT...", "* WHERE..." paragraphs as [label, text], others unlabeled
+function alertParts(text) {
+    return (text || '').split(/\n\s*\n/).map(chunk => {
+        // "* WHAT..." in watches and advisories, "HAZARD..." (no star) in warnings
+        const m = chunk.match(/^\s*(?:\*\s*)?([A-Z][A-Z ]*?)\.\.\.([\s\S]*)$/);
+        const flat = v => v.replace(/^\s*\*\s*/, '').replace(/\s*\n\s*/g, ' ').trim();
+        return m ? [m[1].trim(), flat(m[2])] : ['', flat(chunk)];
+    }).filter(([, t]) => t && !/^The National Weather Service .* has issued an?$/.test(t));   // a warning's opening fragment
+}
+
+// One alert: what it is, how long, what happens; tapped, the rest slides open under it
 function alertRow(feature) {
     const p = feature.properties;
-    const a = el('div', 'sg-alert');
-    a.append(el('strong', null, (p.title || 'Weather alert').split(' issued ')[0]));
+    const sev = ['extreme', 'severe', 'moderate'].includes((p.severity || '').toLowerCase()) ? p.severity.toLowerCase() : 'minor';
+    const a = el('div', `sg-alert sev-${sev}`);
+    const head = el('div', 'sg-alert-head');
+    head.append(el('strong', null, (p.title || 'Weather alert').split(' issued ')[0]));
     const end = Number(p.expires) * 1000;
-    if (p.expires) a.append(el('span', null, zDay(end) === zDay(Date.now()) ? ` until ${timeOf(end)} today` : ` until ${zDate(end, { weekday: 'short' })} ${timeOf(end)}`));
+    if (p.expires) head.append(el('span', 'sg-alert-until', zDay(end) === zDay(Date.now()) ? `until ${timeOf(end)} today` : `until ${zDate(end, { weekday: 'short' })} ${timeOf(end)}`));
+    const parts = alertParts(p.description);
+    const lead = parts.find(([k]) => k === 'WHAT') || parts[0];
+    a.append(head);
+    if (lead) a.append(el('p', 'sg-alert-lead', lead[1]));
+    const rest = parts.filter(x => x !== lead);
+    if (!rest.length) return a;
+    const more = el('div', 'sg-alert-more');
+    const inner = el('div', 'sg-alert-more-inner');
+    for (const [k, t] of rest) {
+        const row = el('p');
+        if (k) row.append(el('span', 'sg-alert-k', `${k[0]}${k.slice(1).toLowerCase()}`));
+        row.append(t);
+        inner.append(row);
+    }
+    more.append(inner);
+    a.append(more);
+    a.tabIndex = 0;
+    a.setAttribute('role', 'button');
+    a.setAttribute('aria-expanded', 'false');
+    const flip = () => a.setAttribute('aria-expanded', String(a.classList.toggle('open')));
+    a.addEventListener('click', flip);
+    a.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
     return a;
 }
 
@@ -594,14 +632,24 @@ function alertRow(feature) {
 
 function spiralSvg(place, f, hist, sweep = true) {
     const now = Date.now();
-    const past = hist?.hours?.map(h => ({ t: h.t, tmp: h.tmp, precip: h.precip })) ?? [];
+    const past = hist?.hours?.map(h => ({ t: h.t, tmp: h.tmp, precip: h.precip, cloud: h.cloud, wind: h.wind, dir: h.dir, gust: h.gust })) ?? [];
     const future = f.upcoming.slice(0, 26);
     const sp = spiral({ past, future, now, nowTemp: f.temp, nights: nightsAround(place, now) });
     const s = svgEl('svg', { viewBox: '-40 -40 600 612', class: 'spiral', role: 'img',
         'aria-label': `The last 24 hours observed and the next 24 forecast, as a spiral colored by temperature` });
 
     svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272, class: 'sp-disk' }, s);
-    for (const w of sp.wedges) svgTitle(svgEl('path', { d: w.d, class: 'sp-night' }, s), `Night: sunset ${timeOf(w.a)} to sunrise ${timeOf(w.b)}`);
+    // the hours: a wedge each, its sky band at the outer edge (the wind drawn over the band below)
+    for (const h of sp.hours) {
+        const g = svgEl('g', { class: h.night ? 'sp-hour sp-dark' : 'sp-hour' }, s);
+        svgEl('path', { d: h.d, class: 'sp-wedge' }, g);
+        svgEl('path', { d: h.sky, class: 'sp-sky' }, g);
+        if (h.cover) svgEl('path', { d: h.cover, class: 'sp-cover' }, g);
+        const cover = h.cloud == null ? '' : ` · ${sky(h.cloud, h.night).toLowerCase()} (${Math.round(h.cloud)}% cloud)`;
+        const wind = h.wind == null ? '' : ` · wind ${windText(h.dir, h.wind, h.gust).replace(/^Calm/, 'calm')}`;
+        h.title = `${dayName(h.t)} ${hourText(h.t)}${h.night ? ', night' : ''}${cover}${wind}${h.observed ? ', observed' : ''}`;
+        svgTitle(g, h.title);
+    }
     const id = `sw${Math.random().toString(36).slice(2, 8)}`;
     const mask = svgEl('mask', { id }, svgEl('defs', {}, s));
     svgEl('path', { d: sp.track, class: sweep ? 'sp-sweep' : '', pathLength: 1, fill: 'none', stroke: '#fff', 'stroke-width': 44, 'stroke-linecap': 'round' }, mask);
@@ -623,12 +671,12 @@ function spiralSvg(place, f, hist, sweep = true) {
         svgTitle(svgEl('path', { d: r.d, class: 'sp-drop' }, g), `${dayName(r.t)} ${hourText(r.t)} · ${amount}${r.t < now ? ', observed' : ', forecast'}`);
     }
 
-    for (const w of sp.wind) {
+    for (const h of sp.hours) {
+        if (!h.arrow) continue;
         const a = svgEl('g', { class: sweep ? 'sp-wind sp-late' : 'sp-wind' }, s);
-        svgEl('line', { x1: w.x, y1: w.y, x2: w.x2.toFixed(1), y2: w.y2.toFixed(1) }, a);
-        svgEl('path', { d: w.head }, a);
-        const fr = f.upcoming.find(x => x.t === w.t);
-        svgTitle(a, `${dayName(w.t)} ${hourText(w.t)} · wind ${windText(w.dir, w.wind, fr?.gust).replace(/^Calm/, 'calm')}`);
+        svgEl('line', { x1: h.arrow.x, y1: h.arrow.y, x2: h.arrow.x2.toFixed(1), y2: h.arrow.y2.toFixed(1) }, a);
+        svgEl('path', { d: h.arrow.head }, a);
+        svgTitle(a, h.title);
     }
     svgEl('circle', { cx: sp.now.x, cy: sp.now.y, r: 7, class: 'sp-now' }, s);
     svgEl('text', { x: sp.now.x, y: (sp.now.y - 17).toFixed(1), class: 'sp-now-label', 'text-anchor': 'middle' }, s).textContent = 'NOW';
@@ -655,7 +703,7 @@ function spiralSvg(place, f, hist, sweep = true) {
     });
 
     // The cursor on the spiral
-    const mark = svgEl('circle', { r: 9, class: 'sp-cursor', visibility: 'hidden' }, s);
+    const mark = svgEl('circle', { r: 17, class: 'sp-cursor', visibility: 'hidden' }, s);
     const R = sv => SPIRAL.r0 + sv / 48 * (SPIRAL.r1 - SPIRAL.r0);
     onCursor(s, t => {
         const sv = t == null ? null : 24 + (t - now) / HOUR;
@@ -816,7 +864,7 @@ function readouts(place, f) {
         c.sub.textContent = sub;
         c.mini.replaceChildren(...(mini ? [mini] : []));
     };
-    const update = (t, ens) => {
+    const draw = (t, ens) => {
         const now = t == null;
         const tt = t ?? Date.now();
         const r = rowAt(f, tt) || {};
@@ -866,9 +914,37 @@ function readouts(place, f) {
             put('sun', name, timeOf(when), len != null ? `${Math.floor(len / 60)} h ${len % 60} m of daylight.` : '', dayBar(st.rise, st.set, tt));
         }
     };
+    let shownT = null, shownEns = null;
+    const update = (t, ens) => { shownT = t; shownEns = ens; draw(t, ens); };
+    // Scrubbing must not move the page: every card holds the height of the tallest reading over
+    // the hours the cursor reaches, measured once in place and again when the width changes
+    const lock = () => {
+        if (!sec.isConnected) return;
+        sec.style.removeProperty('--cell-h');
+        const cards = [...sec.querySelectorAll('.sg-cell')];
+        let tall = 0;
+        for (const t of [null, ...f.upcoming.slice(0, HOURS_SHOWN + 1).map(x => x.t)]) {
+            draw(t, shownEns);
+            for (const c of cards) tall = Math.max(tall, c.offsetHeight);
+        }
+        draw(shownT, shownEns);
+        sec.style.setProperty('--cell-h', `${tall}px`);
+    };
+    // measured again once the width settles (a window drag would redraw every hour each frame)
+    let lockedW = 0, settle = 0;
+    new ResizeObserver(([e]) => {
+        const w = Math.round(e.contentRect.width);
+        if (!w || Math.abs(w - lockedW) <= 1) return;
+        const first = !lockedW;
+        lockedW = w;
+        clearTimeout(settle);
+        if (first) lock(); else settle = setTimeout(lock, 150);
+    }).observe(sec);
+    // the display font wraps lines differently than the fallback
+    if (document.fonts && document.fonts.status !== 'loaded') document.fonts.ready.then(lock);
     update(null, null);
     sec.append(detail);
-    return { sec, update };
+    return { sec, update, lock };
 }
 
 // ============ 48 hours ============
@@ -1048,13 +1124,16 @@ function daysSection(f) {
         scale.append(tick);
     }
     const anySnow = days.some(d => d.snow >= 0.1);
-    axis.append(el('span'), el('span', 'sg-day-date'), scale, el('span', 'sg-day-colh', anySnow ? 'Chance of rain or snow' : 'Chance of rain'), el('span', 'sg-day-colh sg-right', 'Amount'));
+    axis.append(el('span'), el('span', 'sg-day-date'), el('span'), scale, el('span', 'sg-day-colh', anySnow ? 'Chance of rain or snow' : 'Chance of rain'), el('span', 'sg-day-colh sg-right', 'Amount'));
     table.append(axis);
     for (const d of days) {
         const row = el('div', 'sg-day');
         const low = d.lo ?? (d.key === zDay(Date.now()) ? f.temp : null) ?? null;
         const name = el('span', 'sg-day-name', weekday(d.t));
         const date = el('span', 'sg-day-date', zDate(d.t, { month: 'short', day: 'numeric' }));
+        const look = el('span', 'sg-day-ic');   // the day at a glance
+        look.append(icon(d.cond.key));
+        look.title = d.cond.label;
         const barBox = el('div', 'sg-day-bar');
         if (d.hi != null) {
             const l = low ?? d.hi;
@@ -1074,7 +1153,7 @@ function daysSection(f) {
         for (let i = 0; i < 20; i++) sq.append(el('i', i < n ? 'on' : ''));
         const snow = d.snow >= 0.1;
         const amt = el('span', 'sg-day-amt sg-right', (d.pop ?? 0) >= 30 && (snow || d.qpf >= 0.01) ? `${rain(snow ? d.snow : d.qpf, snow)}${snow ? ' snow' : ''}` : '');
-        row.append(name, date, barBox, sq, amt, dayMore(d, f));
+        row.append(name, date, look, barBox, sq, amt, dayMore(d, f));
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
         row.setAttribute('aria-expanded', 'false');
@@ -1094,7 +1173,8 @@ function dayMore(d, f) {
     const inner = el('div', 'sg-day-more-inner');
     const hrs = f.rows.filter(r => zDay(r.t) === d.key);
     const snow = d.snow >= 0.1;
-    if (hrs.length >= 6) {
+    // hour by hour only for a whole day: where the hourly forecast starts or ends inside it, the day's overview
+    if (hrs.length && zDay(hrs[0].t - HOUR) !== d.key && zDay(hrs[hrs.length - 1].t + HOUR) !== d.key) {
         const grid = el('div', 'sg-ribbon');
         grid.style.setProperty('--hrs', hrs.length);
         const lane = (name, make) => {

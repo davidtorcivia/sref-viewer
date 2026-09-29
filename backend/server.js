@@ -1180,6 +1180,12 @@ app.get('/api/geocode', async (req, res) => {
 // the latest in the hour. Hours without reports stay in, all null.
 const cToF = c => c == null ? null : Math.round((c * 9 / 5 + 32) * 10) / 10;
 const kmhToMph = k => k == null ? null : Math.round(k / 1.609344 * 10) / 10;
+// Sky cover (%) from the report's cloud layers: the most covered layer, at the middle of its oktas
+const CLOUD_PCT = { SKC: 0, CLR: 0, FEW: 19, SCT: 44, BKN: 75, OVC: 100, VV: 100 };
+const cloudCover = layers => {
+    const v = (layers || []).map(l => CLOUD_PCT[l.amount]).filter(x => x != null);
+    return v.length ? Math.max(...v) : null;
+};
 
 function bucketObservations(features, nowMs) {
     const byHour = new Map();
@@ -1218,7 +1224,8 @@ function bucketObservations(features, nowMs) {
             dir: p.windDirection?.value ?? null,
             gust: kmhToMph(p.windGust?.value),
             precip: mm == null ? null : Math.round(mm / 25.4 * 1000) / 1000,
-            text: p.textDescription || null
+            text: p.textDescription || null,
+            cloud: cloudCover(p.cloudLayers)
         });
     }
     return hours;

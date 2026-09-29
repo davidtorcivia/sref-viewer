@@ -16,6 +16,9 @@
     --ink: #141312;
     --ink-rgb: 20, 19, 18;
     --card: #ebe7dc;
+    --alert-minor: #e7c64a;
+    --alert-moderate: #ec8a2f;
+    --alert-severe: #d8412f;
     --missing: #dcd7cb;
     /* variable colors and previous runs, shared with the plume viewer (styles.css) */
     --c-rain: oklch(0.58 0.14 248);
@@ -43,6 +46,9 @@
     --night: #070706;
     --dark: #0d0c0b;
     --card: #1f1e1b;
+    --alert-minor: #b89a2a;
+    --alert-moderate: #c0661c;
+    --alert-severe: #c2362a;
     --missing: #3a3834;
     --c-rain: oklch(0.72 0.13 245);
     --c-snow: oklch(0.8 0.09 290);
@@ -210,15 +216,27 @@ body { -webkit-tap-highlight-color: transparent; }
     font-variation-settings: 'wdth' 92;
     padding-top: 16px;
 }
-.sg-alerts { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
-.sg-alerts:empty { display: none; }
+/* Alerts: under the color field, only when one covers the place; tinted by severity, opening in place */
+.sg-alertbox { display: grid; gap: 8px; margin: 20px var(--gut) 0; }
+.sg-alertbox:empty { display: none; }
 .sg-alert {
-    align-self: flex-start;
-    background: var(--ink);
-    color: var(--paper);
-    padding: 7px 12px;
-    font-size: 14px;
+    --sev: var(--alert-minor);
+    background: color-mix(in oklch, var(--sev) 22%, var(--paper));
+    border-radius: 6px;
+    padding: 14px 18px;
+    cursor: default;
 }
+.sg-alert.sev-moderate { --sev: var(--alert-moderate); }
+.sg-alert.sev-severe, .sg-alert.sev-extreme { --sev: var(--alert-severe); }
+.sg-alert-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.sg-alert-head strong { font-size: 22px; font-weight: 800; font-variation-settings: 'wdth' 70; }
+.sg-alert-until { font-size: 14px; font-weight: 500; }
+.sg-alert-lead { margin: 6px 0 0; max-width: 72ch; font-size: 15px; line-height: 1.4; }
+.sg-alert-more { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.35s var(--ease); }
+.sg-alert.open .sg-alert-more { grid-template-rows: 1fr; }
+.sg-alert-more-inner { overflow: hidden; min-height: 0; }
+.sg-alert-more-inner p { margin: 10px 0 0; max-width: 72ch; font-size: 14px; line-height: 1.45; }
+.sg-alert-k { font-weight: 700; margin-right: 8px; }
 
 .sg-spiral { width: 100%; max-width: 700px; justify-self: end; padding-bottom: 12px; }
 /* the spiral's space is held while it waits for the observed lap, so nothing below moves */
@@ -228,8 +246,12 @@ body { -webkit-tap-highlight-color: transparent; }
 :root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
 .spiral .sp-drop { fill: var(--c-rain); }
 .spiral .sp-missing { fill: var(--missing); stroke: var(--missing); stroke-width: 0.6; }
-.spiral .sp-night { fill: #141312; opacity: 0.2; }
-:root[data-theme="dark"] .spiral .sp-night { fill: #000; opacity: 0.62; }
+/* hours: a faint wedge by day, darker by night; the sky band at the outer edge, filled as deep as it is covered */
+.spiral .sp-wedge { fill: rgba(var(--ink-rgb), 0.035); }
+.spiral .sp-dark .sp-wedge { fill: rgba(var(--ink-rgb), 0.16); }
+:root[data-theme="dark"] .spiral .sp-dark .sp-wedge { fill: rgba(0, 0, 0, 0.5); }
+.spiral .sp-sky { fill: rgba(var(--ink-rgb), 0.05); }
+.spiral .sp-cover { fill: var(--ink); opacity: 0.32; }   /* the hours chart's cloud columns */
 .spiral .sp-sweep { stroke-dasharray: 1; animation: sp-draw 2.2s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
 .spiral .sp-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
 .spiral .sp-wind path { fill: var(--c-wind); }
@@ -238,7 +260,7 @@ body { -webkit-tap-highlight-color: transparent; }
 .spiral .sp-th { font-size: 12px; font-weight: 700; fill: var(--ink); }
 .spiral .sp-td { font-size: 28px; font-weight: 820; font-variation-settings: 'wdth' 56; fill: var(--ink); }
 .spiral .sp-tl { font-size: 12px; font-weight: 600; fill: var(--ink); }
-.spiral .sp-cursor { fill: var(--ink); stroke: var(--paper); stroke-width: 3; }
+.spiral .sp-cursor { fill: var(--ink); stroke: var(--paper); stroke-width: 5; }
 
 @keyframes sp-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 /* the wind outside the lap arrives as the band finishes growing */
@@ -256,7 +278,7 @@ body { -webkit-tap-highlight-color: transparent; }
     display: flex;
     flex-direction: column;
     text-align: left;
-    min-height: 190px;
+    min-height: max(190px, var(--cell-h, 0px));   /* --cell-h: the tallest reading (readouts' lock) */
     padding: 14px 14px 12px;
     border-radius: 6px;
     min-width: 0;
@@ -370,7 +392,7 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .sg-days { margin: 48px var(--gut) 0; }
 .sg-day {
     display: grid;
-    grid-template-columns: 130px 70px minmax(0, 1fr) 200px 80px;
+    grid-template-columns: 130px 70px 40px minmax(0, 1fr) 200px 80px;
     grid-template-rows: 56px auto;
     align-items: center;
     border-radius: 6px;
@@ -402,6 +424,8 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 .sg-right { text-align: right; }
 .sg-day-name { padding-left: 10px; font-size: 34px; font-weight: 800; font-variation-settings: 'wdth' 58; }
 .sg-day-date { font-size: 13px; font-weight: 500; }
+.sg-day-ic { display: flex; }
+.sg-day-ic .ic { width: 28px; height: 28px; }
 .sg-day-bar { position: relative; height: 100%; margin: 0 56px 0 64px; }
 .sg-tick { position: absolute; bottom: 4px; transform: translateX(-50%); }
 .sg-day-fill {
@@ -595,7 +619,8 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
     .sg-day { grid-template-rows: 54px auto; }
     .sg-ribbon-k { display: none; }
     .sg-ribbon { grid-template-columns: repeat(var(--hrs), minmax(0, 1fr)); }
-    .sg-day { grid-template-columns: 60px minmax(0, 1fr) 70px; }
+    .sg-day { grid-template-columns: 60px 30px minmax(0, 1fr) 70px; }
+    .sg-day-ic .ic { width: 24px; height: 24px; }
     .sg-day-date, .sg-day-amt, .sg-day-colh { display: none; }
     .sg-day-name { font-size: 24px; padding-left: 8px; }
     .sg-day-bar { margin: 0 34px 0 30px; }
@@ -620,7 +645,7 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
     .sg-detail.open .sg-detail-inner { padding: 14px; }
     .sg-detail-inner .detail-rows { columns: 1; }
     .sg-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .sg-cell { min-height: 150px; }
+    .sg-cell { min-height: max(150px, var(--cell-h, 0px)); }
     .sg-cell-v { font-size: 38px; }
     .sg-num { font-size: 260px; }
     .sg-nav-actions .wx-icon-btn[href] { display: none; }

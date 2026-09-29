@@ -56,7 +56,7 @@ const ob = (iso, c, extra = {}) => ({ properties: { timestamp: iso, temperature:
     dewpoint: { value: 0 }, windSpeed: { value: 16.09344 }, windGust: { value: null },
     windDirection: { value: 270 }, precipitationLastHour: { value: null }, textDescription: iso, ...extra } });
 const hist = bucketObservations([
-    ob('2026-09-28T19:51:00Z', 20, { precipitationLastHour: { value: 25.4 } }),
+    ob('2026-09-28T19:51:00Z', 20, { precipitationLastHour: { value: 25.4 }, cloudLayers: [{ amount: 'SCT' }, { amount: 'BKN' }] }),
     ob('2026-09-28T19:20:00Z', 10),
     ob('2026-09-28T19:55:00Z', null),
     ob('2026-09-28T18:10:00Z', 0),
@@ -69,13 +69,13 @@ assert.ok(hist.every((h, i) => i === 0 || h.t - hist[i - 1].t === 3600e3));
 assert.strictEqual(hist[0].t, at('2026-09-27T20:00Z'));
 const hr = iso => hist.find(h => h.t === at(iso));
 assert.deepStrictEqual(hr('2026-09-28T19:00Z'), { t: at('2026-09-28T19:00Z'), tmp: 68, dpt: 32, wind: 10, dir: 270,
-    gust: null, precip: 1, text: '2026-09-28T19:51:00Z' });
+    gust: null, precip: 1, text: '2026-09-28T19:51:00Z', cloud: 75 });   // the most covered layer
 assert.strictEqual(hr('2026-09-28T18:00Z').tmp, 41);
 assert.strictEqual(hr('2026-09-28T18:00Z').precip, 0);
 assert.strictEqual(hr('2026-09-28T17:00Z').tmp, null);
 assert.strictEqual(hr('2026-09-28T17:00Z').text, 'no temp');
 assert.deepStrictEqual(hr('2026-09-28T20:00Z'), { t: at('2026-09-28T20:00Z'), tmp: null, dpt: null, wind: null,
-    dir: null, gust: null, precip: null, text: null });
+    dir: null, gust: null, precip: null, text: null, cloud: null });
 
 // A 5-minute report (no rawMessage) wins temperature; the hour's METAR supplies precip;
 // at equal distance from :51 the METAR wins temperature too

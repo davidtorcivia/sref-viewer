@@ -166,7 +166,7 @@ const assert = require('node:assert/strict');
         const now = Date.parse('2026-09-28T19:15:00Z');
         const h0 = Math.floor(now / H) * H;
         const past = Array.from({ length: 25 }, (_, i) => ({ t: h0 - 24 * H + i * H, tmp: 60 + (i % 3), precip: i === 2 ? 0.1 : i === 5 ? 0 : null }));
-        const future = Array.from({ length: 26 }, (_, i) => ({ t: h0 + i * H, tmp: 55 + i / 2, qpf: i === 3 ? 0.02 : 0, wind: 10, dir: 270 }));
+        const future = Array.from({ length: 26 }, (_, i) => ({ t: h0 + i * H, tmp: 55 + i / 2, qpf: i === 3 ? 0.02 : 0, wind: 10, dir: 270, cloud: i === 1 ? 50 : 0 }));
         const sp = sg.spiral({ past, future, now, nowTemp: 63, nights: [[now + 3 * H, now + 15 * H]] });
         assert.equal(sp.segs.length, 192);
         assert.ok(sp.segs[0].observed && !sp.segs[96].observed);
@@ -175,14 +175,18 @@ const assert = require('node:assert/strict');
         assert.equal(sp.now.x, '260.0');                         // now sits at the top
         assert.equal(sp.rain.length, 2);                         // one drop per wet hour
         assert.ok(sp.rain[0].t < now && sp.rain[1].t > now);
-        assert.equal(sp.wedges.length, 1);
+        // an hour each (the lap cuts the first past hour and the last forecast one), dark by the nights
+        assert.equal(sp.hours.filter(h => h.observed).length, 25);
+        assert.equal(sp.hours.filter(h => !h.observed).length, 25);
+        assert.equal(sp.hours.filter(h => h.night).length, 12);
+        assert.deepEqual(sp.hours.filter(h => h.cover).map(h => h.t), [h0 + H]);   // sky band filled where cloudy
         assert.equal(sp.table.pastRain, 0.1);
         assert.equal(sp.table.pastLow, 60);
         assert.equal(sp.table.nextLow, 55);
         assert.ok(Math.abs(sp.table.nextRain - 0.02) < 1e-9);
         assert.equal(sp.table.nextHigh, 67);                     // the hour starting 24 h out still counts
         assert.equal(sp.table.nextLowAt, h0);
-        assert.equal(sp.wind.length, 12);
+        assert.equal(sp.hours.filter(h => h.arrow).length, 25);   // wind on every forecast hour (none observed here)
         assert.equal(sp.caps.length, 2);
         assert.equal(sp.caps[0].x, '260.0');                     // both ends sit at the top
         // the current hour's report not in yet: the lap still reaches now, no gap

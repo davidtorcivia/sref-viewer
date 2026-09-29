@@ -26,16 +26,15 @@ const state = {
     hasSnow: false,
     currentView: { snow: 'total', precip: 'total' },
     previousRuns: {},              // run hour -> { param: data } for the preceding cycles
-    visibleRuns: {},               // run hour -> overlay shown (default: not on phones)
+    visibleRuns: {},               // run hour -> overlay shown (default: shown)
     // Bands are the only legible default at phone widths
     chartViewMode: store.get('sref-chart-view-mode') || (isMobile() ? 'bands' : 'spaghetti'),
-    siteName: null,
     load: null,                    // AbortController of the load in progress
     following: true,               // showing the latest run: auto-advance to new ones
 };
 
 const COMPARE_CYCLES = 3;
-const isRunVisible = run => state.visibleRuns[run] ?? !isMobile();
+const isRunVisible = run => state.visibleRuns[run] ?? true;   // the previous runs show unless turned off
 
 // Each previous run has its own hue (--run-1 is the most recent previous
 // cycle): the Compare chips here, the lines and readout dots in charts.js
@@ -127,11 +126,6 @@ function init() {
 
     // Settings only affect chrome: don't hold the first data fetch for them
     applySiteSettings().then(s => {
-        if (s.siteName) {
-            state.siteName = s.siteName;
-            document.title = s.siteName;
-            renderTitle();
-        }
         if (s.defaultStations?.length) renderStationButtons(s.defaultStations);
     });
 
@@ -272,7 +266,7 @@ function updateTimeDisplay() {
 }
 
 function renderTitle() {
-    elements.pageTitle.textContent = state.siteName || elements.defaultTitle;
+    elements.pageTitle.textContent = elements.defaultTitle;
     if (state.hasSnow) {
         elements.pageTitle.appendChild(Object.assign(document.createElement('span'), { className: 'snow-alert', textContent: 'SNOW' }));
     }
@@ -652,7 +646,7 @@ const trendParam = () => state.hasSnow ? 'Total-SNO' : 'Total-QPF';
 
 async function fetchPreviousRuns(signal) {
     const cycles = comparisonCycles();
-    // With no overlays shown (the phone default) only the summary trend
+    // With every overlay turned off only the summary trend
     // needs previous-run data: one param instead of six per run
     const anyVisible = cycles.some(c => isRunVisible(c.run));
     const params = anyVisible ? Object.keys(state.data) : [trendParam()];
