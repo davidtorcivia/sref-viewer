@@ -209,7 +209,8 @@ async function fetchFrames(which) {
         return { frames: past, backdrop };
     }
     // Thinned on fixed 4-minute times (plus the newest scan) so a refresh swaps one layer, not all
-    if (mrms && THIN_RADAR) past = past.filter((f, i) => f.time % 240 === 0 || i === past.length - 1);
+    // radars in the mosaic update every 4-10 min on their own schedules: 6-minute frames are coherent snapshots
+    if (mrms) past = past.filter((f, i) => f.time % 360 === 0 || i === past.length - 1);
     return { frames: past, backdrop };
 }
 
