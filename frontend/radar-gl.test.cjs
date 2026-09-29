@@ -43,38 +43,47 @@ const assert = require('node:assert/strict');
     assert.equal(g.bracket(times, 1480 + 9999).lead, 3600);
     assert.equal(g.bracket([], 5), null);
 
-    // Advection: seconds from each scan to the moment shown; they meet: dt0 + dt1
-    // is the whole gap, so an echo moving steadily is in one place
-    let k = g.advection(g.bracket(times, 1060));
-    assert.deepEqual(k, { dt0: 60, dt1: 60, lead: 0 });
-    k = g.advection(g.bracket(times, 1300));           // a 4-minute gap
-    assert.deepEqual(k, { dt0: 60, dt1: 180, lead: 0 });
-    // The nowcast: a lead along the mean motion, then the newest scan's own age as at its time
-    assert.deepEqual(g.advection(g.bracket(times, 1480 + 1800)), { dt0: 0, dt1: 0, lead: 1800 });
-    // A scan is drawn the same just before and just after its time (no seam): the interval
-    // ending at it moves it by dt1 = 0, the next one by dt0 = 0, both along its own motion
-    assert.equal(g.advection(g.bracket(times, 1240)).dt1, 0);
-    assert.equal(g.advection(g.bracket(times, 1240 + 1e-6)).dt0 < 1e-5, true);
-    // A blob moving v per 2 minutes, as the shader moves it: scan 0 back by (dt0 + age0), scan 1
-    // forward by (dt1 - age1). Fresh data: they land on the same spot. Scan 1 repeating scan 0's
-    // data (age1 = gap + age0) lands exactly on scan 0's copy, so a repeat never ghosts.
-    const v = 3, x = 10, where = (x, k) => x + v * k / g.FLOW_S;
-    const blob = t => 100 + v * t / g.FLOW_S;          // true position at time t
-    const seen0 = where(x, -(k.dt0 + 0)), seen1 = where(x, k.dt1 - 0);
-    near(blob(1300) - x, blob(1240) - seen0);           // scan 0 (data at 1240) drawn where the blob is at 1300
-    near(blob(1300) - x, blob(1480) - seen1);
-    const age1 = 1480 - 1240;                           // scan 1 repeats scan 0's data
-    near(where(x, k.dt1 - age1), seen0);
+    // At a scan's own time: that scan alone (the next interval, not the end of the last)
+    assert.deepEqual(g.bracket(times, 1120), { t0: 1120, t1: 1240, a: 0, lead: 0 });
+
+    // Observed: each frame held crisp, then an eased dBZ blend over the last 45%, no motion
+    for (const a of [0, 0.3, 0.55]) assert.equal(g.blendWeight(a), 0);
+    near(g.blendWeight(0.775), 0.5);
+    assert.ok(g.blendWeight(0.6) < 0.1 && g.blendWeight(0.95) > 0.9, 'eased at both ends');
+    assert.equal(g.blendWeight(1), 1);
+    const six = [0, 360, 720, 1080];
+    assert.deepEqual(g.frameMix(six, 180), { t0: 0, t1: 360, w: 0, k0: 0, k1: 0, step: 0, gap: 360 });
+    let m = g.frameMix(six, 0.775 * 360);
+    assert.equal(m.t1, 360); near(m.w, 0.5); assert.equal(m.k0 + m.k1, 0);
+    // Nowcast: discrete 6-minute steps of the newest frame moved k flow periods (2 min) along v
+    m = g.frameMix(six, 1080 + 100);                          // first step, held: the newest frame itself
+    assert.deepEqual(m, { t0: 1080, t1: 1080, w: 0, k0: 0, k1: 3, step: 0, gap: 360 });
+    m = g.frameMix(six, 1080 + 1800 + 60);                    // +30 min, held
+    assert.deepEqual([m.k0, m.k1, m.w, m.step], [15, 18, 0, 5]);
+    m = g.frameMix(six, 1080 + 1800 + 279);                   // blending into +36
+    assert.deepEqual([m.k0, m.k1, m.step], [15, 18, 6]); near(m.w, 0.5);
+    m = g.frameMix(six, 1080 + 9999);                         // capped at +60, no blend past it
+    assert.deepEqual([m.k0, m.w, m.step], [30, 0, 10]);
+    // Badge: minutes after the newest frame, counting up in 6s, never negative
+    assert.equal(g.forecastMinutes(0), 0);
+    assert.equal(g.forecastMinutes(g.frameMix(six, 1080 + 370).step), 6);
+    assert.equal(g.forecastMinutes(g.frameMix(six, 1080 + 3600).step), 60);
+    let prev = 0;
+    for (let T = 1080; T <= 1080 + 3600; T += 7) {
+        const min = g.forecastMinutes(g.frameMix(six, T).step);
+        assert.ok(min >= prev && min <= 60 && min % 6 === 0);
+        prev = min;
+    }
 
     // Flow texel bytes -> degrees per 2 minutes, east and north (y bytes point south)
     assert.deepEqual(g.flowDegrees(128, 128), [0, -0]);
     near(g.flowDegrees(160, 96)[0], 0.04);
     near(g.flowDegrees(160, 96)[1], 0.04);
 
-    // Nowcast never fades; the hatch marks it at one strength for every lead, observed frames never
+    // Nowcast never fades; the hatch marks it at one strength for every step, observed frames never
     assert.equal(g.nowcastFade, undefined);
     assert.equal(g.hatchStrength(0), 0);
-    for (const lead of [60, 600, 1800, 3600]) assert.equal(g.hatchStrength(lead), g.HATCH);
+    for (const step of [1, 3, 5, 10]) assert.equal(g.hatchStrength(step), g.HATCH);
     assert.ok(g.HATCH > 0 && g.HATCH <= 0.1 && g.HATCH_PX >= 6 && g.HATCH_PX <= 8);
 
     // Scrubber index <-> time, piecewise linear
@@ -85,5 +94,17 @@ const assert = require('node:assert/strict');
     near(g.timeAt(times, g.indexAt(times, 1400)), 1400);
     assert.equal(g.indexAt(times, 5000), 3);
 
+    // the label names the picture on screen: a held scan, the scan blended into, or the nowcast step
+    {
+        const ts = [0, 360, 720];
+        assert.equal(g.shownTime(ts, 10), 0);
+        assert.equal(g.shownTime(ts, 355), 360);
+        assert.equal(g.shownTime(ts, 721), 720);                // just past the newest scan: still the newest
+        assert.equal(g.shownTime(ts, 720 + 3600), 720 + 3600);  // the last forecast step
+        for (let T = 721; T <= 720 + 3600; T += 30) {
+            const m = g.frameMix(ts, T);
+            assert.equal(g.shownTime(ts, T), 720 + m.step * g.STEP_S);
+        }
+    }
     console.log('radar-gl: all checks passed');
 })().catch(err => { console.error(err); process.exit(1); });

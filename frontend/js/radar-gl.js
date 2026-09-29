@@ -10,17 +10,17 @@
  * no coverage is masked), and only then looks the palette up, so storm edges
  * are smooth contours rather than 1 km squares.
  *
- * Between scans t0 and t1 (fraction a) each scan is moved along the motion
- * field toward the moment shown and the two are cross-faded:
- *   color = mix(ramp(tex0(p - v a)), ramp(tex1(p + v (1 - a))), a)
- * where each scan moves along its own motion field from its data's own time:
- * a radar updates every 4-10 minutes, so parts of a 2-minute scan repeat older
- * data (the extractor sends that age with the motion); a repeat then lands
- * exactly on the scan before it, and a scan is drawn the same on both sides
- * of its time, so the loop has no seams.
- * Past the newest scan the same shader extrapolates it along the mean motion
- * of the last 30 minutes (the nowcast), in the same colors at every lead (a
- * fade would read as a weakening storm) and marked by a fine diagonal hatch.
+ * Observed scans (radar.js keeps one every 6 minutes: each radar updates on
+ * its own 4-10 minute schedule, so 2-minute scans flicker in patches) are shown
+ * as they are, never moved. Only the last 45% of each step blends (ease in-out) toward
+ * the next scan, and in dBZ (the two values are interpolated, then the palette
+ * applied once), so there is never a translucent double image. Where the next
+ * scan still carries the same radar data (its age, the motion texture's blue,
+ * covers the whole step) it just holds.
+ * Past the newest scan, the nowcast: discrete 6-minute steps, each the newest
+ * scan moved lead x v along the mean motion of the last 30 minutes, with the
+ * same short dBZ blend between steps; same colors at every lead (a fade would
+ * read as a weakening storm), marked by a fine diagonal hatch.
  *
  * Texture uploads happen inside render(): MapLibre caches GL state and only
  * resets it after a custom layer's render call.
@@ -34,6 +34,7 @@ export const AGE_UNIT = 10;
 export const CELL_DEG = 0.01;
 export const FLOW_S = 120;
 export const NOWCAST_S = 3600;
+export const STEP_S = 360;    // observed frames and nowcast steps (radar.js keeps a scan every 6 minutes)
 const GRID = { west: -130, south: 20, east: -60, north: 55 };   // MRMS CONUS outer edges
 const TEX_MAX = 2048;
 const MARGIN_DEG = 1.0;       // crop margin past the view: a 60-minute backtrace at ~100 km/h
@@ -79,24 +80,47 @@ export function bracket(times, T) {
     const last = times[times.length - 1];
     if (T >= last) return { t0: last, t1: last, a: 0, lead: Math.min(T - last, NOWCAST_S) };
     let i = 1;
-    while (times[i] < T) i++;
+    while (times[i] <= T) i++;          // at a scan's own time: that scan, unblended
     return { t0: times[i - 1], t1: times[i], a: (T - times[i - 1]) / (times[i] - times[i - 1]), lead: 0 };
 }
 
-// Seconds from each scan to the moment shown: scan 0 is traced back along its
-// flow by (dt0 + its data age) / FLOW_S periods, scan 1 forward along its own by
-// (dt1 - its age) / FLOW_S (the shader adds the ages); the nowcast first traces
-// back the lead along the mean motion, then the newest scan's age along its own
-export function advection({ t0, t1, a, lead }) {
-    if (lead > 0) return { dt0: 0, dt1: 0, lead };
-    return { dt0: a * (t1 - t0), dt1: (1 - a) * (t1 - t0), lead: 0 };
+// The last BLEND of each step eases toward the next one (in dBZ); the rest holds
+export const BLEND = 0.45;   // each frame reads on its own, then eases (in-out) into the next
+export function blendWeight(a) {
+    const x = Math.min(Math.max((a - (1 - BLEND)) / BLEND, 0), 1);
+    return x * x * (3 - 2 * x);
 }
 
+// What to draw at time T: scans t0 and t1 (the same scan in the nowcast), the
+// dBZ blend weight w toward t1, and how far each is moved along the mean motion
+// in flow periods (k0, k1: whole STEP_S nowcast steps, 0 for observed scans);
+// step = the nowcast step on screen (0 observed), for the badge and the hatch
+export function frameMix(times, T) {
+    const at = bracket(times, T);
+    if (!at) return null;
+    if (at.lead > 0) {
+        const n = NOWCAST_S / STEP_S, s = Math.min(Math.floor(at.lead / STEP_S), n), k = STEP_S / FLOW_S;
+        const w = s >= n ? 0 : blendWeight(at.lead / STEP_S - s);
+        return { t0: at.t0, t1: at.t0, w, k0: s * k, k1: Math.min(s + 1, n) * k, step: w >= 0.5 ? s + 1 : s, gap: STEP_S };
+    }
+    return { t0: at.t0, t1: at.t1, w: blendWeight(at.a), k0: 0, k1: 0, step: 0, gap: at.t1 - at.t0 };
+}
+
+// The time of the picture on screen: the scan it mostly shows, or the nowcast step's time
+export function shownTime(times, T) {
+    const m = frameMix(times, T);
+    if (!m) return null;
+    return m.step > 0 || m.k1 > 0 ? m.t0 + m.step * STEP_S : m.w < 0.5 ? m.t0 : m.t1;
+}
+
+// Forecast badge minutes for a nowcast step
+export const forecastMinutes = step => step * STEP_S / 60;
+
 // Forecast hatch: stripes lighten/darken the echo by HATCH (no hue or alpha change),
-// the same at every lead; HATCH_PX CSS pixels per stripe pair, at 45°
+// the same at every step; HATCH_PX CSS pixels per stripe pair, at 45°
 export const HATCH = 0.08;
 export const HATCH_PX = 7;
-export const hatchStrength = lead => lead > 0 ? HATCH : 0;
+export const hatchStrength = step => step > 0 ? HATCH : 0;
 
 // Scrubber position <-> time over the frame list (piecewise linear between frames)
 export function indexAt(times, T) {
@@ -130,9 +154,9 @@ precision highp float;
 precision highp int;
 in vec2 v_merc;
 out vec4 color;
-uniform sampler2D u_r0, u_r1, u_f0, u_f1, u_fm, u_pal;   // scans, their motion, the nowcast's mean motion
-uniform vec4 u_b0, u_b1, u_bf0, u_bf1, u_bfm;          // texture bounds: west, south, east, north (degrees)
-uniform float u_dt0, u_dt1, u_lead, u_a, u_opacity, u_hatch, u_hatchPx;
+uniform sampler2D u_r0, u_r1, u_f1, u_fm, u_pal;   // scans, scan 1's motion (its age), the nowcast's motion
+uniform vec4 u_b0, u_b1, u_bf1, u_bfm;            // texture bounds: west, south, east, north (degrees)
+uniform float u_w, u_k0, u_k1, u_gap, u_opacity, u_hatch, u_hatchPx;
 uniform int u_steps;             // nowcast substeps (it follows the flow around curves)
 const float PI = 3.141592653589793;
 
@@ -181,10 +205,14 @@ vec4 ramp(vec2 d) {
 
 void main() {
     vec2 ll = vec2(v_merc.x * 360.0 - 180.0, degrees(atan(sinh(PI * (1.0 - 2.0 * v_merc.y)))));
-    vec2 p0 = u_lead > 0.0 ? trace(u_fm, u_bfm, ll, -u_lead / ${FLOW_S}.0, u_steps) : ll;
-    vec4 c0 = ramp(dbz(u_r0, u_b0, trace(u_f0, u_bf0, p0, -(u_dt0 + age(u_f0, u_bf0, p0)) / ${FLOW_S}.0, 1)));
-    vec4 c1 = u_a > 0.0 ? ramp(dbz(u_r1, u_b1, trace(u_f1, u_bf1, ll, (u_dt1 - age(u_f1, u_bf1, ll)) / ${FLOW_S}.0, 1))) : c0;
-    color = mix(c0, c1, u_a) * u_opacity;   // palette rgb is 0 where clear: premultiplied
+    vec2 d = dbz(u_r0, u_b0, u_k0 > 0.0 ? trace(u_fm, u_bfm, ll, -u_k0, u_steps) : ll);
+    // blend toward the next scan / step in dBZ, then one palette lookup; where the next
+    // scan's data is as old as the step (the same radar data) it holds
+    if (u_w > 0.0 && (u_k1 > 0.0 || age(u_f1, u_bf1, ll) < u_gap - 1.0)) {
+        vec2 d1 = dbz(u_r1, u_b1, u_k1 > 0.0 ? trace(u_fm, u_bfm, ll, -u_k1, u_steps) : ll);
+        d = d.y >= 0.5 && d1.y >= 0.5 ? vec2(mix(d.x, d1.x, u_w), 1.0) : (u_w < 0.5 ? d : d1);
+    }
+    color = ramp(d) * u_opacity;   // palette rgb is 0 where clear: premultiplied
     // Forecast: diagonal stripes toward white (premultiplied: alpha) and black, echo only
     if (u_hatch > 0.0 && color.a > 0.0) {
         bool light = mod(gl_FragCoord.x + gl_FragCoord.y, u_hatchPx) < 0.5 * u_hatchPx;
@@ -358,8 +386,8 @@ export class MrmsLayer {
         gl.linkProgram(prog);
         if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
         this.loc = {};
-        for (const u of ['u_matrix', 'u_quad', 'u_r0', 'u_r1', 'u_f0', 'u_f1', 'u_fm', 'u_pal', 'u_b0', 'u_b1', 'u_bf0', 'u_bf1', 'u_bfm',
-            'u_dt0', 'u_dt1', 'u_lead', 'u_a', 'u_opacity', 'u_hatch', 'u_hatchPx', 'u_steps']) {
+        for (const u of ['u_matrix', 'u_quad', 'u_r0', 'u_r1', 'u_f1', 'u_fm', 'u_pal', 'u_b0', 'u_b1', 'u_bf1', 'u_bfm',
+            'u_w', 'u_k0', 'u_k1', 'u_gap', 'u_opacity', 'u_hatch', 'u_hatchPx', 'u_steps']) {
             this.loc[u] = gl.getUniformLocation(prog, u);
         }
         this.vao = gl.createVertexArray();
@@ -415,13 +443,11 @@ export class MrmsLayer {
         this.upload(gl);
         if (!this.palette) return;
         const ready = this.times.filter(t => this.entries.get(t)?.crop);
-        const at = bracket(ready, this.T);
+        const at = frameMix(ready, this.T);
         if (!at) return;
         const e0 = this.entries.get(at.t0), e1 = this.entries.get(at.t1);
-        // Motion for the interval is the later scan's; the nowcast's is the mean at the newest scan
-        // Each scan's own motion and age; the nowcast's mean motion (else the newest scan's)
-        const f0 = e0.flow, f1 = e1.flow, fm = this.nowcast?.time === at.t0 ? this.nowcast : f0;
-        const { dt0, dt1, lead } = advection(at);
+        // Scan 1's age decides a hold; the nowcast moves along the mean motion (else the newest scan's)
+        const f1 = e1.flow, fm = this.nowcast?.time === at.t0 ? this.nowcast : e0.flow;
         const b = [e0.crop.bounds, e1.crop.bounds];
         const quad = [mercX(Math.min(b[0][0], b[1][0])), mercY(Math.max(b[0][3], b[1][3])),
             mercX(Math.max(b[0][2], b[1][2])), mercY(Math.min(b[0][1], b[1][1]))];
@@ -430,7 +456,7 @@ export class MrmsLayer {
         gl.bindVertexArray(this.vao);
         gl.uniformMatrix4fv(this.loc.u_matrix, false, matrix);
         gl.uniform4fv(this.loc.u_quad, quad);
-        [[e0.crop.tex, 'u_r0'], [e1.crop.tex, 'u_r1'], [f0?.tex || this.still, 'u_f0'], [f1?.tex || this.still, 'u_f1'],
+        [[e0.crop.tex, 'u_r0'], [e1.crop.tex, 'u_r1'], [f1?.tex || this.still, 'u_f1'],
             [fm?.tex || this.still, 'u_fm'], [this.palette, 'u_pal']].forEach(([tex, u], i) => {
             gl.activeTexture(gl.TEXTURE0 + i);
             gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -438,17 +464,16 @@ export class MrmsLayer {
         });
         gl.uniform4fv(this.loc.u_b0, b[0]);
         gl.uniform4fv(this.loc.u_b1, b[1]);
-        gl.uniform4fv(this.loc.u_bf0, f0?.bounds || b[0]);
         gl.uniform4fv(this.loc.u_bf1, f1?.bounds || b[1]);
         gl.uniform4fv(this.loc.u_bfm, fm?.bounds || b[0]);
-        gl.uniform1f(this.loc.u_dt0, dt0);
-        gl.uniform1f(this.loc.u_dt1, dt1);
-        gl.uniform1f(this.loc.u_lead, lead);
-        gl.uniform1f(this.loc.u_a, at.a);
+        gl.uniform1f(this.loc.u_w, at.w);
+        gl.uniform1f(this.loc.u_k0, at.k0);
+        gl.uniform1f(this.loc.u_k1, at.k1);
+        gl.uniform1f(this.loc.u_gap, at.gap);
         // the nowcast follows the flow around curves: a substep per ~10 minutes of travel
-        gl.uniform1i(this.loc.u_steps, at.lead > 0 ? Math.min(8, Math.ceil(at.lead / 600) + 1) : 1);
+        gl.uniform1i(this.loc.u_steps, Math.min(8, Math.ceil(at.k1 / 5) + 1));
         gl.uniform1f(this.loc.u_opacity, this.opts.opacity);
-        gl.uniform1f(this.loc.u_hatch, hatchStrength(at.lead));
+        gl.uniform1f(this.loc.u_hatch, hatchStrength(at.step));
         // period along the diagonal is HATCH_PX CSS px: x + y steps sqrt(2) per diagonal px
         gl.uniform1f(this.loc.u_hatchPx, HATCH_PX * Math.SQRT2 * (window.devicePixelRatio || 1));
         gl.enable(gl.BLEND);

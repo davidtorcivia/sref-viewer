@@ -51,7 +51,7 @@ if (EMBED) {
     });
 }
 import { applySiteSettings } from './site.js?v=__V__';
-import { MrmsLayer, indexAt, timeAt } from './radar-gl.js?v=__V__';
+import { MrmsLayer, indexAt, timeAt, frameMix, forecastMinutes, STEP_S, shownTime } from './radar-gl.js?v=__V__';
 
 // Tiles come through our backend (/api/radar/tile), which caches them and
 // pre-renders the NYC viewport for each new frame; style options live there.
@@ -69,11 +69,11 @@ const TILE_STYLE_V = 'mrms';
 const FIELD_STYLE_V = '3';
 const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past this instead of fetching
 const FRAME_MS = 500;               // ms per frame at 1x (model hours, satellite, LibreWXR radar)
-const MRMS_LOOP_MS = 6000;          // 2 hours of MRMS scans at 1x, whatever the step
-const MRMS_LOOP_S = 7200;           // ...the radar time those 6 seconds cover (the nowcast hour adds 3 s)
+const MRMS_LOOP_MS = 9000;          // 2 hours of MRMS at 1x, whatever the step (a 6-minute frame per 0.45 s)
+const MRMS_LOOP_S = 7200;           // ...the radar time those 9 seconds cover (the nowcast hour adds 4.5 s)
+const NOW_HOLD_MS = 1500;           // pause on the newest scan before the nowcast
 const NOWCAST_S = 3600;             // GPU nowcast: extrapolated past the newest scan
-// Raster tiles on phones and low-memory devices step 4 minutes (30 frames): each resident frame
-// holds its visible tiles as GPU textures, so this halves them
+// Phones and low-memory devices: coarser GPU textures (MRMS frames are 6 minutes apart everywhere)
 const THIN_RADAR = screen.width <= 860 || (navigator.deviceMemory || 8) <= 4;
 // GPU texture budget for a loop's crops: a phone draws coarser texels in less memory
 const GL_BUDGET = THIN_RADAR ? 24e6 : 96e6;
@@ -159,7 +159,7 @@ let currentFrame = 0;
 let playing = false;
 let playTimer = null;
 let glLayer = null;               // MRMS on the GPU (radar-gl.js)
-let glFailed = true;   // the GPU layer is off while its look is reworked: MRMS plays as raster tiles
+let glFailed = typeof WebGL2RenderingContext === 'undefined';   // then MRMS plays as raster tiles
 let clockT = null;                // GPU playback clock (epoch seconds)
 let playRaf = 0;
 // MRMS on the GPU: continuous time and the nowcast; everything else is raster frames
@@ -202,15 +202,14 @@ async function fetchFrames(which) {
     const mrms = data.radar?.source === 'mrms';
     let past = (data.radar?.past || []).map(f => ({ ...f, nowcast: false, mrms }));
     const backdrop = which === 'both' ? sat[sat.length - 1] || null : null;
+    // A scan every 6 minutes (plus the newest): each radar updates on its own 4-10 minute
+    // schedule, so 2-minute scans flicker in patches. Fixed times so a refresh swaps one frame.
+    if (mrms) past = past.filter((f, i) => f.time % STEP_S === 0 || i === past.length - 1);
     if (mrms && !glFailed && past.length) {
-        // GPU: every scan (texels are cheap), then the nowcast hour in 2-minute steps
+        // GPU: then the nowcast hour in 6-minute steps
         const last = past[past.length - 1].time;
-        for (let s = 120; s <= NOWCAST_S; s += 120) past.push({ time: last + s, nowcast: true, mrms, forecast: true });
-        return { frames: past, backdrop };
+        for (let s = STEP_S; s <= NOWCAST_S; s += STEP_S) past.push({ time: last + s, nowcast: true, mrms, forecast: true });
     }
-    // Thinned on fixed 4-minute times (plus the newest scan) so a refresh swaps one layer, not all
-    // radars in the mosaic update every 4-10 min on their own schedules: 6-minute frames are coherent snapshots
-    if (mrms) past = past.filter((f, i) => f.time % 360 === 0 || i === past.length - 1);
     return { frames: past, backdrop };
 }
 
@@ -412,15 +411,15 @@ function showFrame(index) {
 function updateFrameLabel() {
     const frame = frames[currentFrame];
     if (!frame) return;
-    const d = new Date((glMode() && clockT !== null ? clockT : frame.time) * 1000);
+    const shown = glMode() && clockT !== null ? shownTime(frames.filter(f => !f.forecast).map(f => f.time), clockT) : null;
+    const d = new Date((shown ?? frame.time) * 1000);
     // model frames span two days
     const label = clockAt(d, frame.field ? { weekday: 'short' } : {});
     if (els.frameTime.textContent !== label) els.frameTime.textContent = label;
 
     if (glMode()) {
-        // Past the newest scan: the extrapolated nowcast
-        const newest = frames.findLast(f => !f.forecast).time;
-        const ahead = Math.round((clockT - newest) / 60);
+        // Past the newest scan: the nowcast step on screen, minutes after the newest scan
+        const ahead = forecastMinutes(frameMix(frames.filter(f => !f.forecast).map(f => f.time), clockT).step);
         const badge = ahead > 0 ? `FORECAST +${ahead} min` : '';
         if (els.frameBadge.textContent !== badge) els.frameBadge.textContent = badge;
         els.frameBadge.classList.toggle('nowcast', ahead > 0);
@@ -444,19 +443,33 @@ function play() {
     els.playBtn.classList.add('playing');
     els.playBtn.setAttribute('aria-label', 'Pause animation');
     if (glMode()) {
-        // Continuous clock: MRMS_LOOP_S of radar per MRMS_LOOP_MS at 1x, a hold at the end, then around
-        let last = performance.now(), holdUntil = 0;
+        // Continuous clock: MRMS_LOOP_S of radar per MRMS_LOOP_MS at 1x, a hold on the newest
+        // scan before the nowcast, a hold at the end, then around
+        let last = performance.now(), holdUntil = 0, wrap = false;
         const tick = now => {
             if (!playing || !glMode()) return;
             const dt = Math.min(now - last, 100);   // a stalled tab resumes, it doesn't jump
             last = now;
             const times = frameTimes(), end = times[times.length - 1];
+            const newest = frames.findLast(f => !f.forecast).time;
             if (holdUntil) {
-                if (now >= holdUntil) { holdUntil = 0; showTime(times[0]); }
+                if (now >= holdUntil) {
+                    holdUntil = 0;
+                    if (wrap) showTime(times[0]);
+                    else showTime(clockT + 1e-3);   // on into the nowcast
+                }
             } else if (clockT >= end) {
                 holdUntil = now + LAST_FRAME_HOLD_MS;
+                wrap = true;
             } else {
-                showTime(clockT + dt * MRMS_LOOP_S / MRMS_LOOP_MS * SPEEDS[speedIdx].mult);
+                const next = clockT + dt * MRMS_LOOP_S / MRMS_LOOP_MS * SPEEDS[speedIdx].mult;
+                if (clockT < newest && next >= newest) {
+                    showTime(newest);
+                    holdUntil = now + NOW_HOLD_MS;
+                    wrap = false;
+                } else {
+                    showTime(next);
+                }
             }
             playRaf = requestAnimationFrame(tick);
         };
