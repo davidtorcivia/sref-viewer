@@ -1,6 +1,7 @@
 /**
- * Admin-configured site settings (description, favicon, analytics, custom
- * CSS), applied to whichever page imports this. Resolves to the settings,
+ * Admin-configured site settings (favicon, analytics, custom CSS), applied
+ * to whichever page imports this (each page carries its own description, for
+ * search and link previews). Resolves to the settings,
  * or {} when unavailable.
  */
 export async function applySiteSettings() {
@@ -13,9 +14,6 @@ export async function applySiteSettings() {
         return {};
     }
 
-    if (s.siteDescription) {
-        document.querySelector('meta[name="description"]')?.setAttribute('content', s.siteDescription);
-    }
     if (s.favicon) {
         document.querySelectorAll('link[rel="icon"]').forEach(el => el.remove());
         document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'icon', href: s.favicon }));

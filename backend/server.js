@@ -250,7 +250,6 @@ if (!ADMIN_ENABLED) console.warn('[ADMIN] Disabled: set ADMIN_PASSWORD (not "cha
 
 const DEFAULT_SETTINGS = {
     siteName: 'WX-Plumes',
-    siteDescription: 'SREF ensemble plume diagrams for weather forecasting',
     favicon: '',
     defaultStations: ['JFK', 'LGA', 'EWR'],
     analyticsScript: '',
@@ -412,7 +411,6 @@ app.get('/api/settings', (req, res) => {
     const s = loadSettings();
     res.json({
         siteName: s.siteName,
-        siteDescription: s.siteDescription,
         favicon: s.favicon,
         defaultStations: s.defaultStations,
         analyticsScript: s.analyticsEnabled ? s.analyticsScript : '',

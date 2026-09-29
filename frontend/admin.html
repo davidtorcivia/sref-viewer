@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin - WX-Plumes</title>
+    <meta name="robots" content="noindex, nofollow">
     <link rel="stylesheet" href="/css/styles.css">
     <style>
         .admin-container {
@@ -253,12 +254,6 @@
                         <label for="siteName">Site Name</label>
                         <input type="text" id="siteName" name="siteName">
                     </div>
-
-                    <div class="form-group">
-                        <label for="siteDescription">Site Description</label>
-                        <textarea id="siteDescription" name="siteDescription"></textarea>
-                        <p class="help-text">Used for SEO meta description</p>
-                    </div>
                 </div>
 
                 <div class="section">
@@ -409,7 +404,6 @@
                     const settings = await res.json();
 
                     document.getElementById('siteName').value = settings.siteName || '';
-                    document.getElementById('siteDescription').value = settings.siteDescription || '';
                     document.getElementById('defaultStations').value = (settings.defaultStations || []).join(', ');
                     document.getElementById('analyticsEnabled').checked = settings.analyticsEnabled || false;
                     document.getElementById('analyticsScript').value = settings.analyticsScript || '';
@@ -430,7 +424,6 @@
 
             const settings = {
                 siteName: document.getElementById('siteName').value,
-                siteDescription: document.getElementById('siteDescription').value,
                 defaultStations: document.getElementById('defaultStations').value
                     .split(',')
                     .map(s => s.trim().toUpperCase())
