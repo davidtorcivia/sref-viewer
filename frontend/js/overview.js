@@ -523,8 +523,17 @@ async function renderPlace(place, quiet = false) {
 
 // The color field: the next 24 hours, smoothed over three hours so it reads as weather
 // rather than stripes, and softened toward the paper
+// Dark: each color set to a mid-dark lightness with its chroma held, not mixed toward black (a
+// dimmed yellow is olive: mud). Hue runs from deep green to amber on a steep S-curve, so the
+// olive between them is a narrow stretch rather than the whole field
 function fieldGradient(rows, temp) {
-    const soft = t => `color-mix(in oklch, ${rampColor(t)} 74%, var(--paper))`;
+    const dark = document.documentElement.dataset.theme === 'dark';
+    const soft = t => {
+        if (!dark) return `color-mix(in oklch, ${rampColor(t)} 74%, var(--paper))`;
+        const [, c, h] = rampColor(t).match(/[\d.]+/g).map(Number);
+        const u = Math.min(1, Math.max(0, (h - 70) / 80)), s5 = u * u * u * (u * (u * 6 - 15) + 10), k = s5 * s5 * (3 - 2 * s5);
+        return `oklch(0.45 ${Math.min(0.14, Math.max(0.09, c)).toFixed(3)} ${(h > 70 && h < 150 ? 70 + 80 * k : h).toFixed(1)})`;
+    };
     if (rows.length < 2) return temp != null ? soft(temp) : '';
     const n = rows.length - 1;
     const stops = [];
