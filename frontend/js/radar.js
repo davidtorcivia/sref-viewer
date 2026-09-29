@@ -2,15 +2,14 @@
  * Radar Map Page
  * MapLibre GL basemap (OpenFreeMap vector tiles) with animated radar
  * frames: NOAA MRMS reflectivity every 2 minutes for the last 2 hours
- * (LibreWXR's 10-minute frames while MRMS is unavailable). No nowcast.
+ * (LibreWXR's 10-minute frames while MRMS is unavailable).
  *
- * Frame index and tiles come from our backend (/api/radar/frames and
- * /api/radar/tile), which caches tiles and pre-warms the NYC viewport.
+ * MRMS draws on the GPU (radar-gl.js): a continuous clock, each pair of
+ * scans moved along the motion field and cross-faded, and a 60-minute
+ * nowcast past the newest scan. Without WebGL2 it falls back to raster tiles
+ * from our backend (/api/radar/tile), one discrete frame at a time, no nowcast.
  *
- * Playback is deliberately simple: one discrete frame at a time, no
- * crossfading or interpolation.
- *
- * Loading: MapLibre caps parallel image requests at 16, and adding all
+ * Tile loading: MapLibre caps parallel image requests at 16, and adding all
  * 60 frames at once would starve the visible frame behind invisible ones.
  * So the current frame is added first and the rest trickle in a few at a
  * time (nearest first); playback only steps over frames whose tiles have
@@ -52,6 +51,7 @@ if (EMBED) {
     });
 }
 import { applySiteSettings } from './site.js?v=__V__';
+import { MrmsLayer, indexAt, timeAt } from './radar-gl.js?v=__V__';
 
 // Tiles come through our backend (/api/radar/tile), which caches them and
 // pre-renders the NYC viewport for each new frame; style options live there.
@@ -59,7 +59,7 @@ const TILE_SIZE = 256;    // Backend requests 512px tiles; declaring 256 renders
 // Radar tiles are 512px declared as 512: an MRMS 1 km cell is ~4 px at the
 // default zoom, so 2x density adds nothing but 4x the tiles (and GPU textures) per frame
 const RADAR_TILE = 512;
-const RADAR_MAXZOOM = 9;  // ~7 px per MRMS cell; MapLibre overzooms past this
+const RADAR_MAXZOOM = 11; // ~29 px per MRMS cell, drawn smooth; MapLibre overzooms past this
 const RADAR_OPACITY = 0.75;
 const SAT_OPACITY = 0.8;
 // Radar colors changed with the backend TILE_STYLE: a new value keeps browsers
@@ -70,9 +70,14 @@ const FIELD_STYLE_V = '3';
 const SAT_MAXZOOM = 7;              // GMGSI is ~4-8km; MapLibre overzooms past this instead of fetching
 const FRAME_MS = 500;               // ms per frame at 1x (model hours, satellite, LibreWXR radar)
 const MRMS_LOOP_MS = 6000;          // 2 hours of MRMS scans at 1x, whatever the step
-// Phones and low-memory devices step 4 minutes (30 frames): each resident frame
+const MRMS_LOOP_S = 7200;           // ...the radar time those 6 seconds cover (the nowcast hour adds 3 s)
+const NOWCAST_S = 3600;             // GPU nowcast: extrapolated past the newest scan
+// Raster tiles on phones and low-memory devices step 4 minutes (30 frames): each resident frame
 // holds its visible tiles as GPU textures, so this halves them
 const THIN_RADAR = screen.width <= 860 || (navigator.deviceMemory || 8) <= 4;
+// GPU texture budget for a loop's crops: a phone draws coarser texels in less memory
+const GL_BUDGET = THIN_RADAR ? 24e6 : 96e6;
+const GL_TEXEL_PX = THIN_RADAR ? 1.5 : 1;
 const LAST_FRAME_HOLD_MS = 1500;    // Extra pause on the final frame
 const REFRESH_MS = 60 * 1000;       // Re-fetch frame index (a new scan every 2 minutes)
 const LOAD_PARALLEL = 4;            // Frames loading tiles at once (the backend pre-warms the NYC views)
@@ -153,6 +158,13 @@ let backdropId = null;    // latest satellite frame under the radar in 'both'
 let currentFrame = 0;
 let playing = false;
 let playTimer = null;
+let glLayer = null;               // MRMS on the GPU (radar-gl.js)
+let glFailed = typeof WebGL2RenderingContext === 'undefined';   // then MRMS plays as raster tiles
+let clockT = null;                // GPU playback clock (epoch seconds)
+let playRaf = 0;
+// MRMS on the GPU: continuous time and the nowcast; everything else is raster frames
+const glMode = () => !glFailed && frames[0]?.mrms === true;
+const frameTimes = () => frames.map(f => f.time);
 let loadedLayerIds = new Set();   // layers added to the map
 let readyIds = new Set();         // layers whose tiles have arrived
 let pending = [];                 // frames waiting for a load slot
@@ -189,9 +201,16 @@ async function fetchFrames(which) {
     if (which === 'satellite') return { frames: sat, backdrop: null };
     const mrms = data.radar?.source === 'mrms';
     let past = (data.radar?.past || []).map(f => ({ ...f, nowcast: false, mrms }));
+    const backdrop = which === 'both' ? sat[sat.length - 1] || null : null;
+    if (mrms && !glFailed && past.length) {
+        // GPU: every scan (texels are cheap), then the nowcast hour in 2-minute steps
+        const last = past[past.length - 1].time;
+        for (let s = 120; s <= NOWCAST_S; s += 120) past.push({ time: last + s, nowcast: true, mrms, forecast: true });
+        return { frames: past, backdrop };
+    }
     // Thinned on fixed 4-minute times (plus the newest scan) so a refresh swaps one layer, not all
     if (mrms && THIN_RADAR) past = past.filter((f, i) => f.time % 240 === 0 || i === past.length - 1);
-    return { frames: past, backdrop: which === 'both' ? sat[sat.length - 1] || null : null };
+    return { frames: past, backdrop };
 }
 
 // Extractor-rendered field frames: RRFS forecast hours, or RTMA analyses (observed) for 'now'
@@ -304,6 +323,19 @@ function pumpQueue() {
  * of the window, add the current frame now, queue the rest nearest-first.
  */
 function syncLayers() {
+    if (glMode()) {
+        for (const id of [...loadedLayerIds]) removeLayer(id);
+        pending = [];
+        glLayer ??= new MrmsLayer({
+            opacity: RADAR_OPACITY, budget: GL_BUDGET, texelPx: GL_TEXEL_PX,
+            url: (t, kind, query) => kind === 'palette' ? '/api/radar/mrms/palette.png' : `/api/radar/mrms/${t}/${kind}.png?${query}`,
+            onFail: glFallback,
+        });
+        if (!map.getLayer(glLayer.id)) map.addLayer(glLayer, ['numbers', 'alerts-fill'].find(id => map.getLayer(id)) ?? labelLayerId());
+        glLayer.setTimes(frames.filter(f => !f.forecast).map(f => f.time));
+        return;
+    }
+    if (glLayer && map.getLayer(glLayer.id)) map.removeLayer(glLayer.id);
     const wanted = new Set(frames.map(layerId));
     for (const id of [...loadedLayerIds]) if (!wanted.has(id)) removeLayer(id);
 
@@ -339,8 +371,33 @@ function isReady(index) {
     return false;
 }
 
+// No WebGL2 or the shader failed: MRMS as raster tiles from here on
+function glFallback() {
+    glFailed = true;
+    if (glLayer && map.getLayer(glLayer.id)) map.removeLayer(glLayer.id);
+    // Frames stay until the raster list replaces them: a play() already on its way still starts
+    const wasPlaying = playing;
+    pause();
+    refreshFrames({ initial: true }).then(() => wasPlaying && play());
+}
+
+// GPU playback: the clock at time T, the scrubber and labels following it
+function showTime(T) {
+    const times = frameTimes();
+    clockT = Math.max(times[0], Math.min(T, times[times.length - 1]));
+    const idx = indexAt(times, clockT);
+    currentFrame = Math.round(idx);
+    els.scrubber.value = String(idx);
+    glLayer.setClock(clockT);
+    updateFrameLabel();
+}
+
 function showFrame(index) {
     if (!frames.length) return;
+    if (glMode()) {
+        showTime(timeAt(frameTimes(), Math.max(0, Math.min(index, frames.length - 1))));
+        return;
+    }
     currentFrame = Math.max(0, Math.min(Math.round(index), frames.length - 1));
     // Scrubbing to a frame still in the queue: load it now
     const curId = layerId(frames[currentFrame]);
@@ -354,11 +411,19 @@ function showFrame(index) {
 function updateFrameLabel() {
     const frame = frames[currentFrame];
     if (!frame) return;
-    const d = new Date(frame.time * 1000);
+    const d = new Date((glMode() && clockT !== null ? clockT : frame.time) * 1000);
     // model frames span two days
-    els.frameTime.textContent = clockAt(d, frame.field ? { weekday: 'short' } : {});
+    const label = clockAt(d, frame.field ? { weekday: 'short' } : {});
+    if (els.frameTime.textContent !== label) els.frameTime.textContent = label;
 
-    if (frame.field) {
+    if (glMode()) {
+        // Past the newest scan: the extrapolated nowcast
+        const newest = frames.findLast(f => !f.forecast).time;
+        const ahead = Math.round((clockT - newest) / 60);
+        const badge = ahead > 0 ? `FORECAST +${ahead} min` : '';
+        if (els.frameBadge.textContent !== badge) els.frameBadge.textContent = badge;
+        els.frameBadge.classList.toggle('nowcast', ahead > 0);
+    } else if (frame.field) {
         // The RRFS cycle is in the header pill
         els.frameBadge.textContent = frame.src === 'rtma' ? 'OBSERVED' : `+${frame.fh}h`;
         els.frameBadge.classList.toggle('nowcast', frame.nowcast);
@@ -377,6 +442,27 @@ function play() {
     playing = true;
     els.playBtn.classList.add('playing');
     els.playBtn.setAttribute('aria-label', 'Pause animation');
+    if (glMode()) {
+        // Continuous clock: MRMS_LOOP_S of radar per MRMS_LOOP_MS at 1x, a hold at the end, then around
+        let last = performance.now(), holdUntil = 0;
+        const tick = now => {
+            if (!playing || !glMode()) return;
+            const dt = Math.min(now - last, 100);   // a stalled tab resumes, it doesn't jump
+            last = now;
+            const times = frameTimes(), end = times[times.length - 1];
+            if (holdUntil) {
+                if (now >= holdUntil) { holdUntil = 0; showTime(times[0]); }
+            } else if (clockT >= end) {
+                holdUntil = now + LAST_FRAME_HOLD_MS;
+            } else {
+                showTime(clockT + dt * MRMS_LOOP_S / MRMS_LOOP_MS * SPEEDS[speedIdx].mult);
+            }
+            playRaf = requestAnimationFrame(tick);
+        };
+        if (clockT === null || clockT >= frames[frames.length - 1].time) showTime(frames[0].time);
+        playRaf = requestAnimationFrame(tick);
+        return;
+    }
     const step = () => {
         if (!playing) return;
         // Advance to the next frame whose tiles have arrived; if none
@@ -398,6 +484,7 @@ function play() {
 function pause() {
     playing = false;
     clearTimeout(playTimer);
+    cancelAnimationFrame(playRaf);
     els.playBtn.classList.remove('playing');
     els.playBtn.setAttribute('aria-label', 'Play animation');
 }
@@ -487,10 +574,11 @@ function syncBackdrop(frame) {
     if (backdropId) { map.removeLayer(backdropId); map.removeSource(backdropId); }
     backdropId = id;
     if (!frame) return;
-    const firstRadar = map.getStyle().layers.find(l => loadedLayerIds.has(l.id));
+    const firstRadar = map.getStyle().layers.find(l => loadedLayerIds.has(l.id) || l.id === glLayer?.id);
     map.addSource(id, sourceFor(frame));
+    // Under the radar, which goes under the numbers: a backdrop placed first must too
     map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': SAT_OPACITY, 'raster-fade-duration': 0 } },
-        firstRadar?.id ?? (map.getLayer('alerts-fill') ? 'alerts-fill' : labelLayerId()));
+        firstRadar?.id ?? ['numbers', 'alerts-fill'].find(id => map.getLayer(id)) ?? labelLayerId());
 }
 
 function showRange() {
@@ -531,16 +619,22 @@ async function refreshFrames({ initial = false } = {}) {
         })();
 
         const prevTime = frames[currentFrame]?.time;
+        const wasGl = glMode();
+        const prevClock = wasGl ? clockT : null;
         frames = newFrames;
         // Observed MRMS radar has no precip type: the legend drops its Snow row
         els.legend.dataset.source = frames[0].mrms ? 'mrms' : '';
         els.scrubber.max = String(frames.length - 1);
+        els.scrubber.step = glMode() ? 'any' : '1';   // the GPU clock scrubs continuously
 
         // Pick the frame to show before syncing so it gets loaded first
         const keep = initial ? -1 : frames.findIndex(f => f.time >= (prevTime || 0));
         currentFrame = keep === -1 ? latestPastIdx : keep;
         syncLayers();
-        showFrame(currentFrame);
+        if (glMode() && prevClock !== null && !initial) showTime(prevClock);
+        else { clockT = null; showFrame(currentFrame); }
+        // MRMS came or went (outage, restart): the other player takes over
+        if (playing && wasGl !== glMode()) { pause(); play(); }
 
         const latest = frames[latestPastIdx];
         if (frames[0].src === 'rtma') {

@@ -24,6 +24,7 @@ const PRECACHE_URLS = [
     '/js/charts.js?v=__V__',
     '/js/config.js?v=__V__',
     '/js/radar.js?v=__V__',
+    '/js/radar-gl.js?v=__V__',
     '/js/overview.js?v=__V__',
     '/js/forecast.js?v=__V__',
     '/js/signal.js?v=__V__',

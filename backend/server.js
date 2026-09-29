@@ -768,7 +768,7 @@ const TILE_WARM = [
 // Newest frames warmed (~80 tiles each): the page opens on the newest and
 // loads outward from it; older MRMS frames render on demand in milliseconds
 const RADAR_WARM_FRAMES = 10;
-const MRMS_MAXZOOM = 9;             // extractor MRMS_MAXZOOM, radar.js RADAR_MAXZOOM
+const MRMS_MAXZOOM = 11;            // extractor MRMS_MAXZOOM, radar.js RADAR_MAXZOOM (tiles are drawn smooth)
 
 // fc: 'mrms' an MRMS scan, 'sat' a satellite frame, '' a LibreWXR radar frame.
 // MRMS and LibreWXR times collide (every 10-minute time is also a 2-minute one)
@@ -843,6 +843,49 @@ async function serveTile(req, res, sat) {
         res.status(502).end();
     }
 }
+
+// ============ MRMS for the WebGL radar (radar-gl.js): scan crops, motion, palette ============
+// The page draws MRMS itself: per scan a gray crop of raw values over its view
+// and the motion field over the same box; X-Crop gives the box the extractor
+// snapped to. Crops are immutable per scan and small at the zooms people use,
+// so the browser caches them and nothing is kept here.
+const COORD = /^-?\d{1,3}(\.\d{1,6})?$/;
+function mrmsCropQuery(q) {
+    if (!['w', 's', 'e', 'n'].every(k => typeof q[k] === 'string' && COORD.test(q[k]))) return null;
+    const [w, s, e, n] = ['w', 's', 'e', 'n'].map(k => Number(q[k]));
+    if (!(-180 <= w && w < e && e <= 180 && -90 <= s && s < n && n <= 90)) return null;
+    const step = q.step === undefined ? 1 : Number(q.step);
+    if (!Number.isInteger(step) || step < 1 || step > 64) return null;
+    if (q.mean !== undefined && q.mean !== '1') return null;
+    return `w=${w}&s=${s}&e=${e}&n=${n}&step=${step}${q.mean ? '&mean=1' : ''}`;
+}
+
+async function proxyMrms(res, path) {
+    try {
+        const up = await fetch(`${EXTRACTOR_URL}${path}`, { signal: AbortSignal.timeout(30000) });
+        // 404: the scan left the ring, or its motion is not computed yet (the page draws a plain cross-fade)
+        if (!up.ok) return res.status(up.status === 404 || up.status === 400 ? up.status : 502).end();
+        res.set('Content-Type', 'image/png');
+        if (up.headers.get('x-crop')) res.set('X-Crop', up.headers.get('x-crop'));
+        res.set('Cache-Control', 'public, max-age=3600');
+        res.send(Buffer.from(await up.arrayBuffer()));
+    } catch {
+        res.status(502).end();
+    }
+}
+
+app.get('/api/radar/mrms/palette.png', (req, res) => proxyMrms(res, '/mrms/palette.png'));
+app.get('/api/radar/mrms/:time/:kind.png', (req, res) => {
+    const { time, kind } = req.params;
+    const query = mrmsCropQuery(req.query);
+    if (!/^\d{10}$/.test(time) || !['crop', 'flow'].includes(kind) || !query || (kind === 'crop' && req.query.mean)) {
+        return res.status(400).end();
+    }
+    // A view change asks for every scan's crop and motion (~120 requests): the tile bucket covers it
+    // ponytail: shared with raster tiles; give crops their own bucket if quick pans start hitting 429
+    if (!takeToken(req.ip, tileBuckets, 1500, 60)) return res.status(429).end();
+    proxyMrms(res, `/mrms/${time}/${kind}.png?${query}`);
+});
 
 const lonToX = (lon, z) => Math.floor((lon + 180) / 360 * 2 ** z);
 function latToY(lat, z) {
@@ -1338,4 +1381,4 @@ if (require.main === module) {
     setInterval(sweep, 10 * MINUTE);
 }
 
-module.exports = { shapeRadarFrames, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };
+module.exports = { app, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };

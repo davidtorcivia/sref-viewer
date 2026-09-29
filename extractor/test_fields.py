@@ -268,15 +268,105 @@ png = X.mrms_tile(times[-1] + 120, z, tx, ty)
 idat = png[png.index(b'IDAT') + 4:]
 px = np.frombuffer(_z.decompress(idat[:X.struct.unpack('>I', png[png.index(b'IDAT') - 4:png.index(b'IDAT')])[0]]),
                    np.uint8).reshape(X.FIELD_TILE, X.FIELD_TILE + 1)[:, 1:]
+# Smooth now: the pixel over the point is at the 40 dBZ core (a pixel off center tapers a band), and the echo fades out inside its own cell
+assert px[int(fy * X.FIELD_TILE), int(fx * X.FIELD_TILE)] in (7, 8), px[int(fy * X.FIELD_TILE), int(fx * X.FIELD_TILE)]
 hit = np.argwhere(px != 255)
-# One 0.01° cell is ~7x10 px here: the pixel over the point is in it, and nothing farther out
-assert px[int(fy * X.FIELD_TILE), int(fx * X.FIELD_TILE)] != 255
-assert 40 <= len(hit) <= 110 and np.ptp(hit[:, 0]) <= 11 and np.ptp(hit[:, 1]) <= 8, (len(hit), np.ptp(hit, 0))
-assert (px[px != 255] == 8).all(), 'a 40 dBZ echo is the 40-45 band'
+assert 10 <= len(hit) <= 110 and np.ptp(hit[:, 0]) <= 11 and np.ptp(hit[:, 1]) <= 8, (len(hit), np.ptp(hit, 0))
+assert set(px[px != 255].tolist()) <= set(range(2, 9)), 'bands from 10 dBZ up to the 40 dBZ core'
+# Bilinear in dBZ: a ramp across two cell centers samples exactly between them;
+# no echo tapers as -32 dBZ, no coverage is left out of the weights
+blk = np.array([[X.mrms_quantize(np.array([20.0]))[0], X.mrms_quantize(np.array([30.0]))[0], 255, 0]], np.uint8)
+blk = np.hstack([blk, np.zeros((1, X.MRMS_NX - 4), np.uint8)])
+band = lambda c: int(X.mrms_bilinear(blk, np.array([0.0]), np.array([c]))[0, 0])
+assert band(0.0) == 4 and band(0.49) == 4 and band(0.51) == 5 and band(1.0) == 6, [band(c) for c in (0, .49, .51, 1)]
+assert band(1.4) == 6 and band(2.0) == 255 and band(2.9) == 255, 'no coverage never paints; 30 dBZ stays 30 beside it'
+assert band(3.0) == 255
 try:
     X.mrms_tile(1, z, tx, ty)
     raise AssertionError('a scan outside the ring should not render')
 except X.NotPublished:
     pass
+
+# Crop box: snapped outward to whole flow texels, clamped to the grid, the step
+# raised until both sides fit 2048; the header bounds are the pixel grid's edges
+r0, r1, c0, c1, st = X.mrms_crop_box(-74.5, 40.3, -73.5, 41.1)
+assert st == 1 and (r0, r1, c0, c1) == (1384, 1472, 5544, 5656), (r0, r1, c0, c1)
+assert X.mrms_crop_bounds(r0, r1, c0, c1, st) == '-74.56,40.28,-73.44,41.16,1'
+assert X.mrms_crop_box(-140, 10, -50, 60) == (0, 3520, 0, 7008, 4)        # all of CONUS: step 4, 1752 x 880
+r0, r1, c0, c1, st = X.mrms_crop_box(-100, 30, -90, 40, 3)
+assert st == 3 and all(v % 24 == 0 for v in (r0, r1, c0, c1)) and max(r1 - r0, c1 - c0) // st <= X.MRMS_CROP_MAX
+assert X.mrms_crop_box(-20, 10, -10, 20) is None and X.mrms_crop_box(-74, 41, -73, 41) is None
+assert X.mrms_crop_query({'w': ['-75'], 's': ['40'], 'e': ['-73'], 'n': ['41']}) == (-75, 40, -73, 41, 1)
+assert all(X.mrms_crop_query(q) is None for q in ({'w': ['-73'], 's': ['40'], 'e': ['-75'], 'n': ['41']},
+           {'w': ['x'], 's': ['40'], 'e': ['-73'], 'n': ['41']}, {'w': ['-75'], 's': ['40'], 'e': ['-73']},
+           {'w': ['-75'], 's': ['40'], 'e': ['-73'], 'n': ['41'], 'step': ['0']}))
+# Crop pixels: the Manhattan cell at its row/column, a cell every step
+t = times[-1] + 120
+cells = X.mrms_crop_box(-74.5, 40.3, -73.5, 41.1)
+cp = X.mrms_crop(t, *cells)
+cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] - cells[0], -1)[:, 1:]
+assert cp[25] == 0 and cpx.shape == (88, 112) and np.argwhere(cpx).tolist() == [[ro[0] - cells[0], co[0] - cells[2]]]
+# Motion: a blob shifted 5 quarter-res px east and 3 south over the 10-minute span is
+# (5, 3) * 4 cells / 5 two-minute steps = (4, 2.4) cells per 2 minutes -> flow units x8
+yy, xx = np.mgrid[:X.MRMS_FLOW_NY * 2, :X.MRMS_NX // 4]
+blob = lambda cy, cx: (200 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 12.0 ** 2))).astype(np.uint8)
+mot = X.mrms_motion(blob(400, 800), blob(403, 805))
+assert mot.shape == (X.MRMS_FLOW_NY, X.MRMS_FLOW_NX, 2) and mot.dtype == np.int8
+vx, vy = mot[201, 401].astype(float) / X.MRMS_FLOW_SCALE
+assert abs(vx - 4) < 0.6 and abs(vy - 2.4) < 0.6, (vx, vy)
+assert abs(mot[20, 20]).max() == 0, 'no motion far from any echo'
+# Stored per scan, served as bytes + 128 over the same box at 1/8 of the crop's pixels
+X.mrms_store(t - X.MRMS_FLOW_SPAN, g, blob(400, 800))
+X.mrms_store(t, g, blob(403, 805))
+assert X.mrms_flow_field(t) is not None and X.mrms_flow_field(t - X.MRMS_FLOW_SPAN) is None
+assert X.mrms_flow_crop(t - X.MRMS_FLOW_SPAN, *X.mrms_crop_box(-75, 40, -73, 41), False) == X.mrms_flow_crop(t, *X.mrms_crop_box(-75, 40, -73, 41), False), 'a scan without a partner borrows the nearest motion'
+cells = X.mrms_crop_box(-130, 20, -60, 55, 1)
+fp = X.mrms_flow_crop(t, *cells, False)
+assert fp[25] == 2
+frgb = np.frombuffer(_z.decompress(fp[fp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] // 8 // cells[4], -1)[:, 1:].reshape(cells[1] // 8 // cells[4], -1, 3)
+assert frgb.shape[1] * 8 * cells[4] == cells[3] - cells[2]
+fy_, fx_ = 201 // cells[4], 401 // cells[4]
+assert abs((int(frgb[fy_, fx_, 0]) - 128) / 8 - 4) < 0.7 and abs((int(frgb[fy_, fx_, 1]) - 128) / 8 - 2.4) < 0.7, frgb[fy_, fx_]
+assert (X.mrms_flow_array(X.mrms_mean_flow(t)) == X.mrms_flow_array(X.mrms_flow_field(t))).all()
+# Data age: a repeated scan is a step older where nothing changed; new data resets it
+for d in (X._mrms, X._mrms_small, X._mrms_flow, X._mrms_age):
+    d.clear()
+u = 5000 * X.MRMS_STEP
+X.mrms_store(u, g, blob(400, 800))
+X.mrms_store(u + 120, g, blob(400, 800))
+X.mrms_store(u + 240, g, blob(403, 805))
+assert (X.mrms_age(u) == 0).all() and (X.mrms_age(u + 120) == 12).all()
+age = X.mrms_age(u + 240)
+assert age[201, 401] == 0 and age[20, 20] == 24, (age[201, 401], age[20, 20])
+# ...capped: unchanged past 6 minutes is steady data, not stale
+X.mrms_store(u + 360, g, blob(403, 805))
+X.mrms_store(u + 480, g, blob(403, 805))
+assert X.mrms_age(u + 480)[20, 20] == X.MRMS_AGE_MAX and X.mrms_age(u + 480)[201, 401] == 24
+# ...served in the flow texture's blue channel, where there is echo to see change in
+# (and around it); none far from any echo
+X.mrms_store(u + 480 - X.MRMS_FLOW_SPAN, g, blob(400, 800))
+cells = X.mrms_crop_box(-130, 20, -60, 55, 1)
+fp = X.mrms_flow_crop(u + 480, *cells, False)
+frgb = np.frombuffer(_z.decompress(fp[fp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] // 8 // cells[4], -1)[:, 1:].reshape(cells[1] // 8 // cells[4], -1, 3)
+assert frgb[201 // cells[4], 401 // cells[4], 2] == 24 and frgb[5, 5, 2] == 0
+# A skipped scan (long overdue) restarts ages at zero after it instead of leaving
+# every later scan unknown: 12 scans, the data changes at 3 and 7, scan 5 missing
+for d in (X._mrms, X._mrms_small, X._mrms_flow, X._mrms_age):
+    d.clear()
+T0 = 1790640000                             # far in the past: the poller has given up on the gap
+q0 = np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8)
+q0[1000:1400, 3000:3400] = 150
+q1, q2 = q0.copy(), q0.copy()
+q1[1000:1400, 3000:3400] = 170
+q2[1000:1400, 3000:3400] = 190
+seq = [q0, q0, q0, q1, q1, None, q1, q2, q2, q2, q2, q2]
+for i, q in enumerate(seq):
+    if q is not None:
+        X.mrms_store(T0 + 120 * i, q, X.mrms_small(q))
+ages = [None if q is None else int(X.mrms_age(T0 + 120 * i)[1200 // 8, 3200 // 8]) * X.MRMS_AGE_UNIT for i, q in enumerate(seq)]
+assert ages == [0, 120, 240, 0, 120, None, 0, 0, 120, 240, 360, 360], ages
+assert T0 + 120 * 11 in X._mrms_age, 'ages past the gap are kept'
+# Palette texture: q -> the tile colors, clear for no echo / no coverage / under 10 dBZ
+assert X.MRMS_PALETTE_PNG[25] == 6
 
 print(f'fields: ok (grid round trip within {err:.4f} cells)')

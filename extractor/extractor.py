@@ -22,6 +22,9 @@ two public products in the noaa-rrfs-ops-pds bucket:
     GET /health
     GET /mrms                        -> {"frames": [scan epochs]}, MRMS radar in RAM
     GET /mrms/<epoch>/<z>/<x>/<y>.png
+    GET /mrms/<epoch>/crop.png?w=&s=&e=&n=[&step=]   -> raw scan crop (gray), X-Crop: bounds,step
+    GET /mrms/<epoch>/flow.png?w=&s=&e=&n=[&step=][&mean=1]   -> motion (RGB), same bounds
+    GET /mrms/palette.png
 
 Response:
 {
@@ -68,8 +71,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import cv2
 import eccodes as ec
 import numpy as np
+
+cv2.setNumThreads(1)                        # radar motion runs beside request threads; one core is ~0.3s a scan
 
 PORT = int(os.environ.get('PORT', '3002'))
 TAR_URL = os.environ.get(
@@ -853,17 +859,29 @@ def composite(top, base):
     return np.where(opaque[tpx], tpx, np.where(bpx == 255, 255, bpx + len(tpal))).astype(np.uint8), np.vstack([tpal, bpal])
 
 
+def png_chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+
 def indexed_png(pixels, palette):
     """8-bit palette PNG from RGBA palette rows; index 255 is transparent."""
-    def chunk(kind, data):
-        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
     h, w = pixels.shape
     raw = np.hstack([np.zeros((h, 1), np.uint8), pixels]).tobytes()   # filter byte 0 per row
     plte = np.zeros((256, 4), np.uint8)
     plte[:len(palette)] = palette
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 3, 0, 0, 0))
-            + chunk(b'PLTE', plte[:, :3].tobytes()) + chunk(b'tRNS', plte[:, 3].tobytes())
-            + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+    return (b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 3, 0, 0, 0))
+            + png_chunk(b'PLTE', plte[:, :3].tobytes()) + png_chunk(b'tRNS', plte[:, 3].tobytes())
+            + png_chunk(b'IDAT', zlib.compress(raw, 9)) + png_chunk(b'IEND', b''))
+
+
+def raw_png(pixels, level=6):
+    """Gray (h, w), RGB (h, w, 3) or RGBA (h, w, 4) uint8 PNG with no color
+    chunks, so a page can upload the bytes as texture data unchanged."""
+    h, w = pixels.shape[:2]
+    kind = {1: 0, 3: 2, 4: 6}[pixels.shape[2] if pixels.ndim == 3 else 1]
+    raw = np.hstack([np.zeros((h, 1), np.uint8), pixels.reshape(h, -1)]).tobytes()
+    return (b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, kind, 0, 0, 0))
+            + png_chunk(b'IDAT', zlib.compress(raw, level)) + png_chunk(b'IEND', b''))
 
 
 def newest_published(key, candidates, ttl):
@@ -1575,7 +1593,26 @@ MRMS_GRACE = 2                              # older scans kept for pages whose l
 MRMS_NY, MRMS_NX = 3500, 7000               # 0.01° cells, centers 54.995N..20.005N, 129.995W..60.005W
 MRMS_NORTH, MRMS_WEST, MRMS_RES = 55.0, -130.0, 0.01   # outer cell edges
 MRMS_STRIP = 50                             # rows per compressed strip
-MRMS_MAXZOOM = 9                            # ~7 px per cell at 512px tiles; the page overzooms past it
+MRMS_MAXZOOM = 11                           # ~29 px per cell at 512px tiles, drawn smooth; the page overzooms past it
+MRMS_CROP_MAX = 2048                        # crop texture side cap (pixels)
+# Motion: Farneback between each scan and the one MRMS_FLOW_SPAN before it (2-minute
+# pairs move under a pixel), on quarter-res images, kept at 1/MRMS_FLOW_RES res.
+# Flow units (radar-gl.js reads the same): int8 v, v / MRMS_FLOW_SCALE
+# = 0.01° grid cells moved per 2 minutes, x toward east, y toward south; served
+# as bytes v + 128 (R = x, G = y). Forward motion: a scan's echo at p came from p - v.
+# B = data age in MRMS_AGE_UNIT seconds: each radar updates every 4-10 minutes, so
+# the mosaic repeats unchanged data for some 2-minute scans; the page moves each
+# scan's echo from its data's time (scan time - age), not the scan time, so a
+# repeated scan lines up with the one before it instead of ghosting.
+MRMS_FLOW_SPAN = 600
+MRMS_FLOW_RES = 8
+MRMS_FLOW_SCALE = 8
+MRMS_FLOW_MEAN = 1800                       # nowcast motion: mean of the fields over the last 30 minutes
+MRMS_FLOW_NY, MRMS_FLOW_NX = 438, 875       # rows padded 3500 -> 3504 so 1/8 cells line up exactly
+MRMS_AGE_UNIT = 10
+MRMS_AGE_MAX = 36                           # 6 minutes: a radar in precipitation mode updates at least this often,
+                                            # so data unchanged for longer is steady, not stale
+MRMS_CHANGED = 2                            # mean |flow image change| per 1/8 cell (0.5 dBZ) that is new data
 MRMS_KEY_RE = re.compile(r'MRMS_SeamlessHSR_00\.00_(\d{8}-\d{6})\.grib2\.gz')
 # The TWC rain table the model radar and the legend use, per 5 dBZ from 0 (clear below 10)
 MRMS_PALETTE = np.array([(0, 0, 0, 0) if h is None else (int(h[:2], 16), int(h[2:4], 16), int(h[4:], 16), 255)
@@ -1583,7 +1620,18 @@ MRMS_PALETTE = np.array([(0, 0, 0, 0) if h is None else (int(h[:2], 16), int(h[2
 MRMS_LUT = np.clip(np.floor((np.arange(256) / 2 - 32) / 5), 0, len(RAIN_HEX) - 1).astype(np.uint8)
 MRMS_LUT[MRMS_PALETTE[MRMS_LUT, 3] == 0] = 255   # clear bands use the transparent index
 MRMS_LUT[[0, 255]] = 255
+MRMS_BAND = np.where(MRMS_PALETTE[:, 3] > 0, np.arange(len(RAIN_HEX)), 255).astype(np.uint8)   # 5 dBZ band -> index
+# Texture palette for the page's WebGL radar, indexed by q (0.5 dBZ steps)
+MRMS_PALETTE_PNG = raw_png(np.where((MRMS_LUT == 255)[:, None], 0, MRMS_PALETTE[np.minimum(MRMS_LUT, len(RAIN_HEX) - 1)])
+                           .astype(np.uint8)[None])
+# Flow image: dBZ 5..64 as 20..256, weak echo and no coverage as nothing to track
+_d = np.arange(256) / 2 - 32
+MRMS_FLOW_LUT = np.where((_d >= 5) & (np.arange(256) < 255), np.clip(_d, 0, 63.75) * 4, 0).astype(np.uint8)
 _mrms = {}                                  # scan epoch -> [zlib strip]
+_mrms_small = {}                            # scan epoch -> zlib quarter-res flow image
+_mrms_flow = {}                             # scan epoch -> zlib int8 motion field (MRMS_FLOW_NY, MRMS_FLOW_NX, 2)
+_mrms_age = {}                              # scan epoch -> zlib uint8 (MRMS_FLOW_NY, MRMS_FLOW_NX) data age
+_mrms_flow_lock = threading.RLock()         # one Farneback at a time (ages are computed under it too)
 _mrms_lock = threading.Lock()
 _mrms_decode_lock = threading.Lock()        # one ~200MB float64 decode at a time
 
@@ -1617,12 +1665,139 @@ def mrms_times():
         return sorted(_mrms)
 
 
-def mrms_store(t, q):
+def mrms_small(q):
+    """Quarter-res uint8 image of a scan for motion tracking (rows padded to 3504)."""
+    img = np.zeros((MRMS_FLOW_NY * MRMS_FLOW_RES, MRMS_NX), np.uint8)
+    img[:MRMS_NY] = MRMS_FLOW_LUT[q]
+    return cv2.resize(img, (MRMS_NX // 4, MRMS_FLOW_NY * 2), interpolation=cv2.INTER_AREA)
+
+
+def mrms_store(t, q, small=None):
     strips = [zlib.compress(q[r:r + MRMS_STRIP].tobytes(), 6) for r in range(0, MRMS_NY, MRMS_STRIP)]
     with _mrms_lock:
         _mrms[t] = strips
+        if small is not None:
+            _mrms_small[t] = zlib.compress(small.tobytes(), 6)
         for old in sorted(_mrms)[:-(MRMS_FRAMES + MRMS_GRACE)]:
             del _mrms[old]
+        for d in (_mrms_small, _mrms_flow, _mrms_age):
+            for old in [k for k in d if k not in _mrms]:
+                del d[old]
+
+
+def mrms_small_image(z):
+    return np.frombuffer(zlib.decompress(z), np.uint8).reshape(MRMS_FLOW_NY * 2, MRMS_NX // 4)
+
+
+def mrms_age_step(prev_age, a, b):
+    """Data age after scan b (a: the scan before): zero where the 1/8 cell changed, else one step older."""
+    diff = cv2.resize(cv2.absdiff(a, b), (MRMS_FLOW_NX, MRMS_FLOW_NY), interpolation=cv2.INTER_AREA)
+    older = np.minimum(prev_age.astype(np.int16) + MRMS_STEP // MRMS_AGE_UNIT, MRMS_AGE_MAX).astype(np.uint8)
+    return np.where(diff >= MRMS_CHANGED, 0, older).astype(np.uint8)
+
+
+def mrms_age(t):
+    """uint8 (MRMS_FLOW_NY, MRMS_FLOW_NX) age of scan t's data in MRMS_AGE_UNIT s. Walks
+    forward from the last scan with a known age; unknown (the ring start, or past a
+    scan the poller has given up on) is 0."""
+    with _mrms_lock:
+        done = _mrms_age.get(t)
+    if done is not None:                    # no waiting on a Farneback in progress
+        return np.frombuffer(zlib.decompress(done), np.uint8).reshape(MRMS_FLOW_NY, MRMS_FLOW_NX)
+    with _mrms_flow_lock:
+        with _mrms_lock:
+            chain = [t]
+            while chain[-1] not in _mrms_age and chain[-1] - MRMS_STEP in _mrms_small:
+                chain.append(chain[-1] - MRMS_STEP)
+            base, oldest = _mrms_age.get(chain[-1]), min(_mrms) if _mrms else t
+        age = None
+        if base is not None:
+            age = np.frombuffer(zlib.decompress(base), np.uint8).reshape(MRMS_FLOW_NY, MRMS_FLOW_NX)
+            if chain.pop() == t:
+                return age
+        for s in reversed(chain):
+            with _mrms_lock:
+                a, b = _mrms_small.get(s - MRMS_STEP), _mrms_small.get(s)
+            if age is not None and a is not None and b is not None:
+                age = mrms_age_step(age, mrms_small_image(a), mrms_small_image(b))
+            elif s - MRMS_STEP >= oldest and not mrms_gap(s - MRMS_STEP, time.time()):
+                age = None                  # a gap mid-ring may still fill (backfill lands newest first)
+                continue
+            else:
+                age = np.zeros((MRMS_FLOW_NY, MRMS_FLOW_NX), np.uint8)
+            with _mrms_lock:
+                if s in _mrms:
+                    _mrms_age[s] = zlib.compress(age.tobytes(), 6)
+        return age if age is not None else np.zeros((MRMS_FLOW_NY, MRMS_FLOW_NX), np.uint8)
+
+
+def mrms_age_view(age, b):
+    """Age as served: change is only seen where there is echo, so blocks
+    without echo take the age of the echo around them (radar update timing is
+    regional), and none far from any echo."""
+    echo = cv2.resize((b > 0).astype(np.float32), (MRMS_FLOW_NX, MRMS_FLOW_NY), interpolation=cv2.INTER_AREA) > 0
+    w = echo.astype(np.float32)
+    k = cv2.GaussianBlur(w, (0, 0), 4)
+    near = cv2.GaussianBlur(age * w, (0, 0), 4) / np.maximum(k, 1e-6)
+    return np.where(echo, age, np.where(k > 0.02, np.rint(near), 0)).astype(np.uint8)
+
+
+def mrms_motion(a, b, span=None):
+    """Motion from quarter-res image a to b (MRMS_FLOW_SPAN later): int8
+    (h/2, w/2, 2) in flow units. span: seconds between the two images' data
+    per 1/8 cell, when not MRMS_FLOW_SPAN. Farneback is noise where there is no echo, so
+    the field is a normalized convolution weighted by echo: smooth inside
+    storms and carried into the gaps around them, so an echo can move into
+    empty cells; zero far from any echo."""
+    fl = cv2.calcOpticalFlowFarneback(a, b, None, 0.5, 4, 15, 3, 5, 1.2, 0)   # quarter px per span
+    size = (a.shape[1] // 2, a.shape[0] // 2)
+    fl = cv2.resize(fl, size, interpolation=cv2.INTER_AREA)
+    wt = cv2.resize(((a > 0) | (b > 0)).astype(np.float32), size, interpolation=cv2.INTER_AREA)
+    if span is not None:
+        fl *= (MRMS_FLOW_SPAN / span)[..., None]
+
+    def smooth(sigma):
+        k = cv2.GaussianBlur(wt, (0, 0), sigma)
+        return cv2.GaussianBlur(fl * wt[..., None], (0, 0), sigma) / np.maximum(k, 1e-6)[..., None], k
+    fine, kf = smooth(3)                    # ~25 km
+    coarse, kc = smooth(20)                 # ~160 km: the flow a storm carries into clear air
+    near = np.clip(kf / 0.1, 0, 1)[..., None]
+    v = fine * near + coarse * np.clip(kc / 0.02, 0, 1)[..., None] * (1 - near)
+    # quarter px per span -> cells per 2 minutes -> flow units
+    return np.clip(np.rint(v * 4 * MRMS_STEP / MRMS_FLOW_SPAN * MRMS_FLOW_SCALE), -127, 127).astype(np.int8)
+
+
+def mrms_flow_field(t):
+    """Motion field of scan t (zlib int8); None while the scan MRMS_FLOW_SPAN before it is missing."""
+    with _mrms_lock:
+        done, a, b = _mrms_flow.get(t), _mrms_small.get(t - MRMS_FLOW_SPAN), _mrms_small.get(t)
+    if done is not None or a is None or b is None:
+        return done
+    with _mrms_flow_lock:
+        if t in _mrms_flow:
+            return _mrms_flow[t]
+        t0 = time.time()
+        # the images' data are MRMS_FLOW_SPAN apart less what each had aged
+        span = MRMS_FLOW_SPAN + MRMS_AGE_UNIT * (mrms_age(t - MRMS_FLOW_SPAN).astype(np.float32) - mrms_age(t))
+        field = zlib.compress(mrms_motion(mrms_small_image(a), mrms_small_image(b), np.maximum(span, 240)).tobytes(), 6)
+        with _mrms_lock:
+            if t in _mrms:
+                _mrms_flow[t] = field
+        print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} flow {time.time() - t0:.2f}s {len(field) // 1024}KB', flush=True)
+        return field
+
+
+def mrms_flow_array(field):
+    return np.frombuffer(zlib.decompress(field), np.int8).reshape(MRMS_FLOW_NY, MRMS_FLOW_NX, 2)
+
+
+@functools.lru_cache(maxsize=4)
+def mrms_mean_flow(t):
+    """Nowcast motion at scan t: the mean field over the last MRMS_FLOW_MEAN seconds."""
+    fields = [f for s in mrms_times() if t - MRMS_FLOW_MEAN < s <= t and (f := mrms_flow_field(s)) is not None]
+    if not fields:
+        raise NotPublished
+    return zlib.compress(np.rint(np.mean([mrms_flow_array(f) for f in fields], 0, dtype=np.float32)).astype(np.int8).tobytes(), 6)
 
 
 def mrms_fetch(t):
@@ -1648,7 +1823,7 @@ def mrms_fetch(t):
         finally:
             ec.codes_release(g)
     t2 = time.time()
-    mrms_store(t, q)
+    mrms_store(t, q, mrms_small(q))
     print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} +{t2 - t:.0f}s: fetch {t1 - t0:.2f}s '
           f'decode {t2 - t1:.2f}s pack {time.time() - t2:.2f}s', flush=True)
     return True
@@ -1685,6 +1860,11 @@ def mrms_backfill_safe():
     except Exception as err:  # noqa: BLE001 - keep polling through S3 trouble
         print(f'[MRMS] backfill: {err}', flush=True)
     times = mrms_times()
+    try:
+        for t in times:                     # backfill lands newest first: pairs complete at the end
+            mrms_flow_field(t)
+    except Exception as err:  # noqa: BLE001
+        print(f'[MRMS] flow: {err}', flush=True)
     return times[-1] if times else None
 
 
@@ -1707,6 +1887,10 @@ def mrms_poller():
             print(f'[MRMS] {mrms_key(want)}: {err}', flush=True)
             ok = False
         if ok:
+            try:
+                mrms_flow_field(want)
+            except Exception as err:  # noqa: BLE001 - the page falls back to a plain cross-fade
+                print(f'[MRMS] flow {want}: {err}', flush=True)
             want += MRMS_STEP
         elif mrms_gap(want, time.time()):
             print(f'[MRMS] {mrms_key(want)}: missing, skipping', flush=True)
@@ -1715,25 +1899,133 @@ def mrms_poller():
             time.sleep(10)
 
 
+def mrms_rows(strips, r0, r1):
+    """Grid rows r0..r1 (inclusive) inflated from their strips; also the first row's offset."""
+    s0, s1 = r0 // MRMS_STRIP, r1 // MRMS_STRIP
+    return np.frombuffer(b''.join(zlib.decompress(strips[k]) for k in range(s0, s1 + 1)),
+                         np.uint8).reshape(-1, MRMS_NX), s0 * MRMS_STRIP
+
+
+def mrms_bilinear(block, fr, fc):
+    """Reflectivity band per pixel at fractional cell-center coordinates (fr rows,
+    fc columns of block, 1-D each, in range): bilinear in dBZ, with no echo as
+    -32 dBZ so edges taper and no coverage left out of the weights (clear once
+    it outweighs coverage), then the 5 dBZ band's palette index."""
+    r = np.clip(np.floor(fr).astype(np.int64), 0, block.shape[0] - 1)
+    c = np.clip(np.floor(fc).astype(np.int64), 0, MRMS_NX - 1)
+    wr, wc = np.clip(fr - r, 0, 1).astype(np.float32), np.clip(fc - c, 0, 1).astype(np.float32)
+    r1, c1 = np.minimum(r + 1, block.shape[0] - 1), np.minimum(c + 1, MRMS_NX - 1)
+    num = np.zeros((len(fr), len(fc)), np.float32)
+    den = np.zeros_like(num)
+    for rr, fy in ((r, 1 - wr), (r1, wr)):
+        for cc, fx in ((c, 1 - wc), (c1, wc)):
+            q = block[np.ix_(rr, cc)]
+            w = np.outer(fy, fx) * (q != 255)
+            num += w * (q * np.float32(0.5) - 32)
+            den += w
+    # +1e-4: an exact band edge (30 dBZ) must not land a hair under it in float32
+    band = np.clip(np.floor(num / np.maximum(den, 1e-6) / 5 + 1e-4), 0, len(RAIN_HEX) - 1).astype(np.int64)
+    return np.where(den >= 0.5, MRMS_BAND[band], 255).astype(np.uint8)
+
+
 @functools.lru_cache(maxsize=2048)          # 1-20KB each
 def mrms_tile(t, z, x, y):
-    """Web-mercator tile of scan t, nearest grid cell per pixel. A scan that
-    left the ring still serves its cached tiles until they age out of the LRU."""
+    """Web-mercator tile of scan t, smooth: bilinear in dBZ between cell centers.
+    A scan that left the ring still serves its cached tiles until they age out of the LRU."""
     with _mrms_lock:
         strips = _mrms.get(t)
     if strips is None:
         raise NotPublished
     s = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
-    rows, cols = mrms_cells(np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + s) / 2 ** z)))),
-                            (x + s) / 2 ** z * 360 - 180)
-    ri, ci = np.flatnonzero((rows >= 0) & (rows < MRMS_NY)), np.flatnonzero((cols >= 0) & (cols < MRMS_NX))
+    fr = (MRMS_NORTH - np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + s) / 2 ** z))))) / MRMS_RES
+    fc = ((x + s) / 2 ** z * 360 - 180 - MRMS_WEST) / MRMS_RES
+    ri, ci = np.flatnonzero((fr >= 0) & (fr < MRMS_NY)), np.flatnonzero((fc >= 0) & (fc < MRMS_NX))
     px = np.full((FIELD_TILE, FIELD_TILE), 255, np.uint8)
     if len(ri) and len(ci):
-        s0, s1 = rows[ri].min() // MRMS_STRIP, rows[ri].max() // MRMS_STRIP
-        block = np.frombuffer(b''.join(zlib.decompress(strips[k]) for k in range(s0, s1 + 1)),
-                              np.uint8).reshape(-1, MRMS_NX)
-        px[np.ix_(ri, ci)] = MRMS_LUT[block[np.ix_(rows[ri] - s0 * MRMS_STRIP, cols[ci])]]
+        rc = fr[ri] - 0.5                   # cell centers sit at +0.5
+        block, base = mrms_rows(strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, MRMS_NY - 1))
+        px[np.ix_(ri, ci)] = mrms_bilinear(block, rc - base, fc[ci] - 0.5)
     return indexed_png(px, MRMS_PALETTE)
+
+
+def mrms_crop_box(w, s, e, n, step=1):
+    """Grid cell ranges (r0, r1, c0, c1) and step of a lat/lon box crop, or None
+    off the grid. Snapped outward to whole flow texels (MRMS_FLOW_RES * step
+    cells) so the flow crop of the same box lines up exactly, clamped to the
+    grid rounded out the same way (the page masks the no-coverage padding),
+    and the step raised until both sides fit MRMS_CROP_MAX pixels."""
+    step = max(1, int(step))
+    while True:
+        u = MRMS_FLOW_RES * step
+        out = lambda v, lo, hi: min(max(v, lo), hi) * u
+        r0 = out(math.floor((MRMS_NORTH - n) / MRMS_RES / u + 1e-6), 0, math.ceil(MRMS_NY / u))
+        r1 = out(math.ceil((MRMS_NORTH - s) / MRMS_RES / u - 1e-6), 0, math.ceil(MRMS_NY / u))
+        c0 = out(math.floor((w - MRMS_WEST) / MRMS_RES / u + 1e-6), 0, math.ceil(MRMS_NX / u))
+        c1 = out(math.ceil((e - MRMS_WEST) / MRMS_RES / u - 1e-6), 0, math.ceil(MRMS_NX / u))
+        if r1 <= r0 or c1 <= c0:
+            return None
+        if max(r1 - r0, c1 - c0) <= MRMS_CROP_MAX * step:
+            return r0, r1, c0, c1, step
+        step += 1
+
+
+def mrms_crop_bounds(r0, r1, c0, c1, step):
+    """X-Crop header: west,south,east,north (outer cell edges, degrees),step."""
+    return (f'{MRMS_WEST + c0 * MRMS_RES:.2f},{MRMS_NORTH - r1 * MRMS_RES:.2f},'
+            f'{MRMS_WEST + c1 * MRMS_RES:.2f},{MRMS_NORTH - r0 * MRMS_RES:.2f},{step}')
+
+
+def mrms_crop_query(q):
+    """(w, s, e, n, step) from a crop query, or None if invalid."""
+    try:
+        w, s, e, n = (float(q[k][0]) for k in ('w', 's', 'e', 'n'))
+        step = int(q.get('step', ['1'])[0])
+    except (KeyError, ValueError):
+        return None
+    if not (-180 <= w < e <= 180 and -90 <= s < n <= 90 and 1 <= step <= 64):
+        return None
+    return w, s, e, n, step
+
+
+@functools.lru_cache(maxsize=180)           # a view's loop; ~2-400KB each
+def mrms_crop(t, r0, r1, c0, c1, step):
+    """Gray PNG of raw scan values (q: 0 no echo, 255 no coverage), a cell every
+    step, rows north to south; padding past the grid is no coverage."""
+    with _mrms_lock:
+        strips = _mrms.get(t)
+    if strips is None:
+        raise NotPublished
+    rows, cols = np.arange(r0 + step // 2, r1, step), np.arange(c0 + step // 2, c1, step)
+    ri, ci = np.flatnonzero(rows < MRMS_NY), np.flatnonzero(cols < MRMS_NX)
+    px = np.full((len(rows), len(cols)), 255, np.uint8)
+    if len(ri) and len(ci):
+        block, base = mrms_rows(strips, rows[ri[0]], rows[ri[-1]])
+        px[np.ix_(ri, ci)] = block[np.ix_(rows[ri] - base, cols[ci])]
+    return raw_png(px)
+
+
+@functools.lru_cache(maxsize=180)
+def mrms_flow_crop(t, r0, r1, c0, c1, step, mean):
+    """RGB PNG of scan t's motion (mean: the nowcast's) over the crop box, one
+    texel per MRMS_FLOW_RES x MRMS_FLOW_RES crop pixels: R x, G y as flow units + 128,
+    B scan t's data age."""
+    if mean:
+        field = mrms_mean_flow(t)
+    else:
+        # The oldest scans have no partner 10 minutes back: the nearest scan's motion stands in
+        near = sorted((abs(s - t), s) for s in mrms_times() if abs(s - t) <= MRMS_FLOW_SPAN)
+        field = next((f for _, s in near if (f := mrms_flow_field(s)) is not None), None)
+    if field is None:
+        raise NotPublished
+    f = mrms_flow_array(field)
+    u = MRMS_FLOW_RES
+    rows = np.minimum(np.arange(r0 // u + step // 2, r1 // u, step), MRMS_FLOW_NY - 1)
+    cols = np.minimum(np.arange(c0 // u + step // 2, c1 // u, step), MRMS_FLOW_NX - 1)
+    v = f[np.ix_(rows, cols)].astype(np.int16) + 128
+    with _mrms_lock:
+        small = _mrms_small.get(t)
+    age = mrms_age_view(mrms_age(t), mrms_small_image(small)) if small else np.zeros((MRMS_FLOW_NY, MRMS_FLOW_NX), np.uint8)
+    return raw_png(np.dstack([v, age[np.ix_(rows, cols)]]).astype(np.uint8))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1747,6 +2039,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('X-Cache', 'HIT' if cached else 'MISS')
         self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_png(self, body, headers={}):
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/png')
+        self.send_header('Content-Length', str(len(body)))
+        for k, v in headers.items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1845,6 +2146,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if url.path == '/mrms':
             return self.send_json(200, {'frames': mrms_times()[-MRMS_FRAMES:]})
+        if url.path == '/mrms/palette.png':
+            return self.send_png(MRMS_PALETTE_PNG)
+        m = re.fullmatch(r'/mrms/(\d{10})/(crop|flow)\.png', url.path)
+        if m:
+            q = parse_qs(url.query)
+            box = mrms_crop_query(q)
+            cells = box and mrms_crop_box(*box)
+            if not cells:
+                return self.send_json(400, {'error': 'Invalid crop'})
+            t = int(m.group(1))
+            try:
+                body = mrms_crop(t, *cells) if m.group(2) == 'crop' \
+                    else mrms_flow_crop(t, *cells, q.get('mean', [''])[0] == '1')
+            except NotPublished:
+                return self.send_json(404, {'error': 'Not in the radar ring'})
+            return self.send_png(body, {'X-Crop': mrms_crop_bounds(*cells)})
         m = re.fullmatch(r'/mrms/(\d{10})/(\d{1,2})/(\d{1,4})/(\d{1,4})\.png', url.path)
         if m:
             t, z, x, y = map(int, m.groups())
@@ -1854,11 +2171,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = mrms_tile(t, z, x, y)
             except NotPublished:
                 return self.send_json(404, {'error': 'Not in the radar ring'})
-            self.send_response(200)
-            self.send_header('Content-Type', 'image/png')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            return self.wfile.write(body)
+            return self.send_png(body)
         if url.path != '/plume':
             return self.send_json(404, {'error': 'Not found'})
 

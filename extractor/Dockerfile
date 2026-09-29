@@ -7,6 +7,12 @@ RUN cmake -S /tmp/NCEPLIBS-bufr-12.1.0 -B /tmp/build -DCMAKE_BUILD_TYPE=Release 
     && cmake --build /tmp/build -j4 >/dev/null 2>&1 \
     && cmake --install /tmp/build >/dev/null
 
+# OpenCV (radar motion flow) as a wheel unpacked into /opt/cv: pip stays out of
+# the runtime image, and --no-deps keeps Debian's numpy the only numpy
+FROM debian:bookworm-slim AS cv
+RUN apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null \
+    && pip3 install -q --no-deps --no-compile --break-system-packages --target /opt/cv opencv-python-headless==4.10.0.84
+
 FROM debian:bookworm-slim
 # dpkg-dev: Debian's python3-eccodes runs dpkg-architecture at import time
 RUN apt-get update -qq && apt-get install -y -qq libgfortran5 python3 python3-eccodes python3-numpy dpkg-dev ca-certificates >/dev/null \
@@ -14,6 +20,8 @@ RUN apt-get update -qq && apt-get install -y -qq libgfortran5 python3 python3-ec
 # Full install tree - debufr needs its master table files, not just the binary
 COPY --from=build /opt/bufr /opt/bufr
 ENV PATH="/opt/bufr/bin:${PATH}"
+COPY --from=cv /opt/cv /opt/cv
+ENV PYTHONPATH=/opt/cv
 COPY extractor.py /app/extractor.py
 ENV PORT=3002
 EXPOSE 3002

@@ -1,6 +1,6 @@
 // Run: node test.js
 const assert = require('assert');
-const { shapeRadarFrames, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
+const { app, shapeRadarFrames, mrmsCropQuery, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
 
 // Latest ready run rolls back to yesterday before the first cycle is out
 const at = (iso) => Date.parse(iso);
@@ -143,4 +143,26 @@ assert.deepStrictEqual([-74, -90, -105, -118].map(zoneByLongitude),
     assert.strictEqual(solo.satellite, undefined);
 }
 
-console.log('backend: all checks passed');
+// MRMS crop/motion queries: finite box west<east, south<north, step 1-64, mean only '1'
+assert.strictEqual(mrmsCropQuery({ w: '-75.5', s: '40', e: '-73', n: '41.25' }), 'w=-75.5&s=40&e=-73&n=41.25&step=1');
+assert.strictEqual(mrmsCropQuery({ w: '-75', s: '40', e: '-73', n: '41', step: '4', mean: '1' }), 'w=-75&s=40&e=-73&n=41&step=4&mean=1');
+for (const bad of [{ w: '-73', s: '40', e: '-75', n: '41' }, { w: '-75', s: '41', e: '-73', n: '40' },
+    { w: '', s: '40', e: '-73', n: '41' }, { w: '-75', s: '40', e: '-73' }, { w: '1e2', s: '40', e: '-73', n: '41' },
+    { w: '-75', s: '40', e: '-73', n: '41', step: '0' }, { w: '-75', s: '40', e: '-73', n: '41', step: '1.5' },
+    { w: '-75', s: '40', e: '-73', n: '41', step: '65' }, { w: '-75', s: '40', e: '-73', n: '41', mean: 'x' },
+    { w: ['-75', '-74'], s: '40', e: '-73', n: '41' }, { w: '-190', s: '40', e: '-73', n: '41' }]) {
+    assert.strictEqual(mrmsCropQuery(bad), null, JSON.stringify(bad));
+}
+
+// The routes reject before touching the extractor
+(async () => {
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}/api/radar/mrms`;
+    const box = 'w=-75&s=40&e=-73&n=41';
+    for (const path of [`/12345/crop.png?${box}`, `/1759100000/tile.png?${box}`, `/1759100000/crop.png?w=-75`,
+        `/1759100000/crop.png?${box}&mean=1`, `/1759100000/flow.png?${box}&step=99`]) {
+        assert.strictEqual((await fetch(base + path)).status, 400, path);
+    }
+    server.close();
+    console.log('backend: all checks passed');
+})();
