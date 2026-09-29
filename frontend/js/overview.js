@@ -658,17 +658,27 @@ function spiralSvg(place, f, hist, sweep = true) {
         'aria-label': `The last 24 hours observed and the next 24 forecast, as a spiral colored by temperature` });
 
     svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272, class: 'sp-disk' }, s);
-    // the hours: a wedge each, filled with its cloud cover from the outer edge (the wind drawn over it below)
-    const wedgeAt = new Map();   // hour -> its wedge's group, lit under the cursor
+    // The sky behind the laps: blue by day, indigo at night, clouds hanging from each lap's outer
+    // edge as deep as the sky is covered; soft-edged (a blur)
+    const soft = `sb${Math.random().toString(36).slice(2, 8)}`;
+    svgEl('feGaussianBlur', { stdDeviation: 1.6 }, svgEl('filter', { id: soft, x: '-10%', y: '-10%', width: '120%', height: '120%' }, svgEl('defs', {}, s)));
+    // (inside the disk: the blur would spill past its edge)
+    const clip = `${soft}c`;
+    svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272 }, svgEl('clipPath', { id: clip }, s.querySelector('defs')));
+    const back = svgEl('g', { filter: `url(#${soft})` }, svgEl('g', { 'clip-path': `url(#${clip})` }, s));   // blurred, then clipped
+    for (const k of sp.skies) svgEl('path', { d: k.d, class: 'sp-sky' }, back);
+    for (const n of sp.nights) svgEl('path', { d: n.d, class: 'sp-night' }, back);
+    for (const c of sp.clouds) svgEl('path', { d: c.d, class: 'sp-cloud' }, back);
+    // the hours: an invisible wedge each for its title; the cursor's hour lit in its temperature's color
+    const wedgeAt = new Map();
+    const hoursG = svgEl('g', {}, s);
     for (const h of sp.hours) {
-        const g = svgEl('g', { class: h.night ? 'sp-hour sp-dark' : 'sp-hour' }, s);
-        svgEl('path', { d: h.d, class: 'sp-wedge' }, g);
-        if (h.cover) svgEl('path', { d: h.cover, class: 'sp-cover' }, g);
-        wedgeAt.set(h.t, g);
+        const w = svgEl('path', { d: h.d, class: 'sp-wedge' }, hoursG);
+        if (!h.observed) wedgeAt.set(h.t, w);   // the cursor is on the forecast lap only
         const cover = h.cloud == null ? '' : ` · ${sky(h.cloud, h.night).toLowerCase()} (${Math.round(h.cloud)}% cloud)`;
         const wind = h.wind == null ? '' : ` · wind ${windText(h.dir, h.wind, h.gust).replace(/^Calm/, 'calm')}`;
         h.title = `${dayName(h.t)} ${hourText(h.t)}${h.night ? ', night' : ''}${cover}${wind}${h.observed ? ', observed' : ''}`;
-        svgTitle(g, h.title);
+        svgTitle(w, h.title);
     }
     const id = `sw${Math.random().toString(36).slice(2, 8)}`;
     const mask = svgEl('mask', { id }, svgEl('defs', {}, s));
@@ -723,17 +733,17 @@ function spiralSvg(place, f, hist, sweep = true) {
     });
 
     // The cursor on the spiral
-    const mark = svgEl('circle', { r: 17, class: 'sp-cursor', visibility: 'hidden' }, s);
+    const mark = svgEl('circle', { r: 8, class: 'sp-cursor', visibility: 'hidden' }, s);
     const R = sv => SPIRAL.r0 + sv / 48 * (SPIRAL.r1 - SPIRAL.r0);
     let lit = null;
     onCursor(s, t => {
-        // the cursor's hour lights its whole wedge, in its temperature's color
-        const g = t == null ? null : wedgeAt.get(Math.floor(t / HOUR) * HOUR);
-        if (g !== lit) {
-            lit?.firstChild.style.removeProperty('fill');
-            const r = g && f.upcoming.find(x => x.t === Math.floor(t / HOUR) * HOUR);
-            if (r?.tmp != null) g.firstChild.style.fill = rampColor(r.tmp);
-            lit = g;
+        // the cursor's hour lights its whole wedge, washed in its temperature's color
+        const w = t == null ? null : wedgeAt.get(Math.floor(t / HOUR) * HOUR);
+        if (w !== lit) {
+            lit?.style.removeProperty('fill');
+            const r = w && f.upcoming.find(x => x.t === Math.floor(t / HOUR) * HOUR);
+            if (r?.tmp != null) w.style.fill = rampColor(r.tmp);
+            lit = w;
         }
         const s0 = t == null ? null : 24 + (t - now) / HOUR;
         if (s0 == null || s0 < 23 || s0 > 48) { mark.setAttribute('visibility', 'hidden'); return; }
@@ -1203,10 +1213,13 @@ function daysSection(f) {
 function dayMore(d, f) {
     const box = el('div', 'sg-day-more');
     const inner = el('div', 'sg-day-more-inner');
-    const hrs = f.rows.filter(r => zDay(r.t) === d.key);
+    // today: the hours still ahead
+    const today = d.key === zDay(Date.now());
+    const hrs = f.rows.filter(r => zDay(r.t) === d.key && (!today || r.t + HOUR > Date.now()));
     const snow = d.snow >= 0.1;
-    // hour by hour only for a whole day: where the hourly forecast starts or ends inside it, the day's overview
-    if (hrs.length && zDay(hrs[0].t - HOUR) !== d.key && zDay(hrs[hrs.length - 1].t + HOUR) !== d.key) {
+    // hour by hour only where the hourly forecast reaches the day's end and (but today) starts at its start;
+    // otherwise the day's overview
+    if (hrs.length && (today || zDay(hrs[0].t - HOUR) !== d.key) && zDay(hrs[hrs.length - 1].t + HOUR) !== d.key) {
         const grid = el('div', 'sg-ribbon');
         grid.style.setProperty('--hrs', hrs.length);
         const lane = (name, make) => {

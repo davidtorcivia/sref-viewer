@@ -263,12 +263,16 @@ body { -webkit-tap-highlight-color: transparent; }
 :root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
 .spiral .sp-drop { fill: var(--c-rain); }
 .spiral .sp-missing { fill: var(--missing); stroke: var(--missing); stroke-width: 0.6; }
-/* hours: a faint wedge by day, darker by night, filled from its outer edge as deep as the sky is covered;
-   the cursor's hour lit in its temperature color (set inline) */
-.spiral .sp-wedge { fill: rgba(var(--ink-rgb), 0.035); }
-.spiral .sp-dark .sp-wedge { fill: rgba(var(--ink-rgb), 0.16); }
-:root[data-theme="dark"] .spiral .sp-dark .sp-wedge { fill: rgba(0, 0, 0, 0.5); }
-.spiral .sp-cover { fill: var(--ink); opacity: 0.32; }   /* the hours chart's cloud columns */
+/* the sky behind the laps: pale blue by day, soft indigo at night, clouds a soft gray that lets
+   a little of the sky through (so night clouds read darker); the cursor's hour washed in its
+   temperature color (set inline) */
+.spiral .sp-sky { fill: oklch(0.95 0.022 232); }
+.spiral .sp-night { fill: oklch(0.72 0.045 268); }
+.spiral .sp-cloud { fill: oklch(0.87 0.008 250); opacity: 0.85; }
+:root[data-theme="dark"] .spiral .sp-sky { fill: oklch(0.36 0.035 240); }
+:root[data-theme="dark"] .spiral .sp-night { fill: oklch(0.24 0.03 268); }
+:root[data-theme="dark"] .spiral .sp-cloud { fill: oklch(0.55 0.008 250); opacity: 0.8; }
+.spiral .sp-wedge { fill: transparent; opacity: 0.4; }
 .spiral .sp-sweep { stroke-dasharray: 1; animation: sp-draw 2.2s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
 .spiral .sp-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
 .spiral .sp-wind path { fill: var(--c-wind); }
@@ -277,7 +281,7 @@ body { -webkit-tap-highlight-color: transparent; }
 .spiral .sp-th { font-size: 12px; font-weight: 700; fill: var(--ink); }
 .spiral .sp-td { font-size: 28px; font-weight: 820; font-variation-settings: 'wdth' 56; fill: var(--ink); }
 .spiral .sp-tl { font-size: 12px; font-weight: 600; fill: var(--ink); }
-.spiral .sp-cursor { fill: var(--ink); stroke: var(--paper); stroke-width: 5; }
+.spiral .sp-cursor { fill: none; stroke: var(--ink); stroke-width: 2.5; }   /* a ring: the band's color shows through */
 
 @keyframes sp-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 /* the wind outside the lap arrives as the band finishes growing */

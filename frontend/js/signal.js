@@ -69,7 +69,6 @@ const HOUR = 3600000;
 export const SPIRAL = { C: 260, W: 13, r0: 120, r1: 220 };
 const EDGE = 272;         // the disk's radius: the outer lap's hours reach it
 const ARROW_BAND = 13;    // the wind arrows ride this deep inside each hour's outer edge
-const HOUR_GAP = 0.03;    // hours of space between neighboring wedges
 
 /**
  * The spiral's shapes in a 520-unit box. s is hours since now - 24 h: s 0..24
@@ -132,34 +131,73 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     for (const r of future) { const s = 24 + (r.t - now) / HOUR; if (s >= 24 && s < 48) drop(s, r.qpf, r.t); }
 
     // Each hour a wedge from its lap out to the next lap (the outer lap's: to the disk's edge),
-    // dark at night, and a graph of the sky: filled from its outer edge in, full when overcast,
-    // empty when clear. The wind rides near its outer edge (the way it blows, longer when stronger)
-    const dark = t => nights.some(([a, b]) => t >= a && t < b);
-    const along = (sa, sb, r) => Array.from({ length: 7 }, (_, i) => { const v = sa + (sb - sa) * i / 6; return P(r(v), v); });
-    const shape = (sa, sb, rIn, rOut) => `M${[...along(sa, sb, rIn), ...along(sa, sb, rOut).reverse()].map(p => `${f1(p[0])},${f1(p[1])}`).join('L')}Z`;
+    // for its title and the cursor's highlight; the wind rides near its outer edge (the way it
+    // blows, longer when stronger)
+    // (a segment's last point takes its radius from just inside it: an inner-lap shape ending at
+    // s = 24 must not take the outer lap's edge)
+    const along = (sa, sb, r, n = 6) => Array.from({ length: n + 1 }, (_, i) => { const v = sa + (sb - sa) * i / n; return P(r(i === n ? v - 1e-6 : v), v); });
+    const pts = list => list.map(p => `${f1(p[0])},${f1(p[1])}`).join('L');
+    const shape = (sa, sb, rIn, rOut, n) => `M${pts([...along(sa, sb, rIn, n), ...along(sa, sb, rOut, n).reverse()])}Z`;
+    const rIn = v => R(v) + W + 2, rOut = v => (v < 24 ? R(v + 24) - W - 2 : EDGE);
     const hours = [];
     const hour = (t, s0, observed, h) => {
-        const sa = Math.max(observed ? 0 : 24, s0) + HOUR_GAP, sb = Math.min(observed ? 24 : 48, s0 + 1) - HOUR_GAP;
+        const sa = Math.max(observed ? 0 : 24, s0), sb = Math.min(observed ? 24 : 48, s0 + 1);
         if (sb - sa < 0.1) return;
-        const rIn = v => R(v) + W + 2, rOut = v => (observed ? R(v + 24) - W - 2 : EDGE);
-        const depth = v => Math.min(ARROW_BAND, (rOut(v) - rIn(v)) * 0.45);   // where the arrow sits
-        const cloud = h.cloud == null ? null : Math.max(0, Math.min(100, h.cloud));
+        const depth = v => Math.min(ARROW_BAND, (rOut(v) - rIn(v)) * 0.45);
         const sm = (sa + sb) / 2, [x, y] = P(rOut(sm) - depth(sm) / 2, sm);
         let arrow = null;
         if (h.wind != null && h.dir != null && h.wind >= 0.5) {
-            // the inner lap's room between laps is narrow: shorter arrows there
-            // (capped to the gap between the laps, so it never crosses onto the next lap's band)
+            // the inner lap's room between laps is narrow: shorter arrows there, kept inside it
             const len = observed ? Math.min(6 + Math.min(h.wind, 30) * 0.5, depth(sm) + 4) : 6 + Math.min(h.wind, 30) * 1.2;
             const a = (h.dir + 180) * Math.PI / 180;
             arrow = windArrow(x - Math.sin(a) * len / 2, y + Math.cos(a) * len / 2, h.dir, len, observed ? 4.5 : 6);
             arrow.x = f1(x - Math.sin(a) * len / 2); arrow.y = f1(y + Math.cos(a) * len / 2);
         }
-        hours.push({ t, observed, night: dark(t + HOUR / 2), cloud, wind: h.wind, dir: h.dir, gust: h.gust ?? null, arrow,
-            d: shape(sa, sb, rIn, rOut),
-            cover: cloud ? shape(sa, sb, v => rOut(v) - (rOut(v) - rIn(v)) * cloud / 100, rOut) : null });
+        const cloud = h.cloud == null ? null : Math.max(0, Math.min(100, h.cloud));
+        hours.push({ t, observed, s: sm, cloud, night: nights.some(([a, b]) => t + HOUR / 2 >= a && t + HOUR / 2 < b), wind: h.wind, dir: h.dir, gust: h.gust ?? null, arrow, d: shape(sa, sb, rIn, rOut) });
     };
     for (const h of past) hour(h.t, (h.t - t0) / HOUR, true, h);
     for (const r of future) hour(r.t, 24 + (r.t - now) / HOUR, false, r);
+
+    // The sky: a cloud bank hanging from each lap's outer edge, as deep as the sky is covered
+    // (to the lap at overcast), flowing from hour to hour (eased between the hours' middles);
+    // hours with no report leave a gap
+    const clouds = [];
+    for (const [lo, hi] of [[0, 24], [24, 48]]) {
+        const known = hours.filter(h => h.cloud != null && h.s >= lo && h.s < hi);
+        let run = [];
+        const flush = () => {
+            if (!run.length) return;
+            const a = Math.max(lo, run[0].s - 0.5), b = Math.min(hi, run[run.length - 1].s + 0.5);
+            const c = v => {
+                const k = run.findIndex(h => h.s >= v);
+                if (k <= 0) return run[k === 0 ? 0 : run.length - 1].cloud / 100;
+                const p = run[k - 1], q = run[k], u = (v - p.s) / (q.s - p.s);
+                return (p.cloud + (q.cloud - p.cloud) * (1 - Math.cos(Math.PI * u)) / 2) / 100;
+            };
+            // a billowed edge: a soft puff every 20 minutes, fuller as the bank deepens
+            const puff = v => 3.5 * Math.sqrt(c(v)) * (1 - Math.cos(v * 6 * Math.PI)) / 2;
+            const n = Math.max(2, Math.round((b - a) * 24));
+            clouds.push({ d: shape(a, b, v => rOut(v) - (rOut(v) - rIn(v)) * c(v) - puff(v), rOut, n) });
+            run = [];
+        };
+        for (const h of known) {
+            if (run.length && h.s - run[run.length - 1].s > 1.5) flush();
+            run.push(h);
+        }
+        flush();
+    }
+
+    // The sky of each lap (the ring between its band and the next lap, or the disk's edge), and
+    // its nights: the same dark spell lines up on both laps (sunset and sunrise barely move in a day)
+    const skies = [shape(0, 24, rIn, rOut, 96), shape(24, 48, rIn, rOut, 96)].map(d => ({ d }));
+    const nightSpans = [];
+    for (const [a, b] of nights) {
+        const sa = Math.max(0, (a - now) / HOUR), sb = Math.min(24, (b - now) / HOUR);
+        if (sb - sa < 0.05) continue;
+        const n = Math.max(2, Math.round((sb - sa) * 4));
+        nightSpans.push({ a, b, d: shape(sa, sb, rIn, rOut, n) + shape(24 + sa, 24 + sb, rIn, rOut, n) });
+    }
 
     // Key points, placed; the caller words them
     const ahead = future.filter(r => r.t + HOUR > now && r.t < now + 24 * HOUR);
@@ -169,7 +207,7 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     const pastRain = past.reduce((a, h) => a + (h.precip || 0), 0);
     const pastTemps = past.map(h => h.tmp).filter(v => v != null);
     return {
-        segs, rain, hours, track: `M${track.join('L')}`,
+        segs, rain, hours, skies, clouds, nights: nightSpans, track: `M${track.join('L')}`,
         caps: [cap(0), cap(48)], notch,
         now: { x: f1(nowPt[0]), y: f1(nowPt[1]) },
         table: {
