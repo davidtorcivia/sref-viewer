@@ -179,16 +179,17 @@ const assert = require('node:assert/strict');
         assert.equal(sp.hours.filter(h => h.observed).length, 25);
         assert.equal(sp.hours.filter(h => !h.observed).length, 25);
         assert.equal(sp.hours.filter(h => h.night).length, 12);
-        assert.equal(sp.clouds.length, 1);                      // one cloud bank over the forecast lap (no past reports)
-        assert.equal(sp.nights.length, 1);                      // one soft sector per night
+        assert.deepEqual(sp.hours.filter(h => h.bar).map(h => h.t), [h0 + H]);   // a cloud bar where it is cloudy
+        assert.equal(sp.nights.length, 1);                      // one piece per dark spell, whole hours
+        // night from the clock: no history still shows it on the past lap, and it runs through the join at now
+        const noHist = sg.spiral({ past: [], future, now: h0 + 0.95 * H, nowTemp: 63, nights: [[h0 - 3 * H, h0 + 5 * H]] });
+        assert.deepEqual(noHist.nights.map(n => [+n.sa.toFixed(2), +n.sb.toFixed(2)]), [[20.05, 24], [24, 28.05]]);
         // the inner lap's shapes stay between the laps up to s = 24 (none reaches the disk's edge)
         const radii = d => d.replace(/[MZ]/g, '').split('L').map(q => { const [x, y] = q.split(',').map(Number); return Math.hypot(x - 260, y - 260); });
         const edgeTest = sg.spiral({ past: past.map(h => ({ ...h, cloud: 30 })), future, now, nowTemp: 63, nights: [[now - 2 * H, now + 30 * H]] });
-        for (const d of [edgeTest.skies[0].d, edgeTest.clouds[0].d, edgeTest.hours.find(h => h.observed && h.t === h0).d]) {
+        for (const d of [edgeTest.skies[0].d, edgeTest.hours.find(h => h.observed && h.t === h0).bar, edgeTest.hours.find(h => h.observed && h.t === h0).d]) {
             assert.ok(Math.max(...radii(d)) < 230, Math.max(...radii(d)));
         }
-        const gapped = sg.spiral({ past, future: future.map((r, i) => ({ ...r, cloud: i === 10 || i === 11 ? null : 40 })), now, nowTemp: 63 });
-        assert.equal(gapped.clouds.length, 2, 'hours with no report leave a gap');
         assert.equal(sp.table.pastRain, 0.1);
         assert.equal(sp.table.pastLow, 60);
         assert.equal(sp.table.nextLow, 55);
