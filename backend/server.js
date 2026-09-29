@@ -713,25 +713,42 @@ function getMrmsTimes() {
     return mrmsInFlight;
 }
 
+// NEXRAD composite frames in the extractor: { frames, revs, snow } (revs: a frame is
+// rebuilt when a nearer scan lands, and its crops are cached per rev); empty when unreachable
+let nexradCache = { index: null, fetchedAt: 0 };
+let nexradInFlight = null;
+function getNexrad() {
+    if (Date.now() - nexradCache.fetchedAt < MRMS_TTL_MS) return Promise.resolve(nexradCache.index);
+    nexradInFlight ??= getJson(`${EXTRACTOR_URL}/nexrad`, 5000)
+        .catch(err => { console.error('[NEXRAD]', err.message); return null; })
+        .then(index => { nexradCache = { index, fetchedAt: Date.now() }; return index; })
+        .finally(() => { nexradInFlight = null; });
+    return nexradInFlight;
+}
+
 /**
  * The page's frame index: LibreWXR's (satellite included) with radar.past
  * from MRMS while it is current, else LibreWXR's own past frames. Never a
- * nowcast. radar.source says which ('mrms' | 'librewxr').
+ * nowcast. radar.source says which ('mrms' | 'librewxr'). An MRMS frame
+ * with a NEXRAD composite at its time carries the composite's rev as nx, and
+ * radar.snow says whether any composite frame has snow.
  */
-function shapeRadarFrames(libre, mrms, now = Date.now() / 1000) {
+function shapeRadarFrames(libre, mrms, now = Date.now() / 1000, nexrad = null) {
     const live = mrms.length > 0 && now - mrms[mrms.length - 1] < MRMS_STALE_S;
+    const nx = new Map((nexrad?.frames || []).map((t, i) => [t, nexrad.revs[i]]));
     return {
         ...libre,
         radar: live
-            ? { source: 'mrms', past: mrms.map(time => ({ time, path: `/mrms/${time}` })), nowcast: [] }
+            ? { source: 'mrms', nowcast: [], ...(nx.size ? { snow: !!nexrad.snow } : {}),
+                past: mrms.map(time => ({ time, path: `/mrms/${time}`, ...(nx.has(time) ? { nx: nx.get(time) } : {}) })) }
             : { source: 'librewxr', past: libre?.radar?.past || [], nowcast: [] },
     };
 }
 
 async function getRadarFrames() {
-    const [libre, mrms] = await Promise.all([getLibreFrames().catch(() => null), getMrmsTimes()]);
+    const [libre, mrms, nexrad] = await Promise.all([getLibreFrames().catch(() => null), getMrmsTimes(), getNexrad()]);
     if (!libre && !mrms.length) throw new Error('No radar source reachable');
-    return shapeRadarFrames(libre, mrms);
+    return shapeRadarFrames(libre, mrms, undefined, nexrad);
 }
 
 app.get('/api/radar/frames', async (req, res) => {
@@ -772,14 +789,14 @@ const MRMS_MAXZOOM = 11;            // extractor MRMS_MAXZOOM, radar.js RADAR_MA
 
 // fc: 'mrms' an MRMS scan, 'sat' a satellite frame, '' a LibreWXR radar frame.
 // MRMS and LibreWXR times collide (every 10-minute time is also a 2-minute one)
-const tileKey = (time, z, x, y, fc) => `${time}/${z}/${x}/${y}/${fc || ''}`;
+const tileKey = (time, z, x, y, fc, nx) => `${time}/${z}/${x}/${y}/${fc || ''}${nx ? `/${nx}` : ''}`;
 const freshTile = key => {
     const hit = tileCache.get(key);
     return hit && Date.now() - hit.at < TILE_TTL_MS ? hit : null;
 };
 
-async function fetchTile(time, z, x, y, fc) {
-    const url = fc === 'mrms' ? `${EXTRACTOR_URL}/mrms/${time}/${z}/${x}/${y}.png`
+async function fetchTile(time, z, x, y, fc, nx) {
+    const url = fc === 'mrms' ? `${EXTRACTOR_URL}/mrms/${time}/${z}/${x}/${y}.png${nx ? `?nx=${nx}` : ''}`
         : fc === 'sat' ? `${LIBRE_HOST}/v2/satellite/${time}/${TILE_OPTS}/${z}/${x}/${y}/0/0_0.png`
         : `${LIBRE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`;
     const res = await fetch(url, {
@@ -789,13 +806,14 @@ async function fetchTile(time, z, x, y, fc) {
     return { status: res.status, type: res.headers.get('content-type'), body: Buffer.from(await res.arrayBuffer()) };
 }
 
-// Cached tile or one upstream fetch shared by everyone waiting for it
-function getTile(time, z, x, y, fc) {
-    const key = tileKey(time, z, x, y, fc);
+// Cached tile or one upstream fetch shared by everyone waiting for it.
+// nx: the NEXRAD composite's rev at that time, drawn over MRMS (MRMS tiles only)
+function getTile(time, z, x, y, fc, nx) {
+    const key = tileKey(time, z, x, y, fc, nx);
     const hit = freshTile(key);
     if (hit) return Promise.resolve(hit);
     if (!tileInFlight.has(key)) {
-        tileInFlight.set(key, fetchTile(time, z, x, y, fc).then(t => {
+        tileInFlight.set(key, fetchTile(time, z, x, y, fc, nx).then(t => {
             if (t.status === 200) {
                 if (tileCache.size >= TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
                 tileCache.set(key, { ...t, at: Date.now() });
@@ -822,7 +840,10 @@ async function serveTile(req, res, sat) {
         const fc = sat ? 'sat' : req.query.src === 'librewxr' ? '' : 'mrms';
         // The page overzooms MRMS past its maxzoom (radar.js RADAR_MAXZOOM)
         if (fc === 'mrms' && z > MRMS_MAXZOOM) return res.status(404).end();
-        const key = tileKey(time, z, x, y, fc);
+        if (req.query.nx !== undefined && (fc !== 'mrms' || typeof req.query.nx !== 'string' || !/^\d{1,12}$/.test(req.query.nx))) return res.status(400).end();
+        // zoomed out the extractor draws MRMS alone (extractor NX_TILE_MINZOOM): one cache entry, not one per rev
+        const nx = z >= 6 ? req.query.nx : undefined;
+        const key = tileKey(time, z, x, y, fc, nx);
         // A cached tile was validated when fetched: serve it without touching
         // the index (a scan may just have left the ring the client still shows)
         if (!freshTile(key) && !tileInFlight.has(key)) {
@@ -834,7 +855,7 @@ async function serveTile(req, res, sat) {
             // One zoom action re-requests every visible tile for all 60 frames (~1000 misses)
             if (!takeToken(req.ip, tileBuckets, 1500, 60)) return res.status(429).end();
         }
-        const t = await getTile(time, z, x, y, fc);
+        const t = await getTile(time, z, x, y, fc, nx);
         if (t.status !== 200) return res.status(t.status === 404 ? 404 : 502).end();
         res.set('Content-Type', t.type || 'image/png');
         res.set('Cache-Control', 'public, max-age=3600');
@@ -887,6 +908,18 @@ app.get('/api/radar/mrms/:time/:kind.png', (req, res) => {
     proxyMrms(res, `/mrms/${time}/${kind}.png?${query}`);
 });
 
+// NEXRAD composite crops (RGB: q, coverage, precip class) for the same view boxes;
+// r is the frame's rev from the frame index, so a rebuilt frame is a new URL
+app.get('/api/radar/nexrad/:time/crop.png', (req, res) => {
+    const query = mrmsCropQuery(req.query);
+    const rev = req.query.r;
+    if (!/^\d{10}$/.test(req.params.time) || !query || req.query.mean || typeof rev !== 'string' || !/^\d{1,12}$/.test(rev)) {
+        return res.status(400).end();
+    }
+    if (!takeToken(req.ip, tileBuckets, 1500, 60)) return res.status(429).end();
+    proxyMrms(res, `/nexrad/${req.params.time}/crop.png?${query}&r=${rev}`);
+});
+
 const lonToX = (lon, z) => Math.floor((lon + 180) / 360 * 2 ** z);
 function latToY(lat, z) {
     const r = lat * Math.PI / 180;
@@ -919,7 +952,7 @@ async function warmRadarTilesOnce() {
         for (const { z, bbox } of TILE_WARM) {
             for (let x = lonToX(bbox.west, z); x <= lonToX(bbox.east, z); x++) {
                 for (let y = latToY(bbox.north, z); y <= latToY(bbox.south, z); y++) {
-                    if (!freshTile(tileKey(f.time, z, x, y, fc))) jobs.push(() => getTile(f.time, z, x, y, fc));
+                    if (!freshTile(tileKey(f.time, z, x, y, fc, f.nx))) jobs.push(() => getTile(f.time, z, x, y, fc, f.nx));
                 }
             }
         }

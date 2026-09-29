@@ -2,8 +2,11 @@
 # Offline check of the Lambert grid math and tile rendering on a synthetic
 # grid shaped like RRFS CONUS: every grid point's lat/lon must map back to
 # its own (i, j), and bilinear tiles must sample a linear field exactly.
+import calendar
+import math
 import os
 import sys
+import struct
 import tempfile
 
 # Always a scratch dir: the purge test below deletes cycle directories
@@ -370,3 +373,89 @@ assert T0 + 120 * 11 in X._mrms_age, 'ages past the gap are kept'
 assert X.MRMS_PALETTE_PNG[25] == 6
 
 print(f'fields: ok (grid round trip within {err:.4f} cells)')
+
+# NEXRAD: 4/3-earth beam, gate geometry, overlap weights, QC thresholds, time alignment, activation cap
+h, ground = X.nx_beam(np.array([0.0, 100e3, 230e3]), 0.5)
+assert abs(h[0]) < 1e-6 and 1.4e3 < h[1] < 1.5e3 and 5.0e3 < h[2] < 5.2e3, h   # 0.5° beam: ~1.46 km at 100 km, ~5.1 km at 230 km
+assert (ground <= np.array([0.0, 100e3, 230e3]) + 1e-6).all() and ground[2] > 229e3
+la, lo, _ = X.NX_SITES['OKX']
+s_, az = X.nx_polar_coords('OKX', np.array([la + 100e3 / 111195.0]), np.array([lo]))
+assert abs(s_[0] - 100e3) < 200 and min(az[0], 360 - az[0]) < 0.01, (s_, az)
+r0, r1, c0, c1 = X.nx_box('OKX')
+assert r0 < (X.MRMS_NORTH - la) / X.NX_RES < r1 and c0 < (lo - X.MRMS_WEST) / X.NX_RES < c1 and r0 % X.NX_SUB == 0
+# a block next to OKX: OKX's (lower) beam outweighs DIX's there
+br, bc = int((X.MRMS_NORTH - la) / X.NX_RES) // X.NX_BLOCK, int((lo - X.MRMS_WEST) / X.NX_RES) // X.NX_BLOCK
+assert X.nx_weight('OKX', 0.5, br, bc)[0].mean() > 100 * X.nx_weight('DIX', 0.5, br, bc)[0].mean()
+# decoder on a real product (KOKX N0H, bird migration night): header, radials, class codes
+h = X.nx_decode(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'testdata', 'OKX_N0H_2026_09_29_02_25_52'), 'rb').read())
+assert (h['code'], h['elev'], h['lat'], h['lon'], h['t']) == (165, 0.5, 40.865, -72.864, calendar.timegm((2026, 9, 29, 2, 25, 52))), h['t']
+assert h['data'].shape == (360, 1200) and set(np.unique(h['data'])) <= {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 140}
+assert (h['data'] == X.NX_BI).sum() > 1e5 and np.unique(X.nx_radials(h)).size == 360, 'birds everywhere, every radial reachable'
+# QC on a synthetic scan: weak low-CC echo goes, strong low-CC echo (hail) and weak high-CC echo stay
+lev = lambda dbz: int(round((dbz + 32) * 2)) + 2
+thr = struct.pack('>hhh', -320, 5, 254) + bytes(26)
+data = np.zeros((720, 920), np.uint8)
+data[:, 100:200] = lev(20)          # a band of 20 dBZ, low CC in radials 0-359: removed
+data[:, 300:400] = lev(50)          # 50 dBZ, low CC everywhere: kept
+b = {'az': np.arange(720, dtype=np.float32) / 2, 'width': np.full(720, 0.5, np.float32), 'data': data, 'thr': thr, 'elev': 0.5}
+ccn = np.full((360, 920), int(0.99 * 300 - 60.5), np.uint8)
+ccn[:180, 100:200] = int(0.5 * 300 - 60.5)
+ccn[:, 300:400] = int(0.6 * 300 - 60.5)
+c = {'az': np.arange(360, dtype=np.float32), 'width': np.ones(360, np.float32), 'data': ccn, 'thr': struct.pack('>ff', 300, -60.5) + bytes(24)}
+q, cls, keep = X.nx_clean(b, c)
+# removed: not echo (unknown here, since it rains around it, so other radars or MRMS fill it); high-CC kept
+assert np.isin(q[:300, 120:180], (0, 255)).all() and (q[420:700, 120:180] == lev(20) - 2).all()
+assert (q[20:340, 320:380] == lev(50) - 2).all() and (q[420:700, 320:380] == lev(50) - 2).all(), 'strong echo stays whatever its CC'
+assert (q[:, :X.NX_NEAR] == 255).all()
+# blockage: a 3° run of weak radials is dropped and nx_grid bridges it from either side; a 6° gap is not bridged
+data = np.full((720, 920), lev(30), np.uint8)
+data[612:618] = lev(15)                       # 306-309°, 15 dB short
+b = {'az': np.arange(720, dtype=np.float32) / 2, 'width': np.full(720, 0.5, np.float32), 'data': data, 'thr': thr, 'elev': 0.5}
+q, cls, keep = X.nx_clean(b)
+assert (~keep).sum() == 6 and not keep[612:618].any(), np.flatnonzero(~keep)
+cen = (b['az'] + 0.25)[keep]
+r0, r1, c0, c1 = X.nx_box('OKX')
+at = lambda g, bearing: g[int((X.MRMS_NORTH - la - 60e3 * math.cos(math.radians(bearing)) / 111195.0) / X.NX_RES) - r0,
+                          int((lo + 60e3 * math.sin(math.radians(bearing)) / 111195.0 / math.cos(math.radians(la)) - X.MRMS_WEST) / X.NX_RES) - c0]
+g = X.nx_grid('OKX', cen, 0.5, q[keep].astype(np.uint16))
+assert at(g, 307.5) == lev(30) - 2, at(g, 307.5)
+wide = np.ones(720, bool)
+wide[606:618] = False
+assert at(X.nx_grid('OKX', (b['az'] + 0.25)[wide], 0.5, q[wide].astype(np.uint16)), 306) == 255
+# time alignment: frames on MRMS times, nearest scan within NX_MAX_AGE, flow units (8 = one MRMS cell per 2 min)
+ft = X.nx_frame_times(10000)
+assert ft[-1] == (10000 - X.NX_LAG) // 120 * 120 and len(ft) == X.MRMS_FRAMES and all(t % 120 == 0 for t in ft)
+assert X.nx_nearest([1000, 1300], 1200) == 1300 and X.nx_nearest([1000, 1300], 1150) == 1300 and X.nx_nearest([1000], 1700) is None
+f = np.zeros((X.MRMS_FLOW_NY, X.MRMS_FLOW_NX, 2), np.int8)
+f[..., 0] = 8
+v = X.nx_block_flow(f, 30, 50)
+assert np.allclose(v[..., 0], X.NX_SUB / 120) and np.allclose(v[..., 1], 0)   # NX cells per second
+# activation: a view far from NYC brings its radars, the cap holds, the NYC radars stay
+X.nx_touch(-88.5, 41.5, -87.5, 42.2, 1000)
+assert 'LOT' in X._nx_active and all(s in X._nx_active for s in X.NX_DEFAULT)
+for k, (w_, s2, e_, n_) in enumerate([(-105, 39, -104, 40), (-97.5, 32.5, -96.5, 33.2), (-81, 25.5, -80, 26.2)]):
+    X.nx_touch(w_, s2, e_, n_, 2000 + k)
+assert len(X._nx_active) <= X.NX_CAP and all(s in X._nx_active for s in X.NX_DEFAULT) and 'LOT' not in X._nx_active
+assert not X.nx_touch(-130, 20, -60, 55, 3000), 'zoomed-out views activate nothing'
+# a second far view within NX_HOLD of the first does not evict its radars; later it may
+held = set(X._nx_active)
+assert not X.nx_touch(-122.5, 37.3, -121.8, 37.9, 2003) and set(X._nx_active) == held
+assert X.nx_touch(-122.5, 37.3, -121.8, 37.9, 2002 + X.NX_HOLD + 1) and 'MUX' in X._nx_active
+# a scan that fails to decode is skipped once old, retried while young; the radar keeps moving
+real = X.nx_list, X.nx_ingest, X.nx_update
+now = calendar.timegm((2026, 9, 29, 3, 0, 0))
+sufs = [X.nx_suffix(now - 600), X.nx_suffix(now - 300), X.nx_suffix(now - 60), X.nx_suffix(now - 30)]
+def bad_ingest(site, suf, now_):
+    if suf in (sufs[0], sufs[2]):
+        raise ValueError('truncated')
+    return True
+X.nx_list, X.nx_ingest, X.nx_update = (lambda site, since, now_: [x for x in sufs if x > since]), bad_ingest, (lambda now_: None)
+X._nx_active.clear(); X._nx_active['OKX'] = math.inf; X._nx_last.clear()
+X.nx_poll(now)
+X.nx_list, X.nx_ingest, X.nx_update = real
+assert X._nx_last['OKX'] == sufs[1], X._nx_last
+# crops and tiles only for the rev a frame is at (a future rev must not cache today's build)
+X._nx_frames[5000] = {'blocks': {(0, 0): b''}, 'sig': {}, 'snow': {}, 'rev': 42}
+assert X.nx_rev_is(5000, 42) and X.nx_rev_is(5000, 41) and not X.nx_rev_is(5000, 43) and not X.nx_rev_is(5120, 42)
+del X._nx_frames[5000]
+print('nexrad: ok')

@@ -22,6 +22,9 @@ COPY --from=build /opt/bufr /opt/bufr
 ENV PATH="/opt/bufr/bin:${PATH}"
 COPY --from=cv /opt/cv /opt/cv
 ENV PYTHONPATH=/opt/cv
+# Two malloc arenas: the pollers' threads each kept their own, the NEXRAD build's
+# transients stranded ~500 MB in them
+ENV MALLOC_ARENA_MAX=2
 COPY extractor.py /app/extractor.py
 ENV PORT=3002
 EXPOSE 3002

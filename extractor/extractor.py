@@ -48,6 +48,7 @@ Environment:
   CACHE_DIR      decoded per-station and per-cycle JSON (14 days)
 """
 
+import bz2
 import calendar
 import functools
 import gzip
@@ -64,6 +65,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import warnings
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -1621,9 +1623,16 @@ MRMS_LUT = np.clip(np.floor((np.arange(256) / 2 - 32) / 5), 0, len(RAIN_HEX) - 1
 MRMS_LUT[MRMS_PALETTE[MRMS_LUT, 3] == 0] = 255   # clear bands use the transparent index
 MRMS_LUT[[0, 255]] = 255
 MRMS_BAND = np.where(MRMS_PALETTE[:, 3] > 0, np.arange(len(RAIN_HEX)), 255).astype(np.uint8)   # 5 dBZ band -> index
-# Texture palette for the page's WebGL radar, indexed by q (0.5 dBZ steps)
-MRMS_PALETTE_PNG = raw_png(np.where((MRMS_LUT == 255)[:, None], 0, MRMS_PALETTE[np.minimum(MRMS_LUT, len(RAIN_HEX) - 1)])
-                           .astype(np.uint8)[None])
+# Snow (NEXRAD's precip type) in the model radar's snow colors, same 5 dBZ bands, indexed after the rain ones
+SNOW_PALETTE = np.array([(0, 0, 0, 0) if h is None else (int(h[:2], 16), int(h[2:4], 16), int(h[4:], 16), 255)
+                         for h in SNOW_HEX], np.uint8)
+SNOW_BAND = np.where(SNOW_PALETTE[:, 3] > 0, np.arange(len(SNOW_HEX)) + len(RAIN_HEX), 255).astype(np.uint8)
+TILE_PALETTE = np.vstack([MRMS_PALETTE, SNOW_PALETTE])
+_q_band = np.clip(np.floor((np.arange(256) / 2 - 32) / 5), 0, len(RAIN_HEX) - 1).astype(np.int64)
+# Texture palette for the page's WebGL radar, indexed by q (0.5 dBZ steps): row 0 rain, row 1 snow
+MRMS_PALETTE_PNG = raw_png(np.stack([np.where((MRMS_LUT == 255)[:, None], 0, MRMS_PALETTE[np.minimum(MRMS_LUT, len(RAIN_HEX) - 1)]),
+                                     np.where(((np.arange(256) == 0) | (np.arange(256) == 255))[:, None], 0, SNOW_PALETTE[_q_band])])
+                           .astype(np.uint8))
 # Flow image: dBZ 5..64 as 20..256, weak echo and no coverage as nothing to track
 _d = np.arange(256) / 2 - 32
 MRMS_FLOW_LUT = np.where((_d >= 5) & (np.arange(256) < 255), np.clip(_d, 0, 63.75) * 4, 0).astype(np.uint8)
@@ -1906,15 +1915,15 @@ def mrms_rows(strips, r0, r1):
                          np.uint8).reshape(-1, MRMS_NX), s0 * MRMS_STRIP
 
 
-def mrms_bilinear(block, fr, fc):
-    """Reflectivity band per pixel at fractional cell-center coordinates (fr rows,
-    fc columns of block, 1-D each, in range): bilinear in dBZ, with no echo as
-    -32 dBZ so edges taper and no coverage left out of the weights (clear once
-    it outweighs coverage), then the 5 dBZ band's palette index."""
+def mrms_dbz(block, fr, fc):
+    """Reflectivity per pixel at fractional cell-center coordinates (fr rows, fc
+    columns of block, 1-D each, in range): bilinear in dBZ, with no echo as -32 dBZ
+    so edges taper and no coverage left out of the weights; also the covered weight
+    (clear once no coverage outweighs coverage)."""
     r = np.clip(np.floor(fr).astype(np.int64), 0, block.shape[0] - 1)
-    c = np.clip(np.floor(fc).astype(np.int64), 0, MRMS_NX - 1)
+    c = np.clip(np.floor(fc).astype(np.int64), 0, block.shape[1] - 1)
     wr, wc = np.clip(fr - r, 0, 1).astype(np.float32), np.clip(fc - c, 0, 1).astype(np.float32)
-    r1, c1 = np.minimum(r + 1, block.shape[0] - 1), np.minimum(c + 1, MRMS_NX - 1)
+    r1, c1 = np.minimum(r + 1, block.shape[0] - 1), np.minimum(c + 1, block.shape[1] - 1)
     num = np.zeros((len(fr), len(fc)), np.float32)
     den = np.zeros_like(num)
     for rr, fy in ((r, 1 - wr), (r1, wr)):
@@ -1923,29 +1932,52 @@ def mrms_bilinear(block, fr, fc):
             w = np.outer(fy, fx) * (q != 255)
             num += w * (q * np.float32(0.5) - 32)
             den += w
+    return num / np.maximum(den, 1e-6), den
+
+
+def mrms_bands(dbz, den, snow=None):
+    """Palette index (TILE_PALETTE) of each pixel's 5 dBZ band; 255 clear or uncovered."""
     # +1e-4: an exact band edge (30 dBZ) must not land a hair under it in float32
-    band = np.clip(np.floor(num / np.maximum(den, 1e-6) / 5 + 1e-4), 0, len(RAIN_HEX) - 1).astype(np.int64)
-    return np.where(den >= 0.5, MRMS_BAND[band], 255).astype(np.uint8)
+    band = np.clip(np.floor(dbz / 5 + 1e-4), 0, len(RAIN_HEX) - 1).astype(np.int64)
+    idx = MRMS_BAND[band] if snow is None else np.where(snow, SNOW_BAND[band], MRMS_BAND[band])
+    return np.where(den >= 0.5, idx, 255).astype(np.uint8)
+
+
+def mrms_bilinear(block, fr, fc):
+    """Palette index of the bilinear reflectivity (mrms_dbz) per pixel."""
+    return mrms_bands(*mrms_dbz(block, fr, fc))
 
 
 @functools.lru_cache(maxsize=2048)          # 1-20KB each
-def mrms_tile(t, z, x, y):
+def mrms_tile(t, z, x, y, nx=None):
     """Web-mercator tile of scan t, smooth: bilinear in dBZ between cell centers.
-    A scan that left the ring still serves its cached tiles until they age out of the LRU."""
+    nx: the NEXRAD frame's rev, drawn over MRMS where it has coverage (the rev only
+    keys the cache). A scan that left the ring still serves its cached tiles until they age out of the LRU."""
     with _mrms_lock:
         strips = _mrms.get(t)
     if strips is None:
         raise NotPublished
     s = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
-    fr = (MRMS_NORTH - np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + s) / 2 ** z))))) / MRMS_RES
-    fc = ((x + s) / 2 ** z * 360 - 180 - MRMS_WEST) / MRMS_RES
+    lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + s) / 2 ** z))))
+    lon = (x + s) / 2 ** z * 360 - 180
+    fr, fc = (MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES
     ri, ci = np.flatnonzero((fr >= 0) & (fr < MRMS_NY)), np.flatnonzero((fc >= 0) & (fc < MRMS_NX))
     px = np.full((FIELD_TILE, FIELD_TILE), 255, np.uint8)
     if len(ri) and len(ci):
         rc = fr[ri] - 0.5                   # cell centers sit at +0.5
         block, base = mrms_rows(strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, MRMS_NY - 1))
-        px[np.ix_(ri, ci)] = mrms_bilinear(block, rc - base, fc[ci] - 0.5)
-    return indexed_png(px, MRMS_PALETTE)
+        dbz, den = mrms_dbz(block, rc - base, fc[ci] - 0.5)
+        snow = None
+        if nx is not None and z >= NX_TILE_MINZOOM:   # zoomed out, a tile spans too many NX cells
+            got = nx_tile_sample(t, fr[ri] * NX_SUB - 0.5, fc[ci] * NX_SUB - 0.5)
+            if got is not None:
+                ndbz, nden, cov, snow = got
+                both, only = (den >= 0.5) & (nden >= 0.5), (den < 0.5) & (nden >= 0.5)
+                dbz = np.where(both, dbz + (ndbz - dbz) * cov, np.where(only, ndbz, dbz))
+                den = np.maximum(den, nden)
+                snow &= nden >= 0.5
+        px[np.ix_(ri, ci)] = mrms_bands(dbz, den, snow)
+    return indexed_png(px, TILE_PALETTE)
 
 
 def mrms_crop_box(w, s, e, n, step=1):
@@ -2028,9 +2060,706 @@ def mrms_flow_crop(t, r0, r1, c0, c1, step, mean):
     return raw_png(np.dstack([v, age[np.ix_(rows, cols)]]).astype(np.uint8))
 
 
+# ============ NEXRAD composite (WSR-88D Level III, 250 m) ============
+# Each radar's lowest scan (0.5°) from the public unidata-nexrad-level3 bucket:
+# N0B reflectivity (0.5° x 250 m), N0C correlation coefficient and N0H
+# hydrometeor class (1° x 250 m) under the same key suffix, ~80 s after the
+# scan, a scan every 4-6 minutes. RAM only, like MRMS. Each scan is cleaned on
+# its polar grid (low CC or classed biological/clutter is not precipitation),
+# then mapped onto a 0.0025° lat/lon lattice nested 4:1 in MRMS's (same
+# origin), where overlapping radars blend by beam height. A frame every
+# MRMS_STEP (the MRMS scan times) moves each radar's nearest scan to the frame
+# time along the MRMS motion, so a frame is one moment rather than radars
+# caught 0-5 minutes apart. The NYC radars are always on; others follow the
+# views pages ask crops for, up to NX_CAP, and drop after NX_IDLE.
+NX_URL = os.environ.get('NEXRAD_URL', 'https://unidata-nexrad-level3.s3.amazonaws.com')
+# CONUS WSR-88Ds: id:lat:lon:height (feet above sea level), from the products' own headers
+NX_SITES = {s: (float(la), float(lo), float(h) * 0.3048) for s, la, lo, h in (e.split(':') for e in '''
+    ABR:45.456:-98.413:1383 ABX:35.150:-106.824:5951 AKQ:36.984:-77.008:254 AMA:35.233:-101.709:3703 AMX:25.611:-80.413:111 APX:44.906:-84.720:1561
+    ARX:43.823:-91.191:1357 ATX:48.195:-122.496:642 BBX:39.496:-121.632:221 BGM:42.200:-75.985:1703 BHX:40.499:-124.292:2516 BIS:46.771:-100.760:1755
+    BLX:45.854:-108.607:3703 BMX:33.172:-86.770:759 BOX:41.956:-71.137:231 BRO:25.916:-97.419:87 BUF:42.949:-78.737:790 BYX:24.597:-81.703:89
+    CAE:33.949:-81.119:344 CBW:46.039:-67.806:859 CBX:43.490:-116.236:3171 CCX:40.923:-78.004:2486 CLE:41.413:-81.860:860 CLX:32.655:-81.042:228
+    CRP:27.784:-97.511:142 CXX:44.511:-73.166:431 CYS:41.152:-104.806:6192 DAX:38.501:-121.678:144 DDC:37.761:-99.969:2671 DFX:29.273:-100.280:1196
+    DGX:32.280:-89.984:609 DIX:39.947:-74.411:230 DLH:46.837:-92.210:1542 DMX:41.731:-93.723:1094 DOX:38.826:-75.440:163 DTX:42.700:-83.472:1216
+    DVN:41.612:-90.581:851 DYX:32.538:-99.254:1581 EAX:38.810:-94.264:1092 EMX:31.894:-110.630:5319 ENX:42.586:-74.064:1934 EOX:31.460:-85.459:537
+    EPZ:31.873:-106.698:4218 ESX:35.701:-114.891:4948 EVX:30.565:-85.922:222 EWX:29.704:-98.029:766 EYX:35.098:-117.561:2873 FCX:37.024:-80.274:2965
+    FDR:34.362:-98.977:1315 FDX:34.634:-103.619:4698 FFC:33.363:-84.566:972 FSD:43.588:-96.729:1495 FSX:34.574:-111.198:7514 FTG:39.786:-104.546:5610
+    FWS:32.573:-97.303:776 GGW:48.206:-106.625:2384 GJX:39.062:-108.214:10100 GLD:39.367:-101.700:3717 GRB:44.499:-88.111:822 GRK:30.722:-97.383:602
+    GRR:42.894:-85.545:875 GSP:34.883:-82.220:1068 GWX:33.897:-88.329:589 GYX:43.891:-70.256:473 HDC:30.519:-90.407:157 HDX:33.077:-106.120:4270
+    HGX:29.472:-95.079:115 HNX:36.314:-119.632:340 HPX:36.737:-87.285:613 HTX:34.931:-86.084:1859 ICT:37.654:-97.443:1400 ICX:37.591:-112.862:10756
+    ILN:39.420:-83.822:1170 ILX:40.150:-89.337:730 IND:39.708:-86.280:887 INX:36.175:-95.564:749 IWA:33.289:-111.670:1426 IWX:41.359:-85.700:1055
+    JAX:30.485:-81.702:159 JGX:32.675:-83.351:618 JKL:37.591:-83.313:1461 LBB:33.654:-101.814:3378 LCH:30.125:-93.216:136 LGX:47.116:-124.107:366
+    LNX:41.958:-100.576:3112 LOT:41.604:-88.085:760 LRX:40.740:-116.803:6895 LSX:38.699:-90.683:721 LTX:33.989:-78.429:145 LVX:37.975:-85.944:833
+    LWX:38.976:-77.487:404 LZK:34.836:-92.262:649 MAF:31.943:-102.189:2961 MAX:42.081:-122.717:7561 MBX:48.393:-100.864:1590 MHX:34.776:-76.876:144
+    MKX:42.968:-88.551:1022 MLB:28.113:-80.654:149 MOB:30.679:-88.240:289 MPX:44.849:-93.565:1101 MQT:46.531:-87.548:1525 MRX:36.168:-83.402:1434
+    MSX:47.041:-113.986:7978 MTX:41.263:-112.448:6593 MUX:37.155:-121.898:3550 MVX:47.528:-97.325:1083 MXX:32.537:-85.790:560 NKX:32.919:-117.041:1052
+    NQA:35.345:-89.873:435 OAX:41.320:-96.367:1262 OHX:36.247:-86.563:676 OKX:40.865:-72.864:198 OTX:47.681:-117.626:2449 PAH:37.068:-88.772:505
+    PBZ:40.532:-80.218:1266 PDT:45.691:-118.853:1580 POE:31.155:-92.976:472 PUX:38.460:-104.181:5363 RAX:35.665:-78.490:461 RGX:39.754:-119.462:8396
+    RIW:43.066:-108.477:5633 RLX:38.311:-81.723:1212 RTX:45.715:-122.965:1728 SFX:43.106:-112.686:4539 SGF:37.235:-93.400:1375 SHV:32.451:-93.841:386
+    SJT:31.371:-100.492:2004 SOX:33.818:-117.636:3105 SRX:35.290:-94.362:737 TBW:27.705:-82.402:122 TFX:47.460:-111.385:3804 TLH:30.398:-84.329:176
+    TLX:35.333:-97.278:1277 TWX:38.997:-96.232:1415 TYX:43.756:-75.680:1960 UDX:44.125:-102.830:3194 UEX:40.321:-98.442:2057 VAX:30.890:-83.002:330
+    VBX:34.839:-120.398:1354 VNX:36.741:-98.128:1258 VTX:34.412:-119.179:2807 VWX:38.260:-87.724:625 YUX:32.495:-114.656:239
+'''.split())}
+NX_DEFAULT = ('OKX', 'DIX', 'ENX', 'BGM', 'BOX', 'DOX')   # within ~275 km of NYC: never idle out
+NX_CAP = 12                                 # active radars at most (CPU/RAM bound)
+NX_VIEW = 6                                 # radars one view activates, nearest its center first
+NX_IDLE = 1800                              # an on-demand radar nobody has viewed this long drops
+NX_POLL = 30                                # seconds between bucket listings
+NX_RES = 0.0025                             # degrees per cell; MRMS cell = NX_SUB x NX_SUB cells
+NX_SUB = 4
+NX_BLOCK = 400                              # frames are stored in 1° blocks (NX_BLOCK cells square)
+NX_GATE = 250.0                             # m, Level III gate spacing
+NX_RANGE = 230e3                            # m: past this the 0.5° beam is ~5 km up
+NX_FADE = 30e3                              # coverage ramps in over the outer 30 km (MRMS shows through)
+NX_SMOOTH = 1.0                             # cells: Gaussian sigma on the composite (gate noise), 0 for raw gates
+NX_FILL_W = 1e-30                           # MRMS's weight in the blend: only where no radar here has data
+NX_BEAM_H = 400.0                           # m: overlap weight exp(-beam height / this) - the lowest beam wins, seams blend
+NX_CLASS_H = 2000.0                         # m above the radar: higher beams are above the melting layer in warm air, no type
+NX_MAX_AGE = 600                            # a radar's scan further than this from a frame is not used in it
+NX_KEEP = MRMS_FRAMES * MRMS_STEP + 1200    # scans kept (frames rebuild when a nearer scan or a new radar arrives)
+NX_LAG = 60                                 # frame T exists from T + NX_LAG, like the MRMS scan
+NX_ASIDE = 180                              # N0C/N0H not up this long after N0B: clean without them
+NX_CROP_MAX = 2048
+NX_TILE_MINZOOM = 6                         # raster tiles carry NEXRAD from here (radar-gl NX_MINZOOM)
+NX_HOLD = 5 * NX_POLL                       # a radar viewed this recently is never evicted for another view
+NX_MAXZOOM = 11                             # raster fallback tiles (the GPU layer samples crops to ~z13)
+# QC: echo under NX_QC_DBZ with (smoothed) CC under NX_QC_CC, or classed biological
+# or clutter, is removed; stronger echo always stays (hail and melting snow have low CC).
+# Weak echo with no CC at all (below the CC SNR threshold) must be NX_QC_BARE dBZ to stay.
+NX_QC_DBZ = 40.0
+NX_QC_CC = 0.85
+NX_QC_BARE = 15.0
+NX_SPECKLE = 7                              # echo gates in the 5x5 around a gate for it to stay
+NX_RAINING, NX_RAINING_BOX = 0.3, (31, 31)  # precipitation around a removed gate (gates x radials): it is unknown, not clear
+NX_NEAR = 12                                # gates (3 km) around the radar with no usable data: the neighbors fill them
+NX_BLOCKED_DB = 5.0                         # a radial this much weaker than its neighbors is blocked
+NX_GAP = 4.0                                # degrees: nx_grid bridges a gap in the radials up to this (OKX blockage: 5-6 radials, a 3-3.5° gap)
+NX_BI, NX_GC = 10, 20                       # N0H class codes: biological, ground clutter/AP
+NX_SNOW, NX_MIX = (30, 40), (50,)           # ice crystals, dry snow; wet snow
+NX_KEY_RE = re.compile(r'<Key>([A-Z]{3})_N0B_(\d{4}_\d\d_\d\d_\d\d_\d\d_\d\d)</Key>')
+EARTH_R, EARTH_K = 6371e3, 4 / 3            # effective earth radius model for the beam
+_nx_active = {s: math.inf for s in NX_DEFAULT}   # site -> last viewed (epoch); defaults never idle out
+_nx_scans = {}                              # site -> {scan epoch: zlib uint16 site grid (q | class << 8)}
+_nx_last = {}                               # site -> newest key suffix ingested
+_nx_frames = {}                             # frame epoch -> {'blocks': {(br, bc): zlib}, 'sig': {...}, 'rev': int, 'snow': bool}
+_nx_rev = [int(time.time())]                # revs never repeat across restarts (crop URLs are cached by rev)
+_nx_lock = threading.Lock()
+_nx_build_lock = threading.Lock()           # one ingest/build pass at a time
+_nx_wake = threading.Event()                # a new radar was activated: poll now
+
+
+def nx_decode(raw):
+    """A Level III radial product (packet 16, bzip2 symbology): code, radar lat/lon,
+    height (m), scan epoch, elevation, the threshold halfwords' bytes, radial start
+    azimuths and widths (degrees) and data levels (radials, bins) uint8."""
+    i = raw.index(b'\r\r\n', raw.index(b'\r\r\n') + 3) + 3   # past the WMO and AWIPS header lines
+    hw = lambda k, f='>h': struct.unpack_from(f, raw, i + 18 + 2 * (k - 10))[0]   # description block halfword (ICD numbering)
+    sym = raw[i + 120:]
+    if hw(51) == 1:
+        sym = bz2.decompress(sym)
+    packet, _, nbins, _, _, _, nrad = struct.unpack_from('>7h', sym, 16)
+    if packet != 16:
+        raise ValueError(f'packet {packet}, not digital radial data')
+    az, width = np.empty(nrad, np.float32), np.empty(nrad, np.float32)
+    data = np.zeros((nrad, nbins), np.uint8)
+    o = 30
+    for r in range(nrad):
+        nb, a, d = struct.unpack_from('>hhh', sym, o)
+        az[r], width[r] = a / 10, d / 10
+        n = min(nb, nbins)
+        data[r, :n] = np.frombuffer(sym, np.uint8, n, o + 6)
+        o += 6 + nb + (nb & 1)
+    return {'code': hw(16), 'lat': hw(11, '>i') / 1000, 'lon': hw(13, '>i') / 1000, 'height': hw(15) * 0.3048,
+            't': (hw(21) - 1) * 86400 + hw(22, '>i'), 'elev': hw(30) / 10,
+            'thr': raw[i + 60:i + 92], 'az': az, 'width': width, 'data': data}
+
+
+def nx_radials(p):
+    """Radial index of each 0.1° of azimuth (3600) in product p: its radials start
+    anywhere and are not all the same width (1° products run 0.9-1.1)."""
+    lut = np.zeros(3600, np.int32)
+    for r in np.argsort(p['width'])[::-1]:  # narrow radials last, so none is swallowed by a wide neighbor
+        a0 = int(round(p['az'][r] * 10))
+        lut[np.arange(a0, a0 + max(int(round(p['width'][r] * 10)), 1)) % 3600] = r
+    return lut
+
+
+def nx_q_levels(b):
+    """N0B data level -> q (MRMS quantization: (dBZ + 32) * 2, 0 no echo); levels 0-1 are below threshold / range folded."""
+    lo, inc = struct.unpack('>hh', b['thr'][:4])
+    n = np.arange(256)
+    q = np.clip(np.rint((lo / 10 + (n - 2) * inc / 10 + 32) * 2), 1, 254)
+    return np.where(n >= 2, q, 0).astype(np.uint8)
+
+
+def nx_cc_levels(c):
+    """N0C data level -> correlation coefficient, NaN below threshold / range folded."""
+    scale, offset = struct.unpack('>ff', c['thr'][:8])
+    n = np.arange(256, dtype=np.float32)
+    return np.where(n >= 2, (n - offset) / scale, np.nan).astype(np.float32)
+
+
+def nx_beam(r, elev):
+    """Beam center height above the radar (m) and ground distance (m) at slant range r, 4/3 earth."""
+    re, th = EARTH_R * EARTH_K, np.radians(elev)
+    h = np.sqrt(r * r + re * re + 2 * r * re * np.sin(th)) - re
+    return h, re * np.arcsin(r * np.cos(th) / (re + h))
+
+
+def nx_clean(b, c=None, h=None):
+    """Cleaned reflectivity q and precip class (0 rain, 1 snow, 2 mix) on N0B's polar
+    grid out to NX_RANGE, and the radials to keep (blocked ones dropped: nx_grid bridges
+    a narrow gap from the radials either side, a wide one is left to other radars; left
+    as unknown, it filled from far radars' higher beams, a bright stripe in stratiform).
+    c, h: N0C and N0H of the same scan, when there are any."""
+    gates = int(NX_RANGE // NX_GATE)
+    q = nx_q_levels(b)[b['data'][:, :gates]]
+    q = np.pad(q, ((0, 0), (0, gates - q.shape[1])))
+    at = np.floor((b['az'] + b['width'] / 2) * 10).astype(np.int64) % 3600   # N0B radial centers, 0.1°
+
+    def on_b(p, fill):                      # a 1° product's radials under N0B's
+        d = p['data'][nx_radials(p)[at], :gates]
+        return np.pad(d, ((0, 0), (0, gates - d.shape[1])), constant_values=fill)
+    echo = q > 0
+    dbz = q * np.float32(0.5) - 32
+    weak = echo & (dbz < NX_QC_DBZ)
+    bad = np.zeros_like(echo)
+    if c is not None:
+        cc = nx_cc_levels(c)[on_b(c, 0)]
+        known = ~np.isnan(cc)
+        # 3x3 mean of the known CC: single noisy gates at storm edges must not punch holes
+        n = cv2.blur(known.astype(np.float32), (3, 3))
+        cc_s = cv2.blur(np.where(known, cc, 0).astype(np.float32), (3, 3)) / np.maximum(n, 1e-6)
+        bad |= weak & (n > 0) & (cc_s < NX_QC_CC)
+        bad |= echo & (n == 0) & (dbz < NX_QC_BARE)
+    cls = np.zeros(q.shape, np.uint8)
+    if h is not None:
+        hc = on_b(h, 0)
+        bad |= weak & ((hc == NX_BI) | (hc == NX_GC))
+        cls[np.isin(hc, NX_SNOW)] = 1
+        cls[np.isin(hc, NX_MIX)] = 2
+        # beyond this height the class is aloft, not what reaches the ground
+        cls[:, nx_beam((np.arange(gates) + 0.5) * NX_GATE, b['elev'])[0] > NX_CLASS_H] = 0
+    # Removed echo where it is raining around (clutter, birds in rain: a hole the filter
+    # punched) is unknown, not clear: other radars, or MRMS, fill it. Removed echo out in
+    # clear air (birds, insects) is clear.
+    q[:, :NX_NEAR] = 0                      # the radar's own first gates: clutter-filtered, never data
+    ok = ~bad
+    ok[:, :NX_NEAR] = False
+    met = (echo & ok).astype(np.float32)
+    # precipitation makes up NX_RAINING of the usable gates around, and a third of that of all of them
+    around = cv2.boxFilter(met, -1, NX_RAINING_BOX)
+    raining = (around >= NX_RAINING * cv2.boxFilter(ok.astype(np.float32), -1, NX_RAINING_BOX)) & (around >= NX_RAINING / 3)
+    q[bad] = np.where(raining, 255, 0)[bad]
+    q[:, :NX_NEAR] = 255
+    # speckle: lone gates and thin sprays in clear air are noise, not precipitation
+    some = (q > 0).astype(np.float32)       # echo or unknown
+    q[(q < 255) & (cv2.boxFilter(some, -1, (5, 5), normalize=False) < NX_SPECKLE)] = 0
+    cls[(q == 0) | (q == 255)] = 0
+    return q, cls, ~nx_blocked(q, b['az'] + b['width'] / 2)
+
+
+def nx_blocked(q, az):
+    """Radials a beam blockage (a tower, a ridge) leaves NX_BLOCKED_DB weaker than the
+    radials around them, judged on their echo from 5-100 km: other radars fill them."""
+    # ponytail: judged per scan, so a scan with no echo in 5-100 km flags nothing and a lone shower
+    # there reads weak until the next one; a sticky per-site set of blocked azimuths if that shows
+    echo = (q > 0) & (q < 255)
+    band = slice(20, 400)
+    d = np.where(echo[:, band], q[:, band] * np.float32(0.5) - 32, 0)
+    n = echo[:, band].sum(1)
+    mean = np.where(n >= 40, d.sum(1) / np.maximum(n, 1), np.nan)
+    order = np.argsort(az)
+    m = mean[order]
+    k = len(m)
+    w = max(1, round(k / 120))              # neighbors 2-6° each side: a blockage is 1-2° wide
+    offs = np.array([j for j in range(-2 * w, 2 * w + 1) if abs(j) > w // 2])
+    near = m[(np.arange(k)[:, None] + offs) % k]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)   # radials with no echo around them: NaN, not blocked
+        ref = np.nanmedian(near, 1)
+    blocked = np.zeros(len(q), bool)
+    blocked[order] = (ref - m) > NX_BLOCKED_DB
+    return blocked
+
+
+def nx_box(site):
+    """(r0, r1, c0, c1) NX lattice cells covering a radar's range, snapped to MRMS cells."""
+    lat, lon, _ = NX_SITES[site]
+    dlat = NX_RANGE / (EARTH_R * math.pi / 180) + 0.01
+    dlon = dlat / math.cos(math.radians(abs(lat) + dlat))
+    snap = lambda v, up: (math.ceil(v / NX_SUB) if up else math.floor(v / NX_SUB)) * NX_SUB
+    return (snap((MRMS_NORTH - lat - dlat) / NX_RES, False), snap((MRMS_NORTH - lat + dlat) / NX_RES, True),
+            snap((lon - dlon - MRMS_WEST) / NX_RES, False), snap((lon + dlon - MRMS_WEST) / NX_RES, True))
+
+
+def nx_polar_coords(site, lat, lon):
+    """Ground distance (m) and azimuth (degrees) from a radar to lat/lon (float32,
+    broadcast: a column of latitudes and a row of longitudes make the full grid)."""
+    la0, lo0, _ = NX_SITES[site]
+    p0, p1 = math.radians(la0), np.radians(lat).astype(np.float32)
+    dl = np.radians(lon - lo0).astype(np.float32)
+    sp, cp, cd = np.sin(p1), np.cos(p1), np.cos(dl)
+    cosc = np.clip(math.sin(p0) * sp + math.cos(p0) * cp * cd, -1, 1)
+    az = np.degrees(np.arctan2(np.sin(dl) * cp, math.cos(p0) * sp - math.sin(p0) * cp * cd))
+    return np.float32(EARTH_R) * np.arccos(cosc), az % 360
+
+
+def nx_grid(site, centers, elev, v):
+    """A cleaned polar scan v (radials, gates; uint16 q | class << 8) on the radar's box
+    of the NX lattice, 255 past range: bilinear in dBZ between the nearest two radials
+    and gates (no echo as -32, unknown left out, as the tiles do), so gate edges (800 m
+    across at 100 km) do not show as steps; class from the nearest gate.
+    centers: the radials' center azimuths (degrees)."""
+    r0, r1, c0, c1 = nx_box(site)
+    lat = (MRMS_NORTH - (np.arange(r0, r1) + 0.5) * NX_RES)[:, None]
+    lon = (MRMS_WEST + (np.arange(c0, c1) + 0.5) * NX_RES)[None, :]
+    s, az = nx_polar_coords(site, lat, lon)
+    gates = v.shape[1]
+    ground = nx_beam((np.arange(gates) + 0.5) * NX_GATE, elev)[1].astype(np.float32)
+    g = np.interp(s, ground, np.arange(gates, dtype=np.float32)).astype(np.float32)   # fractional gate
+    inside = s < ground[-1] + NX_GATE / 2
+    order = np.argsort(centers)
+    j = np.searchsorted(centers[order], az)
+    i0, i1 = order[(j - 1) % len(order)], order[j % len(order)]
+    span = (centers[i1] - centers[i0]) % 360
+    fa = (((az - centers[i0]) % 360) / np.maximum(span, 1e-6)).astype(np.float32)
+    g0 = np.clip(np.floor(g).astype(np.int32), 0, gates - 1)
+    g1 = np.minimum(g0 + 1, gates - 1)
+    fg = np.clip(g - g0, 0, 1)
+    q = (v & 255).astype(np.uint8)
+    dbz = np.where(q == 0, -32, q * np.float32(0.5) - 32).astype(np.float32)
+    ok = (q != 255).astype(np.float32)
+    num = np.zeros(s.shape, np.float32)
+    den = np.zeros(s.shape, np.float32)
+    for rad, wa in ((i0, 1 - fa), (i1, fa)):
+        for gate, wg in ((g0, 1 - fg), (g1, fg)):
+            w = wa * wg * ok[rad, gate]
+            num += w * dbz[rad, gate]
+            den += w
+    out = np.clip(np.rint((num / np.maximum(den, 1e-6) + 32) * 2), 0, 254).astype(np.uint16)
+    out |= v[np.where(fa < 0.5, i0, i1), np.where(fg < 0.5, g0, g1)] & 0xFF00   # class of the nearest gate
+    # a gap in the radials (a sector the scan lacks) is not bridged
+    return np.where(inside & (den >= 0.5) & (span < NX_GAP), out, 255).astype(np.uint16)
+
+
+def nx_suffix(t):
+    return time.strftime('%Y_%m_%d_%H_%M_%S', time.gmtime(t))
+
+
+def nx_get(key):
+    """Object bytes, None if the bucket has no such key (yet)."""
+    try:
+        return http_get(f'{NX_URL}/{key}')
+    except urllib.error.HTTPError as err:
+        if err.code in (403, 404):
+            return None
+        raise
+
+
+def nx_ingest(site, suffix, now):
+    """One scan: fetch N0B/N0C/N0H, clean, keep the polar result. False while the
+    CC/class products are not up yet (and the scan is young enough to wait for them)."""
+    t = calendar.timegm(time.strptime(suffix, '%Y_%m_%d_%H_%M_%S'))
+    t0 = time.time()
+    raw = {p: nx_get(f'{site}_{p}_{suffix}') for p in ('N0B', 'N0C', 'N0H')}
+    if raw['N0B'] is None:
+        return True                         # listed, then gone: nothing to wait for
+    if None in raw.values() and now - t < NX_ASIDE:
+        return False
+    t1 = time.time()
+    b, c, h = (nx_decode(raw[p]) if raw[p] else None for p in ('N0B', 'N0C', 'N0H'))
+    q, cls, keep = nx_clean(b, c, h)
+    q, cls = np.ascontiguousarray(q[keep]), np.ascontiguousarray(cls[keep])
+    scan = (b['elev'], ((b['az'] + b['width'] / 2) % 360)[keep], zlib.compress(q.tobytes(), 1),
+            zlib.compress(cls.tobytes(), 1) if cls.any() else None, q.shape)
+    with _nx_lock:
+        if site in _nx_active:
+            _nx_scans.setdefault(site, {})[t] = scan
+    print(f'[NEXRAD] {site} {time.strftime("%H:%M:%SZ", time.gmtime(t))} +{now - t:.0f}s: fetch {t1 - t0:.2f}s '
+          f'clean {time.time() - t1:.2f}s {sum(len(v) for v in raw.values() if v) // 1024}KB'
+          + ('' if c and h else ' (no CC/class)'), flush=True)
+    return True
+
+
+def nx_site_grid(site, t):
+    """A stored scan on the site's box: uint16 q | class << 8 (see nx_grid)."""
+    with _nx_lock:
+        elev, centers, zq, zc, shape = _nx_scans[site][t]
+    v = np.frombuffer(zlib.decompress(zq), np.uint8).reshape(shape).astype(np.uint16)
+    if zc is not None:
+        v |= np.frombuffer(zlib.decompress(zc), np.uint8).reshape(shape).astype(np.uint16) << 8
+    return nx_grid(site, centers, elev, v), elev
+
+
+def nx_blocks(site):
+    r0, r1, c0, c1 = nx_box(site)
+    return {(br, bc) for br in range(r0 // NX_BLOCK, (r1 - 1) // NX_BLOCK + 1)
+            for bc in range(c0 // NX_BLOCK, (c1 - 1) // NX_BLOCK + 1)}
+
+
+def nx_nearest(times, T):
+    """The scan time nearest T within NX_MAX_AGE (a later one wins a tie), or None."""
+    best = min(times, key=lambda s: (abs(s - T), -s), default=None)
+    return best if best is not None and abs(best - T) <= NX_MAX_AGE else None
+
+
+def nx_flow_at(T):
+    """(scan time, int8 field) of the MRMS motion nearest T within MRMS_FLOW_SPAN, or (None, None)."""
+    for _, s in sorted((abs(s - T), s) for s in mrms_times() if abs(s - T) <= MRMS_FLOW_SPAN):
+        with _mrms_lock:
+            f = _mrms_flow.get(s)
+        if f is not None:
+            return s, mrms_flow_array(f)
+    return None, None
+
+
+def nx_block_flow(f, br, bc, pad=0):
+    """Motion at each cell of a block (and pad cells around it) in NX cells per second
+    (x east, y south), bilinear in the MRMS field."""
+    u = NX_SUB * MRMS_FLOW_RES              # NX cells per flow texel
+    y = ((br * NX_BLOCK + np.arange(-pad, NX_BLOCK + pad) + 0.5) / u - 0.5).astype(np.float32)
+    x = ((bc * NX_BLOCK + np.arange(-pad, NX_BLOCK + pad) + 0.5) / u - 0.5).astype(np.float32)
+    mx, my = np.meshgrid(x, y)
+    v = cv2.remap(f.astype(np.float32), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return v * np.float32(NX_SUB / MRMS_FLOW_SCALE / MRMS_STEP)
+
+
+_nx_beam_table = np.arange(0, NX_RANGE + 20e3, 500.0)
+
+
+def nx_weight(site, elev, br, bc, pad=0):
+    """Blend weight exp(-beam height / NX_BEAM_H) x range ramp, and the ramp, per MRMS
+    cell (1/NX_SUB res) of a block and pad MRMS cells around it."""
+    n = NX_BLOCK // NX_SUB
+    lat = MRMS_NORTH - (br * n + np.arange(-pad, n + pad) + 0.5) * MRMS_RES
+    lon = MRMS_WEST + (bc * n + np.arange(-pad, n + pad) + 0.5) * MRMS_RES
+    s, _ = nx_polar_coords(site, lat[:, None], lon[None, :])
+    h, ground = nx_beam(_nx_beam_table, elev)
+    height = np.interp(s, ground, h) + NX_SITES[site][2]   # above sea level: radars on hills see the same air higher
+    ramp = np.clip((NX_RANGE - s) / NX_FADE, 0, 1).astype(np.float32)
+    return (np.exp(-height / NX_BEAM_H) * ramp).astype(np.float32), ramp
+
+
+def nx_mrms_block(T, br, bc, pad):
+    """MRMS scan T under a block (and pad NX cells around it) in dBZ, bilinear, no echo
+    and no coverage as -32; None if the ring does not have it."""
+    with _mrms_lock:
+        strips = _mrms.get(T)
+    if strips is None:
+        return None
+    n, m = NX_BLOCK // NX_SUB, pad // NX_SUB + 1
+    r0, c0 = br * n - m, bc * n - m
+    rows, base = mrms_rows(strips, max(r0, 0), min(r0 + n + 2 * m, MRMS_NY) - 1)
+    cells = np.full((n + 2 * m, n + 2 * m), 0, np.uint8)
+    rr, cc = np.arange(r0, r0 + n + 2 * m), np.arange(c0, c0 + n + 2 * m)
+    ri, ci = np.flatnonzero((rr >= 0) & (rr < MRMS_NY)), np.flatnonzero((cc >= 0) & (cc < MRMS_NX))
+    cells[np.ix_(ri, ci)] = rows[np.ix_(rr[ri] - base, cc[ci])]
+    d = np.where((cells == 0) | (cells == 255), -32, cells * np.float32(0.5) - 32).astype(np.float32)
+    # NX cell centers in MRMS cell units, relative to the first fetched cell's center
+    at = ((np.arange(-pad, NX_BLOCK + pad) + 0.5) / NX_SUB - 0.5 + m).astype(np.float32)
+    mx, my = np.meshgrid(at, at)
+    return cv2.remap(d, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def nx_block(br, bc, parts, f, fill=None):
+    """One composite block: parts [(site, seconds from scan to frame, site grid, elevation)],
+    f the MRMS motion (or None), fill the MRMS scan of the frame's time (nx_mrms_block) for
+    cells in range no radar here has (a blocked beam, clutter in rain). zlib of q
+    (NX_BLOCK^2), class (NX_BLOCK^2) and coverage (0-255 per MRMS cell: how far inside
+    the present radars' range), and whether it has snow. Built NX_SUB cells wider on
+    each side so the smoothing reads across block edges."""
+    n, p = NX_BLOCK // NX_SUB, NX_SUB
+    size = NX_BLOCK + 2 * p
+    num = np.zeros((size, size), np.float32)
+    den, best = np.zeros_like(num), np.zeros_like(num)
+    cls = np.zeros((size, size), np.uint8)
+    cov = np.zeros((n, n), np.float32)
+    motion = nx_block_flow(f, br, bc, p) if f is not None else None
+    reach = ()                              # max range ramp: > 0 in some present radar's range
+    for site, dt, grid, elev in parts:
+        r0, _, c0, _ = nx_box(site)
+        mx, my = np.meshgrid(np.arange(-p, NX_BLOCK + p, dtype=np.float32) + (bc * NX_BLOCK - c0),
+                             np.arange(-p, NX_BLOCK + p, dtype=np.float32) + (br * NX_BLOCK - r0))
+        if motion is not None and dt:       # the echo at p at the frame time was at p - v dt at the scan
+            mx -= motion[..., 0] * dt
+            my -= motion[..., 1] * dt
+        v = cv2.remap(grid, mx, my, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+        w1, ramp = nx_weight(site, elev, br, bc, 1)
+        has = v != 255
+        w = np.where(has, cv2.resize(w1, (size, size), interpolation=cv2.INTER_LINEAR), 0)
+        q = (v & 255).astype(np.float32)
+        num += w * np.where(q > 0, q * np.float32(0.5) - 32, -32)   # no echo blends as -32 dBZ, like the tiles
+        den += w
+        top = w > best
+        best[top] = w[top]
+        cls[top] = (v >> 8)[top]
+        cov = np.maximum(cov, ramp[1:-1, 1:-1])
+        reach = np.maximum(reach, cv2.resize(ramp, (size, size), interpolation=cv2.INTER_LINEAR)) if len(reach) else \
+            cv2.resize(ramp, (size, size), interpolation=cv2.INTER_LINEAR)
+    if fill is not None and len(reach):     # MRMS where in range but nothing here: a vanishing weight, so it only fills
+        gap = (reach > 0).astype(np.float32) * np.float32(NX_FILL_W)
+        num += gap * fill
+        den += gap
+    # Gate noise (~1 dB a gate) mottles 5 dBZ bands at street zoom: a light blur, normalized
+    # by the weights so uncovered cells and the radars' blend stay out of it
+    if NX_SMOOTH:
+        dbz = cv2.GaussianBlur(num, (0, 0), NX_SMOOTH) / np.maximum(cv2.GaussianBlur(den, (0, 0), NX_SMOOTH), 1e-30)
+    else:
+        dbz = num / np.maximum(den, 1e-30)
+    q = np.where(den > 0, np.clip(np.rint((dbz + 32) * 2), 0, 254), 255).astype(np.uint8)[p:-p, p:-p]
+    cls = cls[p:-p, p:-p]
+    cls[(q == 0) | (q == 255)] = 0
+    return zlib.compress(q.tobytes() + cls.tobytes() + np.rint(cov * 255).astype(np.uint8).tobytes(), 6), bool((cls == 1).any())
+
+
+def nx_block_arrays(z):
+    """q, class (NX_BLOCK square) and coverage (MRMS cells) of a stored block."""
+    b, n = NX_BLOCK * NX_BLOCK, NX_BLOCK // NX_SUB
+    a = np.frombuffer(zlib.decompress(z), np.uint8)
+    return a[:b].reshape(NX_BLOCK, NX_BLOCK), a[b:2 * b].reshape(NX_BLOCK, NX_BLOCK), a[2 * b:].reshape(n, n)
+
+
+def nx_frame_times(now):
+    newest = int(now - NX_LAG) // MRMS_STEP * MRMS_STEP
+    return list(range(newest - (MRMS_FRAMES - 1) * MRMS_STEP, newest + 1, MRMS_STEP))
+
+
+def nx_update(now):
+    """(Re)build every frame block whose inputs changed: which radars, which of their
+    scans, which motion. Returns how many blocks were built."""
+    times = nx_frame_times(now)
+    with _nx_lock:
+        for T in [T for T in _nx_frames if T < times[0]]:
+            del _nx_frames[T]
+        scans = {s: sorted(v) for s, v in _nx_scans.items() if v}
+    cover = {}
+    for s in scans:
+        for blk in nx_blocks(s):
+            cover.setdefault(blk, []).append(s)
+    grids, built, t0 = {}, 0, time.time()
+    for T in times:
+        ft, f = nx_flow_at(T)
+        use = {s: nx_nearest(v, T) for s, v in scans.items()}
+        with _nx_lock:
+            frame = _nx_frames.get(T) or {'blocks': {}, 'sig': {}, 'snow': {}, 'rev': 0}
+        with _mrms_lock:
+            has_mrms = T in _mrms
+        sigs = {blk: (tuple((s, use[s]) for s in sorted(sites) if use[s] is not None), ft, has_mrms) for blk, sites in cover.items()}
+        sigs = {blk: sig for blk, sig in sigs.items() if sig[0]}
+        if sigs == frame['sig']:
+            continue
+        blocks, snow = dict(frame['blocks']), dict(frame['snow'])
+        for blk in [b for b in blocks if b not in sigs]:
+            del blocks[blk], snow[blk]
+        for blk, sig in sigs.items():
+            if frame['sig'].get(blk) == sig:
+                continue
+            parts = []
+            for s, st in sig[0]:
+                if (s, st) not in grids:
+                    if len(grids) > len(scans) + 2:   # frames go in time order: the oldest scan is done with
+                        del grids[next(iter(grids))]
+                    grids[(s, st)] = nx_site_grid(s, st)
+                g, elev = grids[(s, st)]
+                parts.append((s, T - st, g, elev))
+            blocks[blk], snow[blk] = nx_block(*blk, parts, f if ft is not None else None,
+                                              nx_mrms_block(T, *blk, NX_SUB) if has_mrms else None)
+            built += 1
+        with _nx_lock:
+            _nx_rev[0] += 1
+            _nx_frames[T] = {'blocks': blocks, 'sig': sigs, 'snow': snow, 'rev': _nx_rev[0]}
+    if built:
+        print(f'[NEXRAD] built {built} blocks in {time.time() - t0:.1f}s', flush=True)
+    return built
+
+
+def nx_list(site, since, now):
+    """N0B key suffixes for a radar after key suffix `since`, oldest first."""
+    days = sorted({time.strftime('%Y_%m_%d', time.gmtime(d)) for d in (calendar.timegm(time.strptime(since[:10], '%Y_%m_%d')), now)})
+    found = []
+    for day in days:
+        xml = http_get(f'{NX_URL}/?list-type=2&prefix={site}_N0B_{day}&start-after={site}_N0B_{since}').decode()
+        found += [suf for s, suf in NX_KEY_RE.findall(xml) if s == site]
+    return sorted(suf for suf in set(found) if suf <= nx_suffix(now))
+
+
+def nx_poll(now):
+    """Drop idle radars; fetch every active radar's new scans; rebuild what changed."""
+    with _nx_lock:
+        for s in [s for s, seen in _nx_active.items() if now - seen > NX_IDLE]:
+            del _nx_active[s]
+        for s in [s for s in _nx_scans if s not in _nx_active]:
+            del _nx_scans[s]
+            _nx_last.pop(s, None)
+        for v in _nx_scans.values():
+            for t in [t for t in v if t < now - NX_KEEP]:
+                del v[t]
+        active = list(_nx_active)
+        since = {s: max(_nx_last.get(s) or '', nx_suffix(now - NX_KEEP)) for s in active}
+
+    def site_pass(s):
+        try:
+            for suf in nx_list(s, since[s], now):
+                try:
+                    if not nx_ingest(s, suf, now):
+                        break               # CC/class not up: this scan (and the ones after) next poll
+                except Exception as err:  # noqa: BLE001 - a bad object must not stall the radar
+                    print(f'[NEXRAD] {s} {suf}: {err}', flush=True)
+                    if now - calendar.timegm(time.strptime(suf, '%Y_%m_%d_%H_%M_%S')) < NX_ASIDE:
+                        break               # young: maybe still uploading, try again next poll
+                with _nx_lock:
+                    if s in _nx_active:
+                        _nx_last[s] = suf
+        except Exception as err:  # noqa: BLE001 - one radar's trouble must not stop the others
+            print(f'[NEXRAD] {s}: {err}', flush=True)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(site_pass, active))
+    nx_update(now)
+
+
+def nx_poller():
+    while True:
+        _nx_wake.clear()
+        with _nx_build_lock:
+            try:
+                nx_poll(time.time())
+            except Exception as err:  # noqa: BLE001 - keep polling
+                print(f'[NEXRAD] poll: {err}', flush=True)
+        _nx_wake.wait(NX_POLL)
+
+
+def nx_touch(w, s, e, n, now):
+    """A page is viewing this box: the radars whose range reaches it (nearest its
+    center first, NX_VIEW at most) become active; past NX_CAP the radar viewed
+    longest ago goes, unless that was within NX_HOLD (two views far apart must not
+    evict each other's radars on every request: the newer one shows MRMS alone).
+    True when a radar was added."""
+    if e - w > 12 or n - s > 8:             # zoomed out: MRMS is as sharp as the screen
+        return False
+    dlat = NX_RANGE / (EARTH_R * math.pi / 180)
+    cx, cy = (w + e) / 2, (s + n) / 2
+    near = sorted((math.hypot((lo - cx) * math.cos(math.radians(cy)), la - cy), site)
+                  for site, (la, lo, _) in NX_SITES.items()
+                  if s - dlat < la < n + dlat and w - dlat / math.cos(math.radians(la)) < lo < e + dlat / math.cos(math.radians(la)))
+    added = False
+    with _nx_lock:
+        for _, site in near[:NX_VIEW]:
+            if site in _nx_active:
+                _nx_active[site] = max(_nx_active[site], now)
+                continue
+            if len(_nx_active) >= NX_CAP:
+                seen, old = min((t, s) for s, t in _nx_active.items())
+                if now - seen < NX_HOLD:
+                    continue
+                del _nx_active[old]
+            _nx_active[site] = now
+            added = True
+    if added:
+        _nx_wake.set()
+    return added
+
+
+def nx_crop_box(w, s, e, n, step=1):
+    """NX cell ranges (r0, r1, c0, c1) and step of a lat/lon box, snapped outward to
+    the step, the step raised until both sides fit NX_CROP_MAX; None off the grid."""
+    step = max(1, int(step))
+    while True:
+        out = lambda v, lo, hi: min(max(v, lo), hi) * step
+        r0 = out(math.floor((MRMS_NORTH - n) / NX_RES / step + 1e-6), 0, MRMS_NY * NX_SUB // step)
+        r1 = out(math.ceil((MRMS_NORTH - s) / NX_RES / step - 1e-6), 0, MRMS_NY * NX_SUB // step)
+        c0 = out(math.floor((w - MRMS_WEST) / NX_RES / step + 1e-6), 0, MRMS_NX * NX_SUB // step)
+        c1 = out(math.ceil((e - MRMS_WEST) / NX_RES / step - 1e-6), 0, MRMS_NX * NX_SUB // step)
+        if r1 <= r0 or c1 <= c0:
+            return None
+        if max(r1 - r0, c1 - c0) <= NX_CROP_MAX * step:
+            return r0, r1, c0, c1, step
+        step += 1
+
+
+def nx_crop_bounds(r0, r1, c0, c1, step):
+    """X-Crop header: west,south,east,north (outer cell edges, degrees),step."""
+    return (f'{MRMS_WEST + c0 * NX_RES:.4f},{MRMS_NORTH - r1 * NX_RES:.4f},'
+            f'{MRMS_WEST + c1 * NX_RES:.4f},{MRMS_NORTH - r0 * NX_RES:.4f},{step}')
+
+
+def nx_sample(T, rows, cols):
+    """q, class and coverage (0-255) of frame T at NX cells rows x cols (1-D, ascending);
+    no coverage past the composite. None when the frame has no block there."""
+    with _nx_lock:
+        frame = _nx_frames.get(T)
+    if frame is None:
+        return None
+    q = np.full((len(rows), len(cols)), 255, np.uint8)
+    cls, cov = np.zeros_like(q), np.zeros_like(q)
+    hit = False
+    for br in np.unique(rows // NX_BLOCK):
+        ri = np.flatnonzero(rows // NX_BLOCK == br)
+        for bc in np.unique(cols // NX_BLOCK):
+            z = frame['blocks'].get((int(br), int(bc)))
+            if z is None:
+                continue
+            hit = True
+            ci = np.flatnonzero(cols // NX_BLOCK == bc)
+            bq, bcl, bcov = nx_block_arrays(z)
+            lr, lc = rows[ri] - br * NX_BLOCK, cols[ci] - bc * NX_BLOCK
+            q[np.ix_(ri, ci)] = bq[np.ix_(lr, lc)]
+            cls[np.ix_(ri, ci)] = bcl[np.ix_(lr, lc)]
+            cov[np.ix_(ri, ci)] = bcov[np.ix_(lr // NX_SUB, lc // NX_SUB)]
+    return (q, cls, cov) if hit else None
+
+
+def nx_tile_sample(T, fr, fc):
+    """NEXRAD frame T at fractional NX cell-center coordinates (1-D rows, cols):
+    bilinear dBZ and covered weight (as mrms_dbz), bilinear coverage (0-1) and snow
+    (the nearest cell's class); None where the frame has nothing."""
+    r0, c0 = int(np.floor(fr.min())), int(np.floor(fc.min()))
+    rows, cols = np.arange(r0, int(np.floor(fr.max())) + 2), np.arange(c0, int(np.floor(fc.max())) + 2)
+    got = nx_sample(T, np.clip(rows, 0, None), np.clip(cols, 0, None))
+    if got is None:
+        return None
+    q, cls, cov = got
+    dbz, den = mrms_dbz(q, fr - r0, fc - c0)
+    cv, _ = mrms_dbz(np.minimum(cov, 254), fr - r0, fc - c0)   # coverage bilinear the same way (255 would read as uncovered)
+    near = cls[np.ix_(np.clip(np.rint(fr - r0).astype(np.int64), 0, len(rows) - 1),
+                      np.clip(np.rint(fc - c0).astype(np.int64), 0, len(cols) - 1))]
+    return dbz, den, np.clip((cv + 32) * 2 / 255, 0, 1), near == 1
+
+
+@functools.lru_cache(maxsize=180)
+def nx_crop(T, rev, r0, r1, c0, c1, step):
+    """RGB PNG of frame T over a crop box, a cell every step, rows north to south:
+    R q (MRMS quantization, 255 no coverage), G coverage (0-255: MRMS shows through
+    where low), B class (0 rain, 1 snow, 2 mix). rev keys the cache: frames are
+    rebuilt when a nearer scan arrives."""
+    got = nx_sample(T, np.arange(r0 + step // 2, r1, step), np.arange(c0 + step // 2, c1, step))
+    if got is None:
+        raise NotPublished
+    q, cls, cov = got
+    return raw_png(np.dstack([q, cov, cls]))
+
+
+def nx_rev_is(T, rev):
+    """Frame T has reached this rev: crops and tiles are cached by rev, so a rev the frame
+    has not reached yet must not cache today's build under it (an older one is fine: revs
+    only grow, and a page's frame list can be a minute behind the rebuilds)."""
+    with _nx_lock:
+        f = _nx_frames.get(T)
+        return f is not None and f['rev'] >= rev and bool(f['blocks'])
+
+
+def nx_index():
+    with _nx_lock:
+        frames = sorted(T for T, f in _nx_frames.items() if f['blocks'])
+        return {'frames': frames, 'revs': [_nx_frames[T]['rev'] for T in frames],
+                'snow': any(any(_nx_frames[T]['snow'].values()) for T in frames),
+                'sites': sorted(s for s in _nx_active if _nx_scans.get(s))}
+
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        if not self.path.startswith(('/health', '/status', '/mrms')):  # polled constantly
+        if not self.path.startswith(('/health', '/status', '/mrms', '/nexrad')):  # polled constantly
             print('[HTTP]', fmt % args, flush=True)
 
     def send_json(self, code, obj, cached=False):
@@ -2162,13 +2891,34 @@ class Handler(BaseHTTPRequestHandler):
             except NotPublished:
                 return self.send_json(404, {'error': 'Not in the radar ring'})
             return self.send_png(body, {'X-Crop': mrms_crop_bounds(*cells)})
+        if url.path == '/nexrad':
+            return self.send_json(200, nx_index())
+        m = re.fullmatch(r'/nexrad/(\d{10})/crop\.png', url.path)
+        if m:
+            q = parse_qs(url.query)
+            box = mrms_crop_query(q)
+            cells = box and nx_crop_box(*box)
+            rev = q.get('r', ['0'])[0]
+            if not cells or not re.fullmatch(r'\d{1,12}', rev):
+                return self.send_json(400, {'error': 'Invalid crop'})
+            nx_touch(*box[:4], time.time())   # a view here: its radars come on (in the background)
+            if not nx_rev_is(int(m.group(1)), int(rev)):
+                return self.send_json(404, {'error': 'No NEXRAD frame there'})
+            try:
+                body = nx_crop(int(m.group(1)), int(rev), *cells)
+            except NotPublished:
+                return self.send_json(404, {'error': 'No NEXRAD frame there'})
+            return self.send_png(body, {'X-Crop': nx_crop_bounds(*cells)})
         m = re.fullmatch(r'/mrms/(\d{10})/(\d{1,2})/(\d{1,4})/(\d{1,4})\.png', url.path)
         if m:
             t, z, x, y = map(int, m.groups())
-            if z > MRMS_MAXZOOM or x >= 2 ** z or y >= 2 ** z:
+            nx = parse_qs(url.query).get('nx', [None])[0]
+            if z > MRMS_MAXZOOM or x >= 2 ** z or y >= 2 ** z or not (nx is None or re.fullmatch(r'\d{1,12}', nx)):
                 return self.send_json(400, {'error': 'Invalid tile'})
+            if nx is not None and z >= NX_TILE_MINZOOM and not nx_rev_is(t, int(nx)):
+                return self.send_json(404, {'error': 'No NEXRAD frame there'})
             try:
-                body = mrms_tile(t, z, x, y)
+                body = mrms_tile(t, z, x, y, None if nx is None else int(nx))
             except NotPublished:
                 return self.send_json(404, {'error': 'Not in the radar ring'})
             return self.send_png(body)
@@ -2206,4 +2956,5 @@ if __name__ == '__main__':
     maybe_start_index_build()
     threading.Thread(target=preload_fields if FIELD_PRELOAD else purge_fields, daemon=True).start()
     threading.Thread(target=mrms_poller, daemon=True).start()
+    threading.Thread(target=nx_poller, daemon=True).start()
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()

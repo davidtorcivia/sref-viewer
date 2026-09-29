@@ -26,6 +26,11 @@ const assert = require('node:assert/strict');
     // Phones: coarser texels
     assert.ok(g.cropFor({ ...nyc, zoom: 5 }, { texelPx: 1.5 }).step > g.cropFor({ ...nyc, zoom: 5 }).step);
     assert.equal(g.cropFor({ west: 0, south: 0, east: 10, north: 10, zoom: 6 }), null, 'off the grid');
+    // NEXRAD's finer cells and 4-byte texels: the same box, the budget counts bytes
+    c = g.cropFor({ ...nyc, zoom: 11 }, { frames: 10, cell: g.NX_CELL, bytes: 4 });
+    assert.deepEqual([c.w, c.s, c.e, c.n, c.step], [-75.5, 39.3, -72.5, 42.1, 1]);
+    c = g.cropFor({ ...nyc, zoom: 9 }, { frames: 60, cell: g.NX_CELL, bytes: 4 });
+    assert.ok(60 * 4 * ((c.e - c.w) / g.NX_CELL / c.step) * ((c.n - c.s) / g.NX_CELL / c.step) <= 96e6 * 1.0001 && c.step === 2, c.step);
 
     // Re-crop when the view leaves the crop or a finer step is wanted, not for small pans
     const cur = { bounds: [-75.52, 39.28, -72.48, 42.16], step: 2 };
@@ -55,6 +60,10 @@ const assert = require('node:assert/strict');
     let m = g.frameMix(six, 0.9 * 360);                       // late in a step: still the first frame
     assert.equal(m.t1, 360); assert.equal(m.w, 0); assert.equal(m.k0 + m.k1, 0);
     assert.equal(g.shownTime(six, 0.9 * 360), 0);
+    // smooth (comparison only): each frame moves toward the in-between time, the blend is linear
+    m = g.frameMix(six, 90, true);
+    assert.deepEqual(m, { t0: 0, t1: 360, w: 0.25, k0: 0.25 * 360 / g.FLOW_S, k1: -0.75 * 360 / g.FLOW_S, step: 0, gap: 360 });
+    assert.equal(g.frameMix(six, 90).w, 0, 'crisp by default');
     // Nowcast: discrete 6-minute steps of the newest frame moved k flow periods (2 min) along v
     m = g.frameMix(six, 1080 + 100);                          // first step, held: the newest frame itself
     assert.deepEqual(m, { t0: 1080, t1: 1080, w: 0, k0: 0, k1: 3, step: 0, gap: 360 });

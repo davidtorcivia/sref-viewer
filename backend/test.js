@@ -141,6 +141,11 @@ assert.deepStrictEqual([-74, -90, -105, -118].map(zoneByLongitude),
     const solo = shapeRadarFrames(null, [3000], 3100);
     assert.strictEqual(solo.radar.source, 'mrms');
     assert.strictEqual(solo.satellite, undefined);
+    // NEXRAD composite: its frames' revs ride on the MRMS frames at the same times, snow flag with them
+    const nx = shapeRadarFrames(libre, [3000, 3120], 3200, { frames: [3120, 3240], revs: [7, 8], snow: true });
+    assert.deepStrictEqual(nx.radar.past, [{ time: 3000, path: '/mrms/3000' }, { time: 3120, path: '/mrms/3120', nx: 7 }]);
+    assert.strictEqual(nx.radar.snow, true);
+    assert.strictEqual(shapeRadarFrames(libre, [3000], 3100, { frames: [], revs: [], snow: false }).radar.snow, undefined);
 }
 
 // MRMS crop/motion queries: finite box west<east, south<north, step 1-64, mean only '1'
@@ -162,6 +167,12 @@ for (const bad of [{ w: '-73', s: '40', e: '-75', n: '41' }, { w: '-75', s: '41'
     for (const path of [`/12345/crop.png?${box}`, `/1759100000/tile.png?${box}`, `/1759100000/crop.png?w=-75`,
         `/1759100000/crop.png?${box}&mean=1`, `/1759100000/flow.png?${box}&step=99`]) {
         assert.strictEqual((await fetch(base + path)).status, 400, path);
+    }
+    const root = `http://127.0.0.1:${server.address().port}/api/radar`;
+    for (const path of [`/nexrad/1759100000/crop.png?${box}`, `/nexrad/1759100000/crop.png?${box}&r=x`,
+        `/nexrad/12345/crop.png?${box}&r=1`, `/nexrad/1759100000/crop.png?${box}&r=1&mean=1`,
+        `/tile/1759100000/9/150/192.png?nx=abc`, `/tile/1759100000/9/150/192.png?src=librewxr&nx=1`]) {
+        assert.strictEqual((await fetch(root + path)).status, 400, path);
     }
     server.close();
     console.log('backend: all checks passed');

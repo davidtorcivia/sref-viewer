@@ -10,8 +10,9 @@
  * no coverage is masked), and only then looks the palette up, so storm edges
  * are smooth contours rather than 1 km squares.
  *
- * Observed scans (radar.js keeps one every 6 minutes: each radar updates on
- * its own 4-10 minute schedule, so 2-minute scans flicker in patches) are shown
+ * Observed scans (radar.js keeps MRMS one every 6 minutes: each radar updates on
+ * its own 4-10 minute schedule, so 2-minute scans flicker in patches; every 2
+ * minutes where the time-aligned NEXRAD composite covers the time) are shown
  * as they are, never moved. Only the last 45% of each step blends (ease in-out) toward
  * the next scan, and in dBZ (the two values are interpolated, then the palette
  * applied once), so there is never a translucent double image. Where the next
@@ -21,6 +22,13 @@
  * scan moved lead x v along the mean motion of the last 30 minutes, with the
  * same short dBZ blend between steps; same colors at every lead (a fade would
  * read as a weakening storm), marked by a fine diagonal hatch.
+ *
+ * NEXRAD: where the extractor has a composite of the local radars (250 m,
+ * cleaned, time-aligned, with precip type) its crop draws over MRMS: its G
+ * channel says how far inside the radars' range a cell is, and the two blend
+ * in dBZ by it, so MRMS fades out over the outer 30 km instead of an edge.
+ * The composite's frames sit at MRMS scan times and ride the same clock,
+ * motion and nowcast. Snow paints the palette's second row.
  *
  * Texture uploads happen inside render(): MapLibre caches GL state and only
  * resets it after a custom layer's render call.
@@ -34,7 +42,9 @@ export const AGE_UNIT = 10;
 export const CELL_DEG = 0.01;
 export const FLOW_S = 120;
 export const NOWCAST_S = 3600;
-export const STEP_S = 360;    // observed frames and nowcast steps (radar.js keeps a scan every 6 minutes)
+export const STEP_S = 360;    // nowcast steps, and MRMS-only observed frames (radar.js)
+export const NX_CELL = 0.0025; // NEXRAD composite cells (extractor NX_RES)
+export const NX_MINZOOM = 6;   // coarser views: MRMS alone (as sharp as the screen there)
 const GRID = { west: -130, south: 20, east: -60, north: 55 };   // MRMS CONUS outer edges
 const TEX_MAX = 2048;
 const MARGIN_DEG = 1.0;       // crop margin past the view: a 60-minute backtrace at ~100 km/h
@@ -48,17 +58,17 @@ export const latAt = y => Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Ma
 /**
  * Crop to ask for over a view {west, south, east, north, zoom}: the view plus
  * a margin, clamped to the grid, at the coarsest of three steps: about one
- * texel per CSS pixel (texelPx > 1 coarser, for phones), frames x texels
- * within `budget` bytes, and both sides within TEX_MAX.
+ * texel per CSS pixel (texelPx > 1 coarser, for phones), frames x texels x
+ * `bytes` within `budget`, and both sides within TEX_MAX. cell: grid degrees.
  */
-export function cropFor(view, { frames = 60, budget = 96e6, texelPx = 1 } = {}) {
+export function cropFor(view, { frames = 60, budget = 96e6, texelPx = 1, cell = CELL_DEG, bytes = 1 } = {}) {
     const mx = Math.max((view.east - view.west) / 2, MARGIN_DEG), my = Math.max((view.north - view.south) / 2, MARGIN_DEG);
     const w = Math.max(view.west - mx, GRID.west), e = Math.min(view.east + mx, GRID.east);
     const s = Math.max(view.south - my, GRID.south), n = Math.min(view.north + my, GRID.north);
     if (!(w < e && s < n)) return null;
-    const cols = (e - w) / CELL_DEG, rows = (n - s) / CELL_DEG;
-    const cellsPerPx = 360 / (512 * 2 ** view.zoom) / CELL_DEG;
-    const step = Math.max(1, Math.floor(cellsPerPx * texelPx), Math.ceil(Math.sqrt(cols * rows * frames / budget)),
+    const cols = (e - w) / cell, rows = (n - s) / cell;
+    const cellsPerPx = 360 / (512 * 2 ** view.zoom) / cell;
+    const step = Math.max(1, Math.floor(cellsPerPx * texelPx), Math.ceil(Math.sqrt(cols * rows * frames * bytes / budget)),
         Math.ceil(Math.max(cols, rows) / TEX_MAX));
     const r = v => Math.round(v * 1e4) / 1e4;
     return { w: r(w), s: r(s), e: r(e), n: r(n), step };
@@ -87,6 +97,10 @@ export function bracket(times, T) {
 // The last BLEND of each step eases toward the next one (in dBZ); the rest holds.
 // 0: crisp steps (hold-then-ease read as an inchworm; plain steps looked natural)
 export const BLEND = 0;
+// Smooth playback between observed frames: each warped along its motion to the
+// in-between time and blended in dBZ. Off: the user judged MRMS this way uncanny
+// (radars update out of step); NEXRAD frames are time-aligned, kept to compare.
+export const SMOOTH = false;
 export function blendWeight(a) {
     if (BLEND <= 0) return a >= 1 ? 1 : 0;
     const x = Math.min(Math.max((a - (1 - BLEND)) / BLEND, 0), 1);
@@ -97,7 +111,7 @@ export function blendWeight(a) {
 // dBZ blend weight w toward t1, and how far each is moved along the mean motion
 // in flow periods (k0, k1: whole STEP_S nowcast steps, 0 for observed scans);
 // step = the nowcast step on screen (0 observed), for the badge and the hatch
-export function frameMix(times, T) {
+export function frameMix(times, T, smooth = SMOOTH) {
     const at = bracket(times, T);
     if (!at) return null;
     if (at.lead > 0) {
@@ -105,7 +119,12 @@ export function frameMix(times, T) {
         const w = s >= n ? 0 : blendWeight(at.lead / STEP_S - s);
         return { t0: at.t0, t1: at.t0, w, k0: s * k, k1: Math.min(s + 1, n) * k, step: w >= 0.5 ? s + 1 : s, gap: STEP_S };
     }
-    return { t0: at.t0, t1: at.t1, w: blendWeight(at.a), k0: 0, k1: 0, step: 0, gap: at.t1 - at.t0 };
+    const gap = at.t1 - at.t0;
+    if (smooth && gap > 0) {
+        // t0 carried forward a x gap, t1 back (1 - a) x gap (k1 < 0: against the motion)
+        return { t0: at.t0, t1: at.t1, w: at.a, k0: at.a * gap / FLOW_S, k1: -(1 - at.a) * gap / FLOW_S, step: 0, gap };
+    }
+    return { t0: at.t0, t1: at.t1, w: blendWeight(at.a), k0: 0, k1: 0, step: 0, gap };
 }
 
 // The time of the picture on screen: the scan it mostly shows, or the nowcast step's time
@@ -157,8 +176,9 @@ precision highp int;
 in vec2 v_merc;
 out vec4 color;
 uniform sampler2D u_r0, u_r1, u_f1, u_fm, u_pal;   // scans, scan 1's motion (its age), the nowcast's motion
-uniform vec4 u_b0, u_b1, u_bf1, u_bfm;            // texture bounds: west, south, east, north (degrees)
-uniform float u_w, u_k0, u_k1, u_gap, u_opacity, u_hatch, u_hatchPx;
+uniform sampler2D u_n0, u_n1;                     // NEXRAD composite of each scan's time (RGB: q, coverage, class)
+uniform vec4 u_b0, u_b1, u_bf1, u_bfm, u_bn0, u_bn1;   // texture bounds: west, south, east, north (degrees)
+uniform float u_w, u_k0, u_k1, u_gap, u_opacity, u_hatch, u_hatchPx, u_hasN0, u_hasN1;
 uniform int u_steps;             // nowcast substeps (it follows the flow around curves)
 const float PI = 3.141592653589793;
 
@@ -198,21 +218,49 @@ vec2 dbz(sampler2D t, vec4 b, vec2 ll) {
     return vec2(den > 0.0 ? num / den : -32.0, den);
 }
 
-// Palette by q (0.5 dBZ steps): the extractor's 5 dBZ bands, clear under 10 dBZ
-vec4 ramp(vec2 d) {
+// NEXRAD at ll: bilinear dBZ and covered weight as dbz(), bilinear coverage (G), snow (nearest B == 1)
+vec4 nexrad(sampler2D t, vec4 b, vec2 ll) {
+    ivec2 size = textureSize(t, 0);
+    vec2 p = uvIn(b, ll) * vec2(size) - 0.5;
+    if (p.x < -0.5 || p.y < -0.5 || p.x > float(size.x) - 0.5 || p.y > float(size.y) - 0.5) return vec4(-32.0, 0.0, 0.0, 0.0);
+    ivec2 i = ivec2(floor(p));
+    vec2 f = p - floor(p);
+    float num = 0.0, den = 0.0, cov = 0.0;
+    for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+            vec3 v = texelFetch(t, clamp(i + ivec2(dx, dy), ivec2(0), size - 1), 0).rgb * 255.0;
+            float w = (dx == 0 ? 1.0 - f.x : f.x) * (dy == 0 ? 1.0 - f.y : f.y);
+            cov += w * v.g / 255.0;
+            if (v.r < 254.5) { num += w * (v.r * 0.5 - 32.0); den += w; }
+        }
+    }
+    float snow = texelFetch(t, clamp(ivec2(floor(p + 0.5)), ivec2(0), size - 1), 0).b * 255.0;
+    return vec4(den > 0.0 ? num / den : -32.0, den, cov, abs(snow - 1.0) < 0.5 ? 1.0 : 0.0);
+}
+
+// MRMS dBZ d with the NEXRAD sample n over it, blended in dBZ by n's coverage: (dBZ, covered, snow)
+vec3 over(vec2 d, vec4 n) {
+    if (n.y < 0.5) return vec3(d, 0.0);
+    return vec3(d.y >= 0.5 ? mix(d.x, n.x, n.z) : n.x, 1.0, n.z >= 0.5 ? n.w : 0.0);
+}
+
+// Palette by q (0.5 dBZ steps): the extractor's 5 dBZ bands, clear under 10 dBZ; row 1 snow
+vec4 ramp(vec3 d) {
     if (d.y < 0.5) return vec4(0.0);
     float q = clamp(floor((d.x + 32.0) * 2.0 + 1e-3), 0.0, 254.0);
-    return texelFetch(u_pal, ivec2(int(q), 0), 0);
+    return texelFetch(u_pal, ivec2(int(q), d.z > 0.5 ? 1 : 0), 0);
 }
 
 void main() {
     vec2 ll = vec2(v_merc.x * 360.0 - 180.0, degrees(atan(sinh(PI * (1.0 - 2.0 * v_merc.y)))));
-    vec2 d = dbz(u_r0, u_b0, u_k0 > 0.0 ? trace(u_fm, u_bfm, ll, -u_k0, u_steps) : ll);
+    vec2 ll0 = u_k0 != 0.0 ? trace(u_fm, u_bfm, ll, -u_k0, u_steps) : ll;
+    vec3 d = u_hasN0 > 0.0 ? over(dbz(u_r0, u_b0, ll0), nexrad(u_n0, u_bn0, ll0)) : vec3(dbz(u_r0, u_b0, ll0), 0.0);
     // blend toward the next scan / step in dBZ, then one palette lookup; where the next
     // scan's data is as old as the step (the same radar data) it holds
-    if (u_w > 0.0 && (u_k1 > 0.0 || age(u_f1, u_bf1, ll) < u_gap - 1.0)) {
-        vec2 d1 = dbz(u_r1, u_b1, u_k1 > 0.0 ? trace(u_fm, u_bfm, ll, -u_k1, u_steps) : ll);
-        d = d.y >= 0.5 && d1.y >= 0.5 ? vec2(mix(d.x, d1.x, u_w), 1.0) : (u_w < 0.5 ? d : d1);
+    if (u_w > 0.0 && (u_k1 != 0.0 || u_hasN1 > 0.0 || age(u_f1, u_bf1, ll) < u_gap - 1.0)) {
+        vec2 ll1 = u_k1 != 0.0 ? trace(u_fm, u_bfm, ll, -u_k1, u_steps) : ll;
+        vec3 d1 = u_hasN1 > 0.0 ? over(dbz(u_r1, u_b1, ll1), nexrad(u_n1, u_bn1, ll1)) : vec3(dbz(u_r1, u_b1, ll1), 0.0);
+        d = d.y >= 0.5 && d1.y >= 0.5 ? vec3(mix(d.x, d1.x, u_w), 1.0, u_w < 0.5 ? d.z : d1.z) : (u_w < 0.5 ? d : d1);
     }
     color = ramp(d) * u_opacity;   // palette rgb is 0 where clear: premultiplied
     // Forecast: diagonal stripes toward white (premultiplied: alpha) and black, echo only
@@ -234,7 +282,9 @@ export class MrmsLayer {
         this.opts = opts;
         this.times = [];            // observed scan times, ascending
         this.T = 0;                 // clock (epoch seconds)
-        this.entries = new Map();   // time -> { crop, flow, got, loading }; crop/flow = { tex, bounds, key }
+        this.entries = new Map();   // time -> { crop, flow, nx, got, loading }; crop/flow/nx = { tex, bounds, key }
+        this.revs = new Map();      // time -> NEXRAD composite rev (times without one have no composite)
+        this.nxCrop = null;         // wanted NEXRAD crop { key } (null zoomed out)
         this.nowcast = null;        // { time, key, tex, bounds } mean motion at the newest scan
         this.crop = null;           // wanted crop { w, s, e, n, step, key, bounds }
         this.uploads = [];          // decoded images waiting for render()
@@ -273,11 +323,13 @@ export class MrmsLayer {
         queueMicrotask(() => this.opts.onFail?.(String(reason)));
     }
 
-    setTimes(times) {
+    // revs: Map time -> NEXRAD rev for the times with a composite
+    setTimes(times, revs = new Map()) {
         this.times = times;
+        this.revs = revs;
         for (const [t, e] of this.entries) {
             if (!times.includes(t)) { this.drop(e); this.entries.delete(t); }
-            else e.flowMissing = e.cropMissing = null;   // motion computed since, a busy moment passed: ask again
+            else e.flowMissing = e.cropMissing = e.nxMissing = null;   // motion computed since, a busy moment passed: ask again
         }
         this.nowcastTried = null;
         this.refresh();
@@ -303,12 +355,21 @@ export class MrmsLayer {
             this.crop = { ...want, key: `w=${want.w}&s=${want.s}&e=${want.e}&n=${want.n}&step=${want.step}`,
                 bounds: [want.w, want.s, want.e, want.n] };
         }
+        // NEXRAD: the same box idea on its finer grid (RGB texels), only zoomed in and where it has frames
+        const nx = this.opts.nxUrl && this.revs.size && view.zoom >= NX_MINZOOM
+            && cropFor(view, { frames: this.times.length, budget: this.opts.budget, texelPx: this.opts.texelPx, cell: NX_CELL, bytes: 4 });
+        if (!nx) this.nxCrop = null;
+        else if (needsCrop(this.nxCrop, view, nx)) {
+            this.nxCrop = { ...nx, key: `w=${nx.w}&s=${nx.s}&e=${nx.e}&n=${nx.n}&step=${nx.step}`, bounds: [nx.w, nx.s, nx.e, nx.n] };
+        }
         this.pump();
     }
 
     pump() {
         if (!this.crop) return;
         const key = this.crop.key;
+        // the NEXRAD crop key names the frame's rev too: a rebuilt frame is a new texture
+        const nxKey = t => this.nxCrop && this.revs.has(t) ? `${this.nxCrop.key}&r=${this.revs.get(t)}` : null;
         const newest = this.times[this.times.length - 1];
         const nowcastKey = `${key}@${newest}`;
         if (newest && (this.nowcast?.key !== key || this.nowcast.time !== newest) && this.nowcastTried !== nowcastKey) {
@@ -321,7 +382,9 @@ export class MrmsLayer {
         const todo = this.times
             .filter(t => {
                 const e = this.entries.get(t);
-                return !e || !e.loading && (e.got.crop !== key && e.cropMissing !== key || e.got.flow !== key && e.flowMissing !== key);
+                const nk = nxKey(t);
+                return !e || !e.loading && (e.got.crop !== key && e.cropMissing !== key || e.got.flow !== key && e.flowMissing !== key
+                    || nk && e.got.nx !== nk && e.nxMissing !== nk);
             })
             .sort((a, b) => Math.abs(a - this.T) - Math.abs(b - this.T));
         while (todo.length && this.inFlight < LOAD_PARALLEL) {
@@ -330,11 +393,21 @@ export class MrmsLayer {
             this.entries.set(t, entry);
             entry.loading = true;
             this.inFlight++;
+            const nk = nxKey(t);
             Promise.all([
                 entry.got.crop === key ? null : this.load(t, 'crop', key),
                 entry.got.flow === key ? null : this.load(t, 'flow', key),
-            ]).then(([crop, flow]) => {
-                if (this.crop?.key !== key || this.entries.get(t) !== entry) return;
+                !nk || entry.got.nx === nk ? null : this.load(t, 'nexrad', nk),
+            ]).then(([crop, flow, nx]) => {
+                if (this.crop?.key !== key || this.entries.get(t) !== entry) {
+                    for (const img of [crop, flow, nx]) img?.bitmap.close();
+                    return;
+                }
+                if (nx && nk === nxKey(t)) { this.uploads.push({ time: t, kind: 'nx', key: nk, ...nx }); entry.got.nx = nk; }
+                else {
+                    nx?.bitmap.close();                             // its rev or box moved on meanwhile
+                    if (nk && entry.got.nx !== nk) entry.nxMissing = nk;   // no composite there: MRMS alone
+                }
                 if (crop) { this.uploads.push({ time: t, kind: 'crop', key, ...crop }); entry.got.crop = key; }
                 else if (entry.got.crop !== key) entry.cropMissing = key;   // retried on the next frame list
                 if (flow) { this.uploads.push({ time: t, kind: 'flow', key, ...flow }); entry.got.flow = key; }
@@ -348,7 +421,7 @@ export class MrmsLayer {
     // One PNG decoded to an ImageBitmap with its X-Crop bounds; null if unavailable
     async load(time, kind, query) {
         try {
-            const res = await fetch(this.opts.url(time, kind, query));
+            const res = await fetch(kind === 'nexrad' ? this.opts.nxUrl(time, query) : this.opts.url(time, kind, query));
             if (!res.ok) return null;
             const [w, s, e, n] = (res.headers.get('X-Crop') || '').split(',').map(Number);
             if (kind !== 'palette' && !(w < e && s < n)) return null;
@@ -389,6 +462,7 @@ export class MrmsLayer {
         if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
         this.loc = {};
         for (const u of ['u_matrix', 'u_quad', 'u_r0', 'u_r1', 'u_f1', 'u_fm', 'u_pal', 'u_b0', 'u_b1', 'u_bf1', 'u_bfm',
+            'u_n0', 'u_n1', 'u_bn0', 'u_bn1', 'u_hasN0', 'u_hasN1',
             'u_w', 'u_k0', 'u_k1', 'u_gap', 'u_opacity', 'u_hatch', 'u_hatchPx', 'u_steps']) {
             this.loc[u] = gl.getUniformLocation(prog, u);
         }
@@ -425,10 +499,11 @@ export class MrmsLayer {
                 const e = this.entries.get(u.time);
                 if (e) {
                     if (e[u.kind]?.tex) gl.deleteTexture(e[u.kind].tex);
-                    const crop = u.kind === 'crop';
+                    const crop = u.kind === 'crop', nearest = u.kind !== 'flow';
                     e[u.kind] = { key: u.key, bounds: u.bounds,
-                        tex: this.texture(gl, u.bitmap, crop ? gl.R8 : gl.RGB8, crop ? gl.RED : gl.RGB, crop ? gl.NEAREST : gl.LINEAR) };
+                        tex: this.texture(gl, u.bitmap, crop ? gl.R8 : gl.RGB8, crop ? gl.RED : gl.RGB, nearest ? gl.NEAREST : gl.LINEAR) };
                     if (u.kind === 'crop' && u.key === this.crop?.key) this.crop.bounds = u.bounds;
+                    if (u.kind === 'nx' && this.nxCrop && u.key.startsWith(`${this.nxCrop.key}&`)) this.nxCrop.bounds = u.bounds;
                 }
             }
             u.bitmap.close();
@@ -458,8 +533,11 @@ export class MrmsLayer {
         gl.bindVertexArray(this.vao);
         gl.uniformMatrix4fv(this.loc.u_matrix, false, matrix);
         gl.uniform4fv(this.loc.u_quad, quad);
+        // NEXRAD over MRMS where this time has a composite (an older rev's stays until the new one lands)
+        const n0 = this.nxCrop && this.revs.has(at.t0) && e0.nx, n1 = this.nxCrop && this.revs.has(at.t1) && e1.nx;
         [[e0.crop.tex, 'u_r0'], [e1.crop.tex, 'u_r1'], [f1?.tex || this.still, 'u_f1'],
-            [fm?.tex || this.still, 'u_fm'], [this.palette, 'u_pal']].forEach(([tex, u], i) => {
+            [fm?.tex || this.still, 'u_fm'], [this.palette, 'u_pal'],
+            [n0?.tex || this.still, 'u_n0'], [n1?.tex || this.still, 'u_n1']].forEach(([tex, u], i) => {
             gl.activeTexture(gl.TEXTURE0 + i);
             gl.bindTexture(gl.TEXTURE_2D, tex);
             gl.uniform1i(this.loc[u], i);
@@ -468,12 +546,16 @@ export class MrmsLayer {
         gl.uniform4fv(this.loc.u_b1, b[1]);
         gl.uniform4fv(this.loc.u_bf1, f1?.bounds || b[1]);
         gl.uniform4fv(this.loc.u_bfm, fm?.bounds || b[0]);
+        gl.uniform4fv(this.loc.u_bn0, n0?.bounds || b[0]);
+        gl.uniform4fv(this.loc.u_bn1, n1?.bounds || b[1]);
+        gl.uniform1f(this.loc.u_hasN0, n0 ? 1 : 0);
+        gl.uniform1f(this.loc.u_hasN1, n1 ? 1 : 0);
         gl.uniform1f(this.loc.u_w, at.w);
         gl.uniform1f(this.loc.u_k0, at.k0);
         gl.uniform1f(this.loc.u_k1, at.k1);
         gl.uniform1f(this.loc.u_gap, at.gap);
         // the nowcast follows the flow around curves: a substep per ~10 minutes of travel
-        gl.uniform1i(this.loc.u_steps, Math.min(8, Math.ceil(at.k1 / 5) + 1));
+        gl.uniform1i(this.loc.u_steps, Math.min(8, Math.ceil(Math.max(Math.abs(at.k0), Math.abs(at.k1)) / 5) + 1));
         gl.uniform1f(this.loc.u_opacity, this.opts.opacity);
         gl.uniform1f(this.loc.u_hatch, hatchStrength(at.step));
         // period along the diagonal is HATCH_PX CSS px: x + y steps sqrt(2) per diagonal px
@@ -486,7 +568,7 @@ export class MrmsLayer {
 
     drop(e) {
         if (!this.gl) return;
-        for (const k of ['crop', 'flow']) if (e[k]?.tex) this.gl.deleteTexture(e[k].tex);
+        for (const k of ['crop', 'flow', 'nx']) if (e[k]?.tex) this.gl.deleteTexture(e[k].tex);
     }
 
     // Context lost: every handle is dead; render() sets up again and refresh() reloads

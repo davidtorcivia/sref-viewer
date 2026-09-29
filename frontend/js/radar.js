@@ -159,6 +159,7 @@ let currentFrame = 0;
 let playing = false;
 let playTimer = null;
 let glLayer = null;               // MRMS on the GPU (radar-gl.js)
+let radarSnow = false;            // some NEXRAD composite frame has snow: the legend keeps its Snow row
 let glFailed = typeof WebGL2RenderingContext === 'undefined';   // then MRMS plays as raster tiles
 let clockT = null;                // GPU playback clock (epoch seconds)
 let playRaf = 0;
@@ -180,13 +181,13 @@ function tileUrl(frame) {
     if (frame.field) return `/api/radar/field/${frame.field}/{z}/{x}/{y}.png?v=${FIELD_STYLE_V}`;
     if (frame.sat) return `/api/radar/sat/${frame.time}/{z}/{x}/{y}.png`;
     // The source is in the URL: MRMS and LibreWXR share times, and tiles are browser-cached an hour
-    return `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png?v=${TILE_STYLE_V}${frame.mrms ? '' : '&src=librewxr'}`;
+    return `/api/radar/tile/${frame.time}/{z}/{x}/{y}.png?v=${TILE_STYLE_V}${frame.mrms ? '' : '&src=librewxr'}${frame.nx ? `&nx=${frame.nx}` : ''}`;
 }
 
 function layerId(frame) {
     if (frame.sat) return `sat-${frame.time}`;
     if (frame.field) return `${frame.name}-${frame.time}-c${frame.basis}`;
-    return `radar-${frame.time}${frame.mrms ? '' : '-lw'}`;
+    return `radar-${frame.time}${frame.mrms ? '' : '-lw'}${frame.nx ? `-n${frame.nx}` : ''}`;
 }
 
 // Animated frames for the chosen overlay, plus the static satellite
@@ -200,11 +201,14 @@ async function fetchFrames(which) {
     const sat = (data.satellite?.infrared || []).map(f => ({ ...f, nowcast: false, sat: true }));
     if (which === 'satellite') return { frames: sat, backdrop: null };
     const mrms = data.radar?.source === 'mrms';
+    // nx: the NEXRAD composite's rev at that time (the local radars, drawn over MRMS)
     let past = (data.radar?.past || []).map(f => ({ ...f, nowcast: false, mrms }));
+    radarSnow = !!data.radar?.snow;
     const backdrop = which === 'both' ? sat[sat.length - 1] || null : null;
-    // A scan every 6 minutes (plus the newest): each radar updates on its own 4-10 minute
-    // schedule, so 2-minute scans flicker in patches. Fixed times so a refresh swaps one frame.
-    if (mrms) past = past.filter((f, i) => f.time % STEP_S === 0 || i === past.length - 1);
+    // MRMS alone: a scan every 6 minutes (plus the newest): each radar updates on its own 4-10
+    // minute schedule, so 2-minute scans flicker in patches. Fixed times so a refresh swaps one
+    // frame. Every 2-minute frame with a NEXRAD composite stays: its radars are time-aligned.
+    if (mrms) past = past.filter((f, i) => f.time % STEP_S === 0 || f.nx || i === past.length - 1);
     if (mrms && !glFailed && past.length) {
         // GPU: then the nowcast hour in 6-minute steps
         const last = past[past.length - 1].time;
@@ -256,7 +260,7 @@ function sourceFor(frame) {
         ? { type: 'raster', tiles: [tileUrl(frame)], tileSize: TILE_SIZE, maxzoom: SAT_MAXZOOM,
             attribution: 'Satellite &copy; NOAA GMGSI via <a href="https://librewxr.net/">LibreWXR</a>' }
         : { type: 'raster', tiles: [tileUrl(frame)], tileSize: RADAR_TILE, maxzoom: RADAR_MAXZOOM,
-            attribution: frame.mrms ? 'Radar &copy; NOAA MRMS'
+            attribution: frame.mrms ? `Radar &copy; NOAA MRMS${frame.nx ? ', NEXRAD' : ''}`
                 : 'Radar &copy; <a href="https://librewxr.net/">LibreWXR</a> (CC-BY-4.0)' };
 }
 
@@ -328,13 +332,17 @@ function syncLayers() {
         pending = [];
         glLayer ??= new MrmsLayer({
             opacity: RADAR_OPACITY, budget: GL_BUDGET, texelPx: GL_TEXEL_PX,
-            url: (t, kind, query) => kind === 'palette' ? '/api/radar/mrms/palette.png' : `/api/radar/mrms/${t}/${kind}.png?${query}`,
+            url: (t, kind, query) => kind === 'palette' ? '/api/radar/mrms/palette.png?v=__V__' : `/api/radar/mrms/${t}/${kind}.png?${query}`,
+            nxUrl: (t, query) => `/api/radar/nexrad/${t}/crop.png?${query}`,
             onFail: glFallback,
         });
         if (!map.getLayer(glLayer.id)) map.addLayer(glLayer, ['numbers', 'alerts-fill'].find(id => map.getLayer(id)) ?? labelLayerId());
-        glLayer.setTimes(frames.filter(f => !f.forecast).map(f => f.time));
+        const observed = frames.filter(f => !f.forecast);
+        glLayer.setTimes(observed.map(f => f.time), new Map(observed.filter(f => f.nx).map(f => [f.time, f.nx])));
+        glCredit(observed.some(f => f.nx) ? 'Radar &copy; NOAA MRMS, NEXRAD' : 'Radar &copy; NOAA MRMS');
         return;
     }
+    glCredit(null);
     if (glLayer && map.getLayer(glLayer.id)) map.removeLayer(glLayer.id);
     const wanted = new Set(frames.map(layerId));
     for (const id of [...loadedLayerIds]) if (!wanted.has(id)) removeLayer(id);
@@ -348,6 +356,18 @@ function syncLayers() {
         .sort((a, b) => a.dist - b.dist)
         .map(({ frame }) => frame);
     pumpQueue();
+}
+
+// The GPU layer has no source to carry its credit: an empty one that does, under an invisible layer
+let glCreditText = null;
+function glCredit(text) {
+    if (text === glCreditText) return;
+    glCreditText = text;
+    if (map.getLayer('radar-credit')) map.removeLayer('radar-credit');
+    if (map.getSource('radar-credit')) map.removeSource('radar-credit');
+    if (!text) return;
+    map.addSource('radar-credit', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, attribution: text });
+    map.addLayer({ id: 'radar-credit', type: 'circle', source: 'radar-credit', paint: { 'circle-opacity': 0 } });
 }
 
 function removeLayer(id) {
@@ -636,8 +656,8 @@ async function refreshFrames({ initial = false } = {}) {
         const wasGl = glMode();
         const prevClock = wasGl ? clockT : null;
         frames = newFrames;
-        // Observed MRMS radar has no precip type: the legend drops its Snow row
-        els.legend.dataset.source = frames[0].mrms ? 'mrms' : '';
+        // Observed MRMS radar has no precip type: the legend drops its Snow row unless a NEXRAD composite has snow
+        els.legend.dataset.source = frames[0].mrms && !radarSnow ? 'mrms' : '';
         els.scrubber.max = String(frames.length - 1);
         els.scrubber.step = glMode() ? 'any' : '1';   // the GPU clock scrubs continuously
 
@@ -1030,7 +1050,7 @@ function init() {
         center: start.center,
         zoom: start.zoom,
         minZoom: 3,
-        maxZoom: 12,
+        maxZoom: 13,         // the NEXRAD composite is 250 m (MRMS, 1 km, is drawn smooth past its own detail)
         hash: true,           // Shareable URLs with position (overrides saved)
         fadeDuration: 0,      // No basemap label crossfade - snappier feel
         attributionControl: { compact: true },
