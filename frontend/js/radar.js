@@ -159,7 +159,7 @@ let currentFrame = 0;
 let playing = false;
 let playTimer = null;
 let glLayer = null;               // MRMS on the GPU (radar-gl.js)
-let glFailed = typeof WebGL2RenderingContext === 'undefined';   // then MRMS plays as raster tiles
+let glFailed = true;   // the GPU layer is off while its look is reworked: MRMS plays as raster tiles
 let clockT = null;                // GPU playback clock (epoch seconds)
 let playRaf = 0;
 // MRMS on the GPU: continuous time and the nowcast; everything else is raster frames
