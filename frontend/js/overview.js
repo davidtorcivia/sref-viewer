@@ -523,25 +523,35 @@ async function renderPlace(place, quiet = false) {
 
 // The color field: the next 24 hours, smoothed over three hours so it reads as weather
 // rather than stripes, and softened toward the paper
-// Dark: each color set to a mid-dark lightness with its chroma held, not mixed toward black (a
-// dimmed yellow is olive: mud). Hue runs from deep green to amber on a steep S-curve, so the
-// olive between them is a narrow stretch rather than the whole field
+// The color field's hue by temperature (°F, OKLCH hue): its own scale, green through the comfortable
+// 65-75 °F, turning quickly to gold above them (the olive between is a narrow stretch)
+const FIELD_HUE = [[-10, 290], [10, 272], [20, 262], [32, 238], [45, 205], [55, 180], [65, 152], [75, 138],
+    [80, 85], [85, 60], [90, 42], [95, 30], [110, 15]];
+function fieldHue(f) {
+    if (!(f > FIELD_HUE[0][0])) return FIELD_HUE[0][1];   // (no reading: the cold end, as rampColor)
+    const k = FIELD_HUE.findIndex(([v]) => v >= f);
+    if (k < 0) return FIELD_HUE[FIELD_HUE.length - 1][1];
+    const [[f0, h0], [f1, h1]] = [FIELD_HUE[k - 1], FIELD_HUE[k]];
+    return h0 + (h1 - h0) * (f - f0) / (f1 - f0);
+}
+
+// The color field: one lightness per theme with the ramp's chroma held (mixing toward the paper grayed
+// it on light, toward black muddied it on dark), in the field's own hues
 function fieldGradient(rows, temp) {
     const dark = document.documentElement.dataset.theme === 'dark';
     const soft = t => {
-        if (!dark) return `color-mix(in oklch, ${rampColor(t)} 74%, var(--paper))`;
-        const [, c, h] = rampColor(t).match(/[\d.]+/g).map(Number);
-        const u = Math.min(1, Math.max(0, (h - 70) / 80)), s5 = u * u * u * (u * (u * 6 - 15) + 10), k = s5 * s5 * (3 - 2 * s5);
-        return `oklch(0.45 ${Math.min(0.14, Math.max(0.09, c)).toFixed(3)} ${(h > 70 && h < 150 ? 70 + 80 * k : h).toFixed(1)})`;
+        const c = Number(rampColor(t).match(/[\d.]+/g)[1]), h = fieldHue(t).toFixed(1);
+        return dark ? `oklch(0.45 ${Math.min(0.14, Math.max(0.09, c)).toFixed(3)} ${h})`
+            : `oklch(0.84 ${Math.min(0.13, Math.max(0.07, c * 0.95)).toFixed(3)} ${h})`;
     };
     if (rows.length < 2) return temp != null ? soft(temp) : '';
     const n = rows.length - 1;
     const stops = [];
     for (let i = 0; i <= n; i += 2) {
-        const win = rows.slice(Math.max(0, i - 1), i + 2).map(r => r.tmp);
-        stops.push(`${soft(win.reduce((a, b) => a + b, 0) / win.length)} ${(i / n * 100).toFixed(1)}%`);
+        const win = rows.slice(Math.max(0, i - 1), i + 2).map(r => r.tmp).filter(Number.isFinite);   // a missing hour is skipped, not 0 °F
+        if (win.length) stops.push(`${soft(win.reduce((a, b) => a + b, 0) / win.length)} ${(i / n * 100).toFixed(1)}%`);
     }
-    return `linear-gradient(90deg, ${stops.join(', ')})`;
+    return stops.length > 1 ? `linear-gradient(90deg, ${stops.join(', ')})` : temp != null ? soft(temp) : '';
 }
 
 // Cloud cover along the top edge of the color field: ink density per hour
