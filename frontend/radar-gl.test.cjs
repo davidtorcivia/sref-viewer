@@ -47,21 +47,21 @@ const assert = require('node:assert/strict');
     assert.deepEqual(g.bracket(times, 1120), { t0: 1120, t1: 1240, a: 0, lead: 0 });
 
     // Observed: each frame held crisp, then an eased dBZ blend over the last 45%, no motion
-    for (const a of [0, 0.3, 0.55]) assert.equal(g.blendWeight(a), 0);
-    near(g.blendWeight(0.775), 0.5);
-    assert.ok(g.blendWeight(0.6) < 0.1 && g.blendWeight(0.95) > 0.9, 'eased at both ends');
+    // crisp steps: each frame holds until the next
+    for (const a of [0, 0.3, 0.55, 0.99]) assert.equal(g.blendWeight(a), 0);
     assert.equal(g.blendWeight(1), 1);
     const six = [0, 360, 720, 1080];
     assert.deepEqual(g.frameMix(six, 180), { t0: 0, t1: 360, w: 0, k0: 0, k1: 0, step: 0, gap: 360 });
-    let m = g.frameMix(six, 0.775 * 360);
-    assert.equal(m.t1, 360); near(m.w, 0.5); assert.equal(m.k0 + m.k1, 0);
+    let m = g.frameMix(six, 0.9 * 360);                       // late in a step: still the first frame
+    assert.equal(m.t1, 360); assert.equal(m.w, 0); assert.equal(m.k0 + m.k1, 0);
+    assert.equal(g.shownTime(six, 0.9 * 360), 0);
     // Nowcast: discrete 6-minute steps of the newest frame moved k flow periods (2 min) along v
     m = g.frameMix(six, 1080 + 100);                          // first step, held: the newest frame itself
     assert.deepEqual(m, { t0: 1080, t1: 1080, w: 0, k0: 0, k1: 3, step: 0, gap: 360 });
     m = g.frameMix(six, 1080 + 1800 + 60);                    // +30 min, held
     assert.deepEqual([m.k0, m.k1, m.w, m.step], [15, 18, 0, 5]);
-    m = g.frameMix(six, 1080 + 1800 + 279);                   // blending into +36
-    assert.deepEqual([m.k0, m.k1, m.step], [15, 18, 6]); near(m.w, 0.5);
+    m = g.frameMix(six, 1080 + 1800 + 359);                   // the end of the +30 step: still +30
+    assert.deepEqual([m.k0, m.w, m.step], [15, 0, 5]);
     m = g.frameMix(six, 1080 + 9999);                         // capped at +60, no blend past it
     assert.deepEqual([m.k0, m.w, m.step], [30, 0, 10]);
     // Badge: minutes after the newest frame, counting up in 6s, never negative
@@ -98,7 +98,7 @@ const assert = require('node:assert/strict');
     {
         const ts = [0, 360, 720];
         assert.equal(g.shownTime(ts, 10), 0);
-        assert.equal(g.shownTime(ts, 355), 360);
+        assert.equal(g.shownTime(ts, 355), 0);                  // crisp steps: the scan until the next one
         assert.equal(g.shownTime(ts, 721), 720);                // just past the newest scan: still the newest
         assert.equal(g.shownTime(ts, 720 + 3600), 720 + 3600);  // the last forecast step
         for (let T = 721; T <= 720 + 3600; T += 30) {

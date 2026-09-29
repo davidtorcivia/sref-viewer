@@ -84,9 +84,11 @@ export function bracket(times, T) {
     return { t0: times[i - 1], t1: times[i], a: (T - times[i - 1]) / (times[i] - times[i - 1]), lead: 0 };
 }
 
-// The last BLEND of each step eases toward the next one (in dBZ); the rest holds
-export const BLEND = 0.45;   // each frame reads on its own, then eases (in-out) into the next
+// The last BLEND of each step eases toward the next one (in dBZ); the rest holds.
+// 0: crisp steps (hold-then-ease read as an inchworm; plain steps looked natural)
+export const BLEND = 0;
 export function blendWeight(a) {
+    if (BLEND <= 0) return a >= 1 ? 1 : 0;
     const x = Math.min(Math.max((a - (1 - BLEND)) / BLEND, 0), 1);
     return x * x * (3 - 2 * x);
 }
