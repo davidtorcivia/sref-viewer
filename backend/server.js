@@ -1403,7 +1403,7 @@ async function warmCache() {
 // Drop idle rate-limit buckets, stale login failures and expired sessions
 function sweep() {
     const now = Date.now();
-    for (const buckets of [apiBuckets, tileBuckets]) {
+    for (const buckets of [apiBuckets, tileBuckets, ogBuckets]) {
         for (const [ip, b] of buckets) if (now - b.lastRefill > HOUR) buckets.delete(ip);
     }
     for (const ip of loginFailures.keys()) recentFailures(ip);
@@ -1419,4 +1419,179 @@ if (require.main === module) {
     setInterval(sweep, 10 * MINUTE);
 }
 
-module.exports = { app, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };
+// ============ Link-preview card (/api/og.png) ============
+// A 1200x630 PNG of a place right now, as the overview's hero draws it: the name, the temperature,
+// and the spiral (the last 24 hours observed, the next 24 forecast) on the color field. Drawn with
+// the page's own pure modules (frontend/js: the spiral's geometry, the colors, the sun) and fonts
+// cut from the page's variable font at the hero's settings, rasterized without a browser.
+const { Resvg } = require('@resvg/resvg-js');
+const { pathToFileURL } = require('url');
+const SHARED = fs.existsSync(path.join(__dirname, 'shared')) ? path.join(__dirname, 'shared') : path.join(__dirname, '..', 'frontend', 'js');
+let sharedMods = null;
+const sharedModules = () => sharedMods ??= Promise.all(['signal.js', 'forecast.js', 'zone.js']
+    .map(f => import(pathToFileURL(path.join(SHARED, f)).href)));
+const OG_FONTS = ['AnybodyHero', 'AnybodyNum', 'AnybodyText', 'AnybodyBold'].map(f => path.join(__dirname, 'fonts', `${f}.ttf`));
+const NYC = { lat: 40.7128, lon: -74.006, name: 'New York, NY' };
+const OG_TTL_MS = 10 * MINUTE;
+const ogCache = new Map();   // "lat,lon" (2 decimals) -> { at, png | promise }
+const ogBuckets = new Map();
+
+// oklch() -> #rrggbb (resvg reads sRGB colors only)
+function oklchHex(css) {
+    const m = /oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)/.exec(css);
+    if (!m) return css;
+    const [L, C, H] = m.slice(1).map(Number), h = H * Math.PI / 180;
+    const a = C * Math.cos(h), b = C * Math.sin(h);
+    const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3, mm = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3,
+        s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+    const lin = [4.0767416621 * l - 3.3077115913 * mm + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * mm - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * mm + 1.7076147010 * s];
+    return '#' + lin.map(v => {
+        const c = Math.min(1, Math.max(0, v)), g = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+        return Math.round(g * 255).toString(16).padStart(2, '0');
+    }).join('');
+}
+const esc = t => String(t).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+// The overview's light theme (overview.css), as sRGB
+const OG = { paper: '#f3f0e8', ink: '#141312', missing: '#dcd7cb', rain: oklchHex('oklch(0.58 0.14 248)'), wind: oklchHex('oklch(0.56 0.09 175)'),
+    sky: oklchHex('oklch(0.93 0.035 232)'), night: oklchHex('oklch(0.5 0.09 262)'),
+    cloud: oklchHex('oklch(0.965 0.016 234)'), cloudNight: oklchHex('oklch(0.57 0.07 262)') };
+
+// The card's SVG for a place's forecast body (the extractor's /forecast) and observed hours
+async function ogSvg(place, body, hist, tz, now) {
+    const [sg, fc, Z] = await sharedModules();
+    const rows = body.hourly ? fc.hourlyRows(body.hourly) : [];
+    const upcoming = rows.filter(r => r.t + HOUR > now);
+    const temp = body.now?.tmp ?? upcoming[0]?.tmp ?? null;
+    const nights = [];
+    for (let d = -1; d <= 1; d++) {
+        const day = Z.noon(now, tz) + d * DAY;
+        const set = fc.sunTimes(day, place.lat, place.lon, tz).set, rise = fc.sunTimes(day + DAY, place.lat, place.lon, tz).rise;
+        if (set && rise) nights.push([set, rise]);
+    }
+    const past = (hist || []).map(h => ({ t: h.t, tmp: h.tmp, precip: h.precip, cloud: h.cloud, wind: h.wind, dir: h.dir }));
+    const future = upcoming.slice(0, 26);
+    const sp = sg.spiral({ past, future, now, nowTemp: temp, nights });
+    const col = f => oklchHex(sg.rampColor(f));
+    // the field: stops every two hours over the next day, each the three-hour mean's color
+    const next = upcoming.slice(0, 25), stops = [];
+    for (let i = 0; i < next.length; i += 2) {
+        const win = next.slice(Math.max(0, i - 1), i + 2).map(r => r.tmp).filter(Number.isFinite);
+        if (win.length) stops.push(`<stop offset="${(i / Math.max(1, next.length - 1)).toFixed(3)}" stop-color="${oklchHex(sg.fieldColor(win.reduce((a, b) => a + b, 0) / win.length, false))}"/>`);
+    }
+    const field = stops.length ? stops.join('') : `<stop offset="0" stop-color="${oklchHex(sg.fieldColor(temp ?? 65, false))}"/>`;
+    // the spiral, in its own 600 x 612 box (viewBox -40 -40), scaled into the card's right side
+    const g = [];
+    g.push(`<circle cx="${sg.SPIRAL.C}" cy="${sg.SPIRAL.C}" r="272" fill="${OG.paper}"/>`);
+    for (const k of sp.skies) g.push(`<path d="${k.d}" fill="${OG.sky}"/>`);
+    for (const n of sp.nights) g.push(`<path d="${n.d}" fill="${OG.night}"/>`);
+    for (const h of sp.hours) if (h.bar) g.push(`<path d="${h.bar}" fill="${h.night ? OG.cloudNight : OG.cloud}"/>`);
+    g.push(`<mask id="band"><path d="${sp.track}" fill="none" stroke="#fff" stroke-width="44" stroke-linecap="round"/><circle cx="${sp.notch.x}" cy="${sp.notch.y}" r="${sp.notch.r}" fill="#000"/></mask><g mask="url(#band)">`);
+    for (const seg of sp.segs) {
+        const c = seg.tmp == null ? OG.missing : col(seg.tmp);
+        g.push(`<path d="${seg.d}" fill="${c}" stroke="${c}" stroke-width="0.6"/>`);
+    }
+    const end = sp.caps[1];
+    g.push(`<circle cx="${end.x}" cy="${end.y}" r="${end.r}" fill="${end.tmp == null ? OG.missing : col(end.tmp)}"/>`);
+    for (const r of sp.rain) g.push(`<path d="${r.d}" fill="${OG.rain}"/>`);
+    g.push('</g>');
+    for (const h of sp.hours) if (h.arrow) g.push(`<line x1="${h.arrow.x}" y1="${h.arrow.y}" x2="${h.arrow.x2.toFixed(1)}" y2="${h.arrow.y2.toFixed(1)}" stroke="${OG.wind}" stroke-width="2" stroke-linecap="round"/><path d="${h.arrow.head}" fill="${OG.wind}"/>`);
+    g.push(`<circle cx="${sp.now.x}" cy="${sp.now.y}" r="7" fill="${OG.paper}" stroke="${OG.ink}" stroke-width="3"/>`);
+    g.push(`<text x="${sp.now.x}" y="${(sp.now.y - 17).toFixed(1)}" font-family="AnybodyBold" font-size="12" letter-spacing="1.5" text-anchor="middle" fill="${OG.ink}">NOW</text>`);
+    // the center: the day behind against the day ahead
+    const C = sg.SPIRAL.C, tb = sp.table, deg = v => (v == null ? '—' : `${Math.round(v)}°`);
+    const inches = v => (v < 0.005 ? 'Dry' : v < 0.1 ? `${v.toFixed(2).replace(/^0/, '')}"` : `${v.toFixed(1)}"`);
+    const cell = (x, y, font, size, text) => g.push(`<text x="${x}" y="${y}" font-family="${font}" font-size="${size}" text-anchor="middle" fill="${OG.ink}">${esc(text)}</text>`);
+    cell(C - 46, C - 56, 'AnybodyBold', 12, 'Last 24 h');
+    cell(C + 46, C - 56, 'AnybodyBold', 12, 'Next 24 h');
+    [['rain', tb.pastRain == null ? '—' : inches(tb.pastRain), future.length ? inches(tb.nextRain) : '—'], ['low', deg(tb.pastLow), deg(tb.nextLow)], ['high', deg(tb.pastHigh), deg(tb.nextHigh)]]
+        .forEach(([k, a, b], i) => {
+            const y = C - 18 + i * 44;
+            cell(C - 46, y, 'AnybodyNum', 28, a);
+            cell(C + 46, y, 'AnybodyNum', 28, b);
+            cell(C, y + 15, 'AnybodyBold', 12, k);
+        });
+    const k = 560 / 600;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+<defs><linearGradient id="field" x1="0" x2="1" y1="0" y2="0">${field}</linearGradient></defs>
+<rect width="1200" height="630" fill="url(#field)"/>
+<text x="64" y="96" font-family="AnybodyText" font-size="30" fill="${OG.ink}">${esc(place.name)}</text>
+<text x="52" y="468" font-family="AnybodyHero" font-size="360" fill="${OG.ink}">${temp == null ? '--' : `${Math.round(temp)}°`}</text>
+<g transform="translate(${(610 + 40 * k).toFixed(1)} ${(22 + 40 * k).toFixed(1)}) scale(${k.toFixed(4)})">${g.join('')}</g>
+</svg>`;
+}
+
+// The place for a card request: ?at=lat,lon (named by reverse geocoding when drawn), ?station= (a
+// REFS plume station), else New York. null when the query is malformed. No lookups here: a request
+// that the cache or the rate limit answers must not queue a reverse geocode.
+function ogPlace(q) {
+    if (typeof q.at === 'string') {
+        const m = /^(-?\d{1,2}(?:\.\d{1,6})?),(-?\d{1,3}(?:\.\d{1,6})?)$/.exec(q.at);
+        if (!m) return null;
+        const lat = Number(m[1]), lon = Number(m[2]);
+        if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+        return { lat, lon, name: null };
+    }
+    if (typeof q.station === 'string') {
+        const id = q.station.toUpperCase();
+        if (!/^[A-Z]{3,4}$/.test(id)) return null;
+        let st = null;
+        try { st = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'refs-stations.json'), 'utf8')).stations; } catch { /* list not built yet */ }
+        const hit = st?.[id] || st?.[`K${id}`];
+        return hit ? { lat: hit.lat, lon: hit.lon, name: id } : { ...NYC };
+    }
+    return { ...NYC };
+}
+
+async function ogPng(place) {
+    const now = Date.now();
+    if (place.name == null) {
+        try {
+            const r = await nominatim(`reverse?format=jsonv2&zoom=14&addressdetails=1&lat=${place.lat.toFixed(3)}&lon=${place.lon.toFixed(3)}`);
+            place = { ...place, name: r.address ? placeName(r.address) : '' };
+        } catch { /* unnamed */ }
+        place.name ||= `${place.lat.toFixed(2)}, ${place.lon.toFixed(2)}`;
+    }
+    const tz = await placeZone(place.lat, place.lon);
+    const [body, hist] = await Promise.all([
+        fetch(`${EXTRACTOR_URL}/forecast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}&tz=${encodeURIComponent(tz)}`,
+            { signal: AbortSignal.timeout(60000) }).then(r => (r.ok ? r.json() : {})).catch(() => ({})),
+        nearestStation(place.lat, place.lon).then(s => stationObservations(s.id)).then(f => bucketObservations(f, now)).catch(() => []),
+    ]);
+    const svg = await ogSvg(place, body, hist, tz, now);
+    const png = new Resvg(svg, { font: { fontFiles: OG_FONTS, loadSystemFonts: false, defaultFontFamily: 'AnybodyText' } }).render().asPng();
+    return { png, building: !body.hourly || !!body.building };   // a new region's forecast is still being cut
+}
+
+app.get('/api/og.png', async (req, res) => {
+    try {
+        const place = ogPlace(req.query);
+        if (!place) return res.status(400).json({ error: 'Invalid place' });
+        const key = `${place.lat.toFixed(2)},${place.lon.toFixed(2)}`;
+        let hit = ogCache.get(key);
+        if (!hit || Date.now() - hit.at > (hit.building ? MINUTE : OG_TTL_MS)) {
+            // a new card costs a geocode, a forecast and the station's observations: crawlers retry, so
+            // rate-limit the misses (an old card, when there is one, rather than nothing)
+            if (!takeToken(req.ip, ogBuckets, 20, 0.2)) {
+                if (!hit) return res.status(429).end();
+            } else {
+                hit = { at: Date.now(), png: ogPng(place) };
+                ogCache.delete(key);   // most recently drawn last: the eviction below takes the oldest
+                ogCache.set(key, hit);
+                if (ogCache.size > 200) ogCache.delete(ogCache.keys().next().value);
+                const mine = hit;
+                mine.png.then(r => { mine.building = r.building; }, () => { if (ogCache.get(key) === mine) ogCache.delete(key); });
+            }
+        }
+        const { png, building } = await hit.png;
+        res.set('Content-Type', 'image/png');
+        res.set('Cache-Control', `public, max-age=${building ? 60 : 600}`);
+        res.send(png);
+    } catch (err) {
+        console.error('[OG]', err.message);
+        res.status(502).end();
+    }
+});
+
+module.exports = { app, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };

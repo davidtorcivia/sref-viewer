@@ -13,7 +13,9 @@ services:
       retries: 3
 
   backend:
-    build: ./backend
+    build:
+      context: .                      # shares frontend/js modules (see .dockerignore)
+      dockerfile: backend/Dockerfile
     expose:
       - "3001"
     environment:

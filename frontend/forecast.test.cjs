@@ -210,6 +210,11 @@ const assert = require('node:assert/strict');
         const tp = sg.spiralTimeAt(260 + 5, 260 - (120 + 1 / 48 * 100), now);
         assert.ok(tp < now - 20 * H, 'inner lap is the past');
     }
+    // The hero's color field: green through 65-75 °F on both themes, the cold end for no reading
+    assert.ok(sg.fieldHue(65) > 140 && sg.fieldHue(75) > 130 && sg.fieldHue(85) < 70);
+    assert.equal(sg.fieldHue(NaN), 290);
+    assert.match(sg.fieldColor(70, false), /^oklch\(0\.84 /);
+    assert.match(sg.fieldColor(70, true), /^oklch\(0\.45 /);
     // Place time zones
     const z = await import('./js/zone.js');
     const LA = 'America/Los_Angeles', NY = 'America/New_York';

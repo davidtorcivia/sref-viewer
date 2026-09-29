@@ -20,7 +20,7 @@ import {
     hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
     comfort, compass, monotonePath, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex, uvCategory, sky, outlook,
 } from './forecast.js?v=__V__';
-import { rampColor, lineColor, windArrow, spiral, spiralTimeAt, SPIRAL } from './signal.js?v=__V__';
+import { rampColor, lineColor, windArrow, spiral, spiralTimeAt, SPIRAL, fieldColor } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
 import * as Z from './zone.js?v=__V__';
 
@@ -364,8 +364,9 @@ const rowAt = (f, t) => f.upcoming.find(r => r.t <= t && r.t + HOUR > t) ?? f.up
 
 // ============ Navigation ============
 
+// (the query is left behind: it is the shown place's ?at=, which the next place writes anew)
 function navigate(hash) {
-    const url = !hash || hash === '#' ? location.pathname + location.search : hash;
+    const url = location.pathname + (!hash || hash === '#' ? '' : hash);
     history.replaceState({ ...history.state, y: scrollY }, '');   // where this page was, for back
     history.pushState(null, '', url);
     route();
@@ -523,27 +524,10 @@ async function renderPlace(place, quiet = false) {
 
 // The color field: the next 24 hours, smoothed over three hours so it reads as weather
 // rather than stripes, and softened toward the paper
-// The color field's hue by temperature (°F, OKLCH hue): its own scale, green through the comfortable
-// 65-75 °F, turning quickly to gold above them (the olive between is a narrow stretch)
-const FIELD_HUE = [[-10, 290], [10, 272], [20, 262], [32, 238], [45, 205], [55, 180], [65, 152], [75, 138],
-    [80, 85], [85, 60], [90, 42], [95, 30], [110, 15]];
-function fieldHue(f) {
-    if (!(f > FIELD_HUE[0][0])) return FIELD_HUE[0][1];   // (no reading: the cold end, as rampColor)
-    const k = FIELD_HUE.findIndex(([v]) => v >= f);
-    if (k < 0) return FIELD_HUE[FIELD_HUE.length - 1][1];
-    const [[f0, h0], [f1, h1]] = [FIELD_HUE[k - 1], FIELD_HUE[k]];
-    return h0 + (h1 - h0) * (f - f0) / (f1 - f0);
-}
-
-// The color field: one lightness per theme with the ramp's chroma held (mixing toward the paper grayed
-// it on light, toward black muddied it on dark), in the field's own hues
+// The color field: stops every two hours, each the three-hour mean's field color (signal.js)
 function fieldGradient(rows, temp) {
     const dark = document.documentElement.dataset.theme === 'dark';
-    const soft = t => {
-        const c = Number(rampColor(t).match(/[\d.]+/g)[1]), h = fieldHue(t).toFixed(1);
-        return dark ? `oklch(0.45 ${Math.min(0.14, Math.max(0.09, c)).toFixed(3)} ${h})`
-            : `oklch(0.84 ${Math.min(0.13, Math.max(0.07, c * 0.95)).toFixed(3)} ${h})`;
-    };
+    const soft = t => fieldColor(t, dark);
     if (rows.length < 2) return temp != null ? soft(temp) : '';
     const n = rows.length - 1;
     const stops = [];
@@ -1876,6 +1860,27 @@ function renderEmpty() {
 
 // keepScroll: a redraw of the same page (settings, refresh) stays where the user was
 // restoreY: a scroll position to return to (back and forward)
+// ?at=lat,lon (a shared place) as { lat, lon }, or null
+function atOf(search) {
+    const m = /[?&]at=(-?\d{1,2}(?:\.\d{1,6})?)(?:,|%2C)(-?\d{1,3}(?:\.\d{1,6})?)(?:&|$)/i.exec(search);
+    // (to the 3 decimals the address bar keeps: a longer link is the same place after the rewrite)
+    const lat = m && Math.round(Number(m[1]) * 1000) / 1000, lon = m && Math.round(Number(m[2]) * 1000) / 1000;
+    const dp = m && (m[1].split('.')[1]?.length ?? 0);   // a GPS place's link carries 2
+    return m && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon, dp } : null;
+}
+// A shared place not in the viewer's list: shown, not saved; named once the geocoder answers
+let shared = null;
+function sharedPlace(at) {
+    if (shared?.lat === at.lat && shared.lon === at.lon) return shared;
+    const p = shared = { id: `at:${at.lat},${at.lon}`, lat: at.lat, lon: at.lon, name: `${at.lat.toFixed(2)}, ${at.lon.toFixed(2)}` };
+    fetch(`/api/geocode?lat=${at.lat.toFixed(4)}&lon=${at.lon.toFixed(4)}`).then(r => r.json()).then(r => {
+        if (!r?.name || shared !== p) return;
+        p.name = r.name;
+        if (shownId === p.id) route(true, null, true);
+    }).catch(() => {});
+    return p;
+}
+
 function route(keepScroll = false, restoreY = null, quiet = false) {
     document.body.classList.remove('no-scroll');   // a full-screen radar left by back or refresh
     const y = restoreY ?? scrollY;
@@ -1883,8 +1888,20 @@ function route(keepScroll = false, restoreY = null, quiet = false) {
     pinned = false;
     const m = location.hash.match(/^#p=(.+)$/);
     const ps = allPlaces();
-    const place = (m && ps.find(p => p.id === decodeURIComponent(m[1]))) || ps[0];
-    if (m && place && place.id !== decodeURIComponent(m[1])) history.replaceState(null, '', location.pathname);
+    // A shared link's ?at= names the place; a #p= that disagrees with it is someone else's list
+    const at = atOf(location.search);
+    // (the GPS place's link is rounded to 2 decimals, the others' to 3)
+    const near = p => { const tol = p.here && at.dp <= 2 ? 0.006 : 0.002; return at && Math.abs(p.lat - at.lat) <= tol && Math.abs(p.lon - at.lon) <= tol; };
+    let place = m && ps.find(p => p.id === decodeURIComponent(m[1]));
+    if (at && !(place && near(place))) place = ps.find(near) || sharedPlace(at);
+    place ||= ps[0];
+    if (m && place && place.id !== decodeURIComponent(m[1])) history.replaceState(null, '', location.pathname + location.search);
+    // the address bar names the shown place, so any page is a link to it
+    if (place) {
+        const dp = place.here ? 2 : 3;   // your own position only to about a kilometer
+        const want = `?at=${place.lat.toFixed(dp)},${place.lon.toFixed(dp)}`;
+        if (location.search !== want) history.replaceState(history.state, '', location.pathname + want + location.hash);
+    }
     if (!place) shownId = null;
     const done = place ? renderPlace(place, quiet) : renderEmpty();
     // once the redraw is in: a place page waits on its forecast before its sections exist

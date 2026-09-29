@@ -33,6 +33,25 @@ export function rampColor(f) {
     return fmt(l[1], l[2], l[3]);
 }
 
+// The hero's color field by temperature (°F): its own hue scale (OKLCH), green through the
+// comfortable 65-75 °F, turning quickly to gold above them (the olive between is a narrow stretch);
+// one lightness per theme with the ramp's chroma held (mixing toward the paper grayed it on light,
+// toward black muddied it on dark). The page and the link-preview card (backend) both paint with it.
+const FIELD_HUE = [[-10, 290], [10, 272], [20, 262], [32, 238], [45, 205], [55, 180], [65, 152], [75, 138],
+    [80, 85], [85, 60], [90, 42], [95, 30], [110, 15]];
+export function fieldHue(f) {
+    if (!(f > FIELD_HUE[0][0])) return FIELD_HUE[0][1];   // (no reading: the cold end, as rampColor)
+    const k = FIELD_HUE.findIndex(([v]) => v >= f);
+    if (k < 0) return FIELD_HUE[FIELD_HUE.length - 1][1];
+    const [[f0, h0], [f1, h1]] = [FIELD_HUE[k - 1], FIELD_HUE[k]];
+    return h0 + (h1 - h0) * (f - f0) / (f1 - f0);
+}
+export function fieldColor(f, dark) {
+    const c = Number(rampColor(f).match(/[\d.]+/g)[1]), h = fieldHue(f).toFixed(1);
+    return dark ? `oklch(0.45 ${Math.min(0.14, Math.max(0.09, c)).toFixed(3)} ${h})`
+        : `oklch(0.84 ${Math.min(0.13, Math.max(0.07, c * 0.95)).toFixed(3)} ${h})`;
+}
+
 // Quantile q (0.1..0.9) of one REFS row {y (mean), p10, p25, p75, p90},
 // linear between the published levels; the mean stands in for the median
 const QL = [0.1, 0.25, 0.5, 0.75, 0.9];

@@ -1,6 +1,6 @@
 // Run: node test.js
 const assert = require('assert');
-const { app, shapeRadarFrames, mrmsCropQuery, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
+const { app, oklchHex, shapeRadarFrames, mrmsCropQuery, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
 
 // Latest ready run rolls back to yesterday before the first cycle is out
 const at = (iso) => Date.parse(iso);
@@ -159,6 +159,18 @@ for (const bad of [{ w: '-73', s: '40', e: '-75', n: '41' }, { w: '-75', s: '41'
     assert.strictEqual(mrmsCropQuery(bad), null, JSON.stringify(bad));
 }
 
+// Link-preview colors: oklch to sRGB hex (white, black, and a mid blue in gamut)
+assert.strictEqual(oklchHex('oklch(1 0 0)'), '#ffffff');
+assert.strictEqual(oklchHex('oklch(0 0 0)'), '#000000');
+assert.match(oklchHex('oklch(0.58 0.14 248)'), /^#[0-9a-f]{6}$/);
+// the card escapes the place name (it comes from a geocoder) and says nothing about rain it has no forecast for
+(async () => {
+    const { ogSvg } = require('./server');
+    const svg = await ogSvg({ lat: 40.7, lon: -74, name: '<x>&"y"\u0000' }, {}, [], 'America/New_York', Date.now());
+    assert.ok(svg.includes('&lt;x&gt;&amp;&quot;y&quot;<') && !svg.includes('\u0000'), 'name escaped');
+    assert.ok(!/>Dry</.test(svg.split('Next 24 h')[1].split('low')[0]), 'no Dry without a forecast');
+})().catch(err => { console.error(err); process.exit(1); });
+
 // The routes reject before touching the extractor
 (async () => {
     const server = app.listen(0);
@@ -173,6 +185,10 @@ for (const bad of [{ w: '-73', s: '40', e: '-75', n: '41' }, { w: '-75', s: '41'
         `/nexrad/12345/crop.png?${box}&r=1`, `/nexrad/1759100000/crop.png?${box}&r=1&mean=1`,
         `/tile/1759100000/9/150/192.png?nx=abc`, `/tile/1759100000/9/150/192.png?src=librewxr&nx=1`]) {
         assert.strictEqual((await fetch(root + path)).status, 400, path);
+    }
+    // the preview card refuses a malformed place before any lookup
+    for (const q of ['?at=abc', '?at=91,0', '?at=40.7,-74.0,1', '?at=40.7;-74', '?station=J1', '?station=TOOLONG']) {
+        assert.strictEqual((await fetch(`${root.replace('/api/radar', '/api')}/og.png${q}`)).status, 400, q);
     }
     server.close();
     console.log('backend: all checks passed');

@@ -1,0 +1,10 @@
+# Only the backend builds from the repo root (it shares the frontend's pure color and
+# spiral modules for the link-preview card): let in just what its image copies
+*
+!backend/package.json
+!backend/package-lock.json
+!backend/server.js
+!backend/fonts/
+!frontend/js/signal.js
+!frontend/js/forecast.js
+!frontend/js/zone.js
