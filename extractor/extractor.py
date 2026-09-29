@@ -20,6 +20,8 @@ two public products in the noaa-rrfs-ops-pds bucket:
     GET /status?date=20260903&cycle=00   -> what a build in progress is doing
     GET /stations
     GET /health
+    GET /mrms                        -> {"frames": [scan epochs]}, MRMS radar in RAM
+    GET /mrms/<epoch>/<z>/<x>/<y>.png
 
 Response:
 {
@@ -1557,9 +1559,186 @@ def forecast(lat, lon, tz=DAILY_TZ):
             'station': nearest_station(lat, lon)}
 
 
+# ============ MRMS radar (observed reflectivity, 2-minute scans) ============
+# SeamlessHSR (hybrid scan reflectivity mosaicked over CONUS) from the public
+# noaa-mrms-pds bucket: a ~1.2MB gzipped GRIB2 every 2 minutes, published
+# ~60s after the scan. The last MRMS_FRAMES scans live in RAM only, never on
+# disk: uint8 in 0.5 dBZ steps (0 no echo, 255 no coverage), zlib-compressed
+# in row strips so a tile inflates only the rows it spans. MRMS carries no
+# precipitation type here: every echo paints the rain colors.
+MRMS_URL = os.environ.get('MRMS_URL', 'https://noaa-mrms-pds.s3.amazonaws.com')
+MRMS_PRODUCT = 'SeamlessHSR_00.00'
+MRMS_STEP = 120
+MRMS_LAG = 60                               # seconds after the scan S3 usually has it
+MRMS_FRAMES = 60                            # 2 hours listed
+MRMS_GRACE = 2                              # older scans kept for pages whose list predates the newest
+MRMS_NY, MRMS_NX = 3500, 7000               # 0.01° cells, centers 54.995N..20.005N, 129.995W..60.005W
+MRMS_NORTH, MRMS_WEST, MRMS_RES = 55.0, -130.0, 0.01   # outer cell edges
+MRMS_STRIP = 50                             # rows per compressed strip
+MRMS_MAXZOOM = 9                            # ~7 px per cell at 512px tiles; the page overzooms past it
+MRMS_KEY_RE = re.compile(r'MRMS_SeamlessHSR_00\.00_(\d{8}-\d{6})\.grib2\.gz')
+# The TWC rain table the model radar and the legend use, per 5 dBZ from 0 (clear below 10)
+MRMS_PALETTE = np.array([(0, 0, 0, 0) if h is None else (int(h[:2], 16), int(h[2:4], 16), int(h[4:], 16), 255)
+                         for h in RAIN_HEX], np.uint8)
+MRMS_LUT = np.clip(np.floor((np.arange(256) / 2 - 32) / 5), 0, len(RAIN_HEX) - 1).astype(np.uint8)
+MRMS_LUT[MRMS_PALETTE[MRMS_LUT, 3] == 0] = 255   # clear bands use the transparent index
+MRMS_LUT[[0, 255]] = 255
+_mrms = {}                                  # scan epoch -> [zlib strip]
+_mrms_lock = threading.Lock()
+_mrms_decode_lock = threading.Lock()        # one ~200MB float64 decode at a time
+
+
+def mrms_key(t):
+    s = time.strftime('%Y%m%d-%H%M%S', time.gmtime(t))
+    return f'CONUS/{MRMS_PRODUCT}/{s[:8]}/MRMS_{MRMS_PRODUCT}_{s}.grib2.gz'
+
+
+def mrms_quantize(v):
+    """uint8 in 0.5 dBZ steps, -31.5 (1) to 95 (254); 0 no echo (-99), 255 no coverage (-999 or missing)."""
+    f = v.astype(np.float32)                # in place from here: a scan is 24.5M cells
+    f *= 2
+    f += 64.5                               # (dBZ + 32) * 2, +0.5 so the cast rounds
+    echo, covered = f >= -132.5, f >= -935.5   # dBZ -99 is 2*-99+64.5 = -133.5; -999 -> -1933.5
+    np.clip(f, 1, 254.5, out=f)
+    q = f.astype(np.uint8)
+    q[~echo] = 0
+    q[~covered] = 255
+    return q
+
+
+def mrms_cells(lat, lon):
+    """Nearest grid row/column of each lat/lon (may fall off the grid)."""
+    return (np.floor((MRMS_NORTH - lat) / MRMS_RES).astype(np.int64),
+            np.floor((lon - MRMS_WEST) / MRMS_RES).astype(np.int64))
+
+
+def mrms_times():
+    with _mrms_lock:
+        return sorted(_mrms)
+
+
+def mrms_store(t, q):
+    strips = [zlib.compress(q[r:r + MRMS_STRIP].tobytes(), 6) for r in range(0, MRMS_NY, MRMS_STRIP)]
+    with _mrms_lock:
+        _mrms[t] = strips
+        for old in sorted(_mrms)[:-(MRMS_FRAMES + MRMS_GRACE)]:
+            del _mrms[old]
+
+
+def mrms_fetch(t):
+    """Scan t into the ring; False while S3 does not have it."""
+    if t in _mrms:
+        return True
+    t0 = time.time()
+    try:
+        gz = http_get(f'{MRMS_URL}/{mrms_key(t)}')
+    except urllib.error.HTTPError as err:
+        if err.code in (403, 404):
+            return False
+        raise
+    with _mrms_decode_lock:
+        t1 = time.time()
+        g = ec.codes_new_from_message(gzip.decompress(gz))
+        try:
+            if (ec.codes_get(g, 'Ni'), ec.codes_get(g, 'Nj')) != (MRMS_NX, MRMS_NY) \
+                    or abs(ec.codes_get(g, 'latitudeOfFirstGridPointInDegrees') - 54.995) > 1e-3:
+                raise RuntimeError(f'MRMS grid changed: {mrms_key(t)}')
+            ec.codes_set(g, 'missingValue', -9999.0)
+            q = mrms_quantize(ec.codes_get_values(g).reshape(MRMS_NY, MRMS_NX))
+        finally:
+            ec.codes_release(g)
+    t2 = time.time()
+    mrms_store(t, q)
+    print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} +{t2 - t:.0f}s: fetch {t1 - t0:.2f}s '
+          f'decode {t2 - t1:.2f}s pack {time.time() - t2:.2f}s', flush=True)
+    return True
+
+
+def mrms_backfill():
+    """Fetch every scan S3 lists newer than the ring's newest, up to MRMS_FRAMES back."""
+    times = mrms_times()
+    since = max(times[-1] if times else 0, time.time() - MRMS_FRAMES * MRMS_STEP)
+    listed = []
+    for day in sorted({time.strftime('%Y%m%d', time.gmtime(d)) for d in (since, time.time())}):
+        xml = http_get(f'{MRMS_URL}/?list-type=2&prefix=CONUS/{MRMS_PRODUCT}/{day}/'
+                       f'&start-after={mrms_key(since)}').decode()
+        listed += [calendar.timegm(time.strptime(s, '%Y%m%d-%H%M%S')) for s in MRMS_KEY_RE.findall(xml)]
+    # Newest first: after a restart the ring's newest frame is current within seconds
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(mrms_fetch, sorted((t for t in set(listed) if t > since), reverse=True)[:MRMS_FRAMES]))
+
+
+def mrms_gap(want, now):
+    """True once scan want is overdue past any normal delay (p95 ~92s): S3
+    skipped it, or an outage. A 403/404 before then is just not published yet."""
+    return now - want > MRMS_LAG + MRMS_STEP
+
+
+def mrms_next(want, newest):
+    """Scan to poll after giving up on want: past it, and past anything a backfill found."""
+    return int(max(want, newest or 0)) + MRMS_STEP
+
+
+def mrms_backfill_safe():
+    try:
+        mrms_backfill()
+    except Exception as err:  # noqa: BLE001 - keep polling through S3 trouble
+        print(f'[MRMS] backfill: {err}', flush=True)
+    times = mrms_times()
+    return times[-1] if times else None
+
+
+def mrms_poller():
+    """Each scan MRMS_LAG after its time, retrying every 10s. A scan still
+    missing once overdue (mrms_gap) is a gap: catch up from the listing and
+    move past it, so one skipped scan never holds back the newer ones."""
+    newest = mrms_backfill_safe()
+    want = mrms_next(newest or time.time() // MRMS_STEP * MRMS_STEP - MRMS_STEP, None)
+    while True:
+        # a stall (host suspend, clock jump) older than the ring: jump to the present in one catch-up
+        if time.time() - want > MRMS_FRAMES * MRMS_STEP:
+            want = mrms_next(time.time() // MRMS_STEP * MRMS_STEP - MRMS_FRAMES * MRMS_STEP, mrms_backfill_safe())
+        wait = want + MRMS_LAG - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            ok = mrms_fetch(want)
+        except Exception as err:  # noqa: BLE001
+            print(f'[MRMS] {mrms_key(want)}: {err}', flush=True)
+            ok = False
+        if ok:
+            want += MRMS_STEP
+        elif mrms_gap(want, time.time()):
+            print(f'[MRMS] {mrms_key(want)}: missing, skipping', flush=True)
+            want = mrms_next(want, mrms_backfill_safe())
+        else:
+            time.sleep(10)
+
+
+@functools.lru_cache(maxsize=2048)          # 1-20KB each
+def mrms_tile(t, z, x, y):
+    """Web-mercator tile of scan t, nearest grid cell per pixel. A scan that
+    left the ring still serves its cached tiles until they age out of the LRU."""
+    with _mrms_lock:
+        strips = _mrms.get(t)
+    if strips is None:
+        raise NotPublished
+    s = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
+    rows, cols = mrms_cells(np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + s) / 2 ** z)))),
+                            (x + s) / 2 ** z * 360 - 180)
+    ri, ci = np.flatnonzero((rows >= 0) & (rows < MRMS_NY)), np.flatnonzero((cols >= 0) & (cols < MRMS_NX))
+    px = np.full((FIELD_TILE, FIELD_TILE), 255, np.uint8)
+    if len(ri) and len(ci):
+        s0, s1 = rows[ri].min() // MRMS_STRIP, rows[ri].max() // MRMS_STRIP
+        block = np.frombuffer(b''.join(zlib.decompress(strips[k]) for k in range(s0, s1 + 1)),
+                              np.uint8).reshape(-1, MRMS_NX)
+        px[np.ix_(ri, ci)] = MRMS_LUT[block[np.ix_(rows[ri] - s0 * MRMS_STRIP, cols[ci])]]
+    return indexed_png(px, MRMS_PALETTE)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        if not self.path.startswith(('/health', '/status')):  # polled constantly
+        if not self.path.startswith(('/health', '/status', '/mrms')):  # polled constantly
             print('[HTTP]', fmt % args, flush=True)
 
     def send_json(self, code, obj, cached=False):
@@ -1664,6 +1843,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
+        if url.path == '/mrms':
+            return self.send_json(200, {'frames': mrms_times()[-MRMS_FRAMES:]})
+        m = re.fullmatch(r'/mrms/(\d{10})/(\d{1,2})/(\d{1,4})/(\d{1,4})\.png', url.path)
+        if m:
+            t, z, x, y = map(int, m.groups())
+            if z > MRMS_MAXZOOM or x >= 2 ** z or y >= 2 ** z:
+                return self.send_json(400, {'error': 'Invalid tile'})
+            try:
+                body = mrms_tile(t, z, x, y)
+            except NotPublished:
+                return self.send_json(404, {'error': 'Not in the radar ring'})
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if url.path != '/plume':
             return self.send_json(404, {'error': 'Not found'})
 
@@ -1697,4 +1892,5 @@ if __name__ == '__main__':
     print(f'Soundings: {TAR_URL}\nEnsemble:  {GRIB_URL}', flush=True)
     maybe_start_index_build()
     threading.Thread(target=preload_fields if FIELD_PRELOAD else purge_fields, daemon=True).start()
+    threading.Thread(target=mrms_poller, daemon=True).start()
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()

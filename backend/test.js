@@ -1,6 +1,6 @@
 // Run: node test.js
 const assert = require('assert');
-const { latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
+const { shapeRadarFrames, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
 
 // Latest ready run rolls back to yesterday before the first cycle is out
 const at = (iso) => Date.parse(iso);
@@ -121,6 +121,26 @@ assert.deepStrictEqual([-74, -90, -105, -118].map(zoneByLongitude),
     assert.strictEqual(searchKey('  Hoboken \t NJ  '), 'hoboken nj');
     assert.strictEqual(searchKey(undefined), '');
     assert.strictEqual(searchKey('x'.repeat(150)).length, 100);
+}
+
+// Radar frames: MRMS scans as past frames, never a nowcast, satellite passed through
+{
+    const libre = { host: 'h', radar: { past: [{ time: 600, path: '/v2/radar/600' }], nowcast: [{ time: 1200, path: '/v2/radar/1200' }] },
+        satellite: { infrared: [{ time: 0, path: '/v2/satellite/0' }] } };
+    const live = shapeRadarFrames(libre, [3000, 3120], 3200);
+    assert.deepStrictEqual(live.radar, { source: 'mrms', nowcast: [],
+        past: [{ time: 3000, path: '/mrms/3000' }, { time: 3120, path: '/mrms/3120' }] });
+    assert.deepStrictEqual(live.satellite, libre.satellite);
+    assert.strictEqual(libre.radar.nowcast.length, 1, 'the cached LibreWXR index is not mutated');
+    // Ring empty, or its newest scan 20+ minutes old: LibreWXR's past frames, still no nowcast
+    for (const mrms of [[], [3000]]) {
+        const fb = shapeRadarFrames(libre, mrms, 3000 + 20 * 60);
+        assert.deepStrictEqual(fb.radar, { source: 'librewxr', past: libre.radar.past, nowcast: [] });
+    }
+    // LibreWXR down: MRMS alone, no satellite
+    const solo = shapeRadarFrames(null, [3000], 3100);
+    assert.strictEqual(solo.radar.source, 'mrms');
+    assert.strictEqual(solo.satellite, undefined);
 }
 
 console.log('backend: all checks passed');

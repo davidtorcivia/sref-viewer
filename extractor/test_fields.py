@@ -227,4 +227,56 @@ assert lb['2026-09-29']['snow'] == 11.8
 assert str(X.place_zone('America/Denver')) == 'America/Denver'
 assert all(X.place_zone(n) is X.DAILY_TZ for n in ('', None, 'Nowhere/Land', '../etc/passwd', 'UTC', 'America/' + 'x' * 60))
 
+# MRMS: sentinels map before the clip, dBZ in 0.5 steps
+q = X.mrms_quantize(np.array([-99, -999, -9999, 12, 12.2, -40, 200], np.float64))
+assert q.tolist() == [0, 255, 255, 88, 88, 1, 254], q.tolist()
+# Nearest cell: first/last centers, both edges of a cell, off the grid
+r, c = X.mrms_cells(np.array([54.995, 20.005, 54.9951, 54.9899, 56.0]), np.array([-129.995, -60.005, -129.9999, -129.9849, -131.0]))
+assert r.tolist() == [0, 3499, 0, 1, -100] and c.tolist() == [0, 6999, 0, 1, -100], (r, c)
+# Colors: the legend's rain table, clear below 10 dBZ and for no echo / no coverage
+color = lambda dbz: X.MRMS_PALETTE[X.MRMS_LUT[X.mrms_quantize(np.array([dbz], np.float64))[0]]] \
+    if X.MRMS_LUT[X.mrms_quantize(np.array([dbz], np.float64))[0]] != 255 else None
+assert color(12)[:3].tolist() == [0x01, 0xb7, 0x14] and color(72)[:3].tolist() == [0xb8, 0x0c, 0x08]
+assert color(7) is None and color(-99) is None and color(-999) is None
+# S3 key for a scan time
+assert X.mrms_key(X.calendar.timegm((2026, 9, 28, 16, 4, 0))) == \
+    'CONUS/SeamlessHSR_00.00/20260928/MRMS_SeamlessHSR_00.00_20260928-160400.grib2.gz'
+# Ring: newest MRMS_FRAMES (+ grace) kept, a backfilled older scan never displaces a newer one
+grid = np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8)
+for t in range(X.MRMS_FRAMES + 5):
+    X.mrms_store(1000 + 120 * t, grid)
+X.mrms_store(1000 - 120, grid)
+times = X.mrms_times()
+keep = X.MRMS_FRAMES + X.MRMS_GRACE
+assert len(times) == keep and times[0] == 1000 + 120 * (X.MRMS_FRAMES + 5 - keep) and times[-1] == 1000 + 120 * (X.MRMS_FRAMES + 4)
+# Poller: a 404 is "not yet" until the scan is overdue, then a gap to step past,
+# jumping to whatever a backfill found newer
+assert not X.mrms_gap(1200, 1200 + X.MRMS_LAG + 60) and X.mrms_gap(1200, 1200 + X.MRMS_LAG + X.MRMS_STEP + 1)
+assert X.mrms_next(1200, None) == 1320 and X.mrms_next(1200, 1000) == 1320 and X.mrms_next(1200, 1560) == 1680
+assert isinstance(X.mrms_next(1200.0, None), int)
+# Tile: a 40 dBZ cell over Manhattan paints at the pixel over its lat/lon, the rest clear
+g = np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8)
+ro, co = X.mrms_cells(np.array([40.755]), np.array([-73.985]))
+g[ro[0], co[0]] = X.mrms_quantize(np.array([40.0]))[0]
+X.mrms_store(times[-1] + 120, g)
+z, tx, ty = 9, 150, 192                       # the z9 tile holding 40.755N 73.985W (a cell center)
+fx = (-73.985 + 180) / 360 * 2 ** z - tx
+fy = (1 - np.log(np.tan(np.radians(40.755)) + 1 / np.cos(np.radians(40.755))) / np.pi) / 2 * 2 ** z - ty
+assert 0 <= fx < 1 and 0 <= fy < 1
+import zlib as _z
+png = X.mrms_tile(times[-1] + 120, z, tx, ty)
+idat = png[png.index(b'IDAT') + 4:]
+px = np.frombuffer(_z.decompress(idat[:X.struct.unpack('>I', png[png.index(b'IDAT') - 4:png.index(b'IDAT')])[0]]),
+                   np.uint8).reshape(X.FIELD_TILE, X.FIELD_TILE + 1)[:, 1:]
+hit = np.argwhere(px != 255)
+# One 0.01° cell is ~7x10 px here: the pixel over the point is in it, and nothing farther out
+assert px[int(fy * X.FIELD_TILE), int(fx * X.FIELD_TILE)] != 255
+assert 40 <= len(hit) <= 110 and np.ptp(hit[:, 0]) <= 11 and np.ptp(hit[:, 1]) <= 8, (len(hit), np.ptp(hit, 0))
+assert (px[px != 255] == 8).all(), 'a 40 dBZ echo is the 40-45 band'
+try:
+    X.mrms_tile(1, z, tx, ty)
+    raise AssertionError('a scan outside the ring should not render')
+except X.NotPublished:
+    pass
+
 print(f'fields: ok (grid round trip within {err:.4f} cells)')

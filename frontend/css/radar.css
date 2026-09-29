@@ -738,13 +738,17 @@ body.embed-mini .legend-axis {
     margin-top: 1px;
 }
 
-/* Rain over snow would stack four rows: the mini bar keeps the rain scale */
+/* Rain over snow would stack four rows: the mini bar keeps the rain scale.
+   Observed MRMS radar has no precip type, so it shows the rain scale only */
 body.embed-mini .legend-precip .legend-axis:last-child,
-body.embed-mini .legend-precip>span:nth-of-type(n+3) {
+body.embed-mini .legend-precip>span:nth-of-type(n+3),
+.radar-legend[data-source="mrms"] .legend-precip .legend-axis:last-child,
+.radar-legend[data-source="mrms"] .legend-precip>span:nth-of-type(n+3) {
     display: none;
 }
 
-body.embed-mini .legend-precip .legend-bar.snow {
+body.embed-mini .legend-precip .legend-bar.snow,
+.radar-legend[data-source="mrms"] .legend-precip .legend-bar.snow {
     display: none;
 }
 

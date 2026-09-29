@@ -667,77 +667,120 @@ app.get('/api/refs/:station/:run/:param', async (req, res) => {
     }
 });
 
-// ============ Radar Frame Index (LibreWXR) ============
-// All visitors share one upstream request per minute.
+// ============ Radar Frame Index ============
+// Radar is NOAA MRMS, a scan every 2 minutes, held in RAM and rendered by the
+// extractor (no nowcast). LibreWXR's index still supplies the satellite
+// frames, and its radar stands in while MRMS has nothing recent (extractor
+// restarting and backfilling, or a feed outage). All visitors share one
+// LibreWXR request per minute.
 const LIBRE_HOST = 'https://api.librewxr.net';
+const MRMS_TTL_MS = 15 * 1000;       // local call; a new scan shows within 15s of the extractor having it
+const MRMS_STALE_S = 20 * 60;        // newest scan older than this: fall back to LibreWXR
 let radarFramesCache = { data: null, fetchedAt: 0 };
 let radarFramesInFlight = null;
+let mrmsCache = { times: [], fetchedAt: 0 };
+let mrmsInFlight = null;
 
-async function getRadarFrames() {
+async function getLibreFrames() {
     if (radarFramesCache.data && Date.now() - radarFramesCache.fetchedAt < MINUTE) {
-        return { data: radarFramesCache.data, status: 'HIT' };
+        return radarFramesCache.data;
     }
     // Many tile misses can expire the index at once: one upstream fetch for all
     radarFramesInFlight ??= getJson(`${LIBRE_HOST}/public/weather-maps.json`, 10000)
         .then(data => {
             radarFramesCache = { data, fetchedAt: Date.now() };
-            return { data, status: 'MISS' };
+            return data;
         })
         .catch(err => {
             console.error('[RADAR]', err.message);
             if (!radarFramesCache.data) throw err;
             // Serve stale for a TTL rather than retrying upstream per tile batch
             radarFramesCache.fetchedAt = Date.now();
-            return { data: radarFramesCache.data, status: 'STALE' };
+            return radarFramesCache.data;
         })
         .finally(() => { radarFramesInFlight = null; });
     return radarFramesInFlight;
 }
 
+// Scan times (epoch seconds, oldest first) in the extractor's ring; [] when it is unreachable
+function getMrmsTimes() {
+    if (Date.now() - mrmsCache.fetchedAt < MRMS_TTL_MS) return Promise.resolve(mrmsCache.times);
+    mrmsInFlight ??= getJson(`${EXTRACTOR_URL}/mrms`, 5000)
+        .then(d => d.frames)
+        .catch(err => { console.error('[MRMS]', err.message); return []; })
+        .then(times => { mrmsCache = { times, fetchedAt: Date.now() }; return times; })
+        .finally(() => { mrmsInFlight = null; });
+    return mrmsInFlight;
+}
+
+/**
+ * The page's frame index: LibreWXR's (satellite included) with radar.past
+ * from MRMS while it is current, else LibreWXR's own past frames. Never a
+ * nowcast. radar.source says which ('mrms' | 'librewxr').
+ */
+function shapeRadarFrames(libre, mrms, now = Date.now() / 1000) {
+    const live = mrms.length > 0 && now - mrms[mrms.length - 1] < MRMS_STALE_S;
+    return {
+        ...libre,
+        radar: live
+            ? { source: 'mrms', past: mrms.map(time => ({ time, path: `/mrms/${time}` })), nowcast: [] }
+            : { source: 'librewxr', past: libre?.radar?.past || [], nowcast: [] },
+    };
+}
+
+async function getRadarFrames() {
+    const [libre, mrms] = await Promise.all([getLibreFrames().catch(() => null), getMrmsTimes()]);
+    if (!libre && !mrms.length) throw new Error('No radar source reachable');
+    return shapeRadarFrames(libre, mrms);
+}
+
 app.get('/api/radar/frames', async (req, res) => {
     try {
-        const { data, status } = await getRadarFrames();
-        res.set('X-Cache', status);
-        res.json(data);
+        res.json(await getRadarFrames());
     } catch (err) {
         res.status(502).json({ error: 'Failed to fetch radar frames', details: err.message });
     }
 });
 
 // ============ Radar Tiles (proxy + cache + warming) ============
-// LibreWXR renders tiles on demand and a cold tile can take 5-90s. Tiles
-// are immutable per (frame, nowcast basis), so they are cached here and
-// the default NYC viewport is pre-rendered for every new frame as soon as
-// the index shows it, so the page normally never waits on upstream.
-const TILE_OPTS = '512';            // 512px tiles, declared 256 client-side for 2x density
-// Legend colors in radar.html/css mirror this scheme; bump the client's TILE_STYLE_V with it
-const TILE_STYLE = '4/1_1';         // The Weather Channel (green rain, blue snow), smoothed, rain/snow classified
+// MRMS tiles render in the extractor in ~10-30ms; LibreWXR (satellite, and
+// radar when falling back) renders on demand and a cold tile can take 5-90s.
+// Tiles are immutable per frame, so they are cached here, and the default
+// views are pre-rendered for the newest frames.
+const TILE_OPTS = '512';            // LibreWXR tile size (satellite is declared 256 client-side for 2x density)
+// LibreWXR fallback style: the TWC rain table the extractor paints MRMS with
+// (radar.html/css draw the legend from it); snow only exists in this fallback
+const TILE_STYLE = '4/1_1';
 const TILE_TTL_MS = 3 * HOUR;
-const TILE_CACHE_MAX = 12000;       // 1-20KB each; ~2900 warm tiles live at once plus browsing
+const TILE_CACHE_MAX = 12000;       // 1-20KB each; ~800 warm tiles live at once plus browsing
 const tileCache = new Map();        // key -> { body, type, at }
 const tileInFlight = new Map();     // key -> Promise
-// NYC default viewport (lon -75.5..-72.5, lat 39.8..41.8). The page opens at
-// map zoom 8.2 and, because 512px tiles are declared as 256, requests source
-// zoom round(map zoom + 1) = 9; 8 covers zooming out one step.
+// Radar tiles are 512px declared as 512, so source zoom = round(map zoom).
+// The overview's embedded mini radar opens at 7.6 (z8, a wide box), the
+// radar page at 8.2 (z8) and the overview's radar link at 8.5 (z9, the NYC
+// viewport lon -75.5..-72.5, lat 39.8..41.8); 7 covers zooming out a step.
 // ponytail: fixed box; derive from visitors' viewports if that matters.
-// Zoom 7 covers the wider view the overview's embedded mini radar opens on;
-// 8 and 9 the radar page's default NYC view
 const TILE_WARM = [
     { z: 7, bbox: { west: -78.5, east: -69.5, south: 38.3, north: 43.2 } },
-    { z: 8, bbox: { west: -75.5, east: -72.5, south: 39.8, north: 41.8 } },
+    { z: 8, bbox: { west: -78.5, east: -69.5, south: 38.3, north: 43.2 } },
     { z: 9, bbox: { west: -75.5, east: -72.5, south: 39.8, north: 41.8 } },
 ];
+// Newest frames warmed (~80 tiles each): the page opens on the newest and
+// loads outward from it; older MRMS frames render on demand in milliseconds
+const RADAR_WARM_FRAMES = 10;
+const MRMS_MAXZOOM = 9;             // extractor MRMS_MAXZOOM, radar.js RADAR_MAXZOOM
 
+// fc: 'mrms' an MRMS scan, 'sat' a satellite frame, '' a LibreWXR radar frame.
+// MRMS and LibreWXR times collide (every 10-minute time is also a 2-minute one)
 const tileKey = (time, z, x, y, fc) => `${time}/${z}/${x}/${y}/${fc || ''}`;
 const freshTile = key => {
     const hit = tileCache.get(key);
     return hit && Date.now() - hit.at < TILE_TTL_MS ? hit : null;
 };
 
-// fc 'sat' marks a satellite tile; otherwise it is the radar nowcast basis
 async function fetchTile(time, z, x, y, fc) {
-    const url = fc === 'sat'
-        ? `${LIBRE_HOST}/v2/satellite/${time}/${TILE_OPTS}/${z}/${x}/${y}/0/0_0.png`
+    const url = fc === 'mrms' ? `${EXTRACTOR_URL}/mrms/${time}/${z}/${x}/${y}.png`
+        : fc === 'sat' ? `${LIBRE_HOST}/v2/satellite/${time}/${TILE_OPTS}/${z}/${x}/${y}/0/0_0.png`
         : `${LIBRE_HOST}/v2/radar/${time}/${TILE_OPTS}/${z}/${x}/${y}/${TILE_STYLE}.png`;
     const res = await fetch(url, {
         headers: { 'User-Agent': USER_AGENT },
@@ -764,39 +807,35 @@ function getTile(time, z, x, y, fc) {
 }
 
 app.get('/api/radar/tile/:time/:z/:x/:y.png', (req, res) => serveTile(req, res, false));
-// Satellite (NOAA GMGSI via LibreWXR): hourly frames, no nowcast
+// Satellite (NOAA GMGSI via LibreWXR): hourly frames
 app.get('/api/radar/sat/:time/:z/:x/:y.png', (req, res) => serveTile(req, res, true));
 
 async function serveTile(req, res, sat) {
     const [time, z, x, y] = [req.params.time, req.params.z, req.params.x, req.params.y].map(Number);
-    const fc = sat ? 'sat' : req.query.fc ? String(req.query.fc) : '';
     if (![time, z, x, y].every(Number.isInteger) || z < 3 || z > 12
-        || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z || (!sat && !/^\d*$/.test(fc))) {
+        || x < 0 || y < 0 || x >= 2 ** z || y >= 2 ** z) {
         return res.status(400).end();
     }
     try {
+        // The client names the radar source (?src=librewxr for fallback frames):
+        // MRMS and LibreWXR share times, so one must never answer for the other
+        const fc = sat ? 'sat' : req.query.src === 'librewxr' ? '' : 'mrms';
+        // The page overzooms MRMS past its maxzoom (radar.js RADAR_MAXZOOM)
+        if (fc === 'mrms' && z > MRMS_MAXZOOM) return res.status(404).end();
         const key = tileKey(time, z, x, y, fc);
         // A cached tile was validated when fetched: serve it without touching
-        // the index (which may be briefly unavailable or newer than the client)
+        // the index (a scan may just have left the ring the client still shows)
         if (!freshTile(key) && !tileInFlight.has(key)) {
-            // Only frames in the index, and a nowcast frame only under an fc key
-            // that is an observed time: its render would otherwise be cached as
-            // the observation it becomes
-            const { data } = await getRadarFrames();
-            const pastTimes = (data.radar?.past || []).map(f => f.time);
-            const isNowcast = (data.radar?.nowcast || []).some(f => f.time === time);
-            if (sat) {
-                if (!(data.satellite?.infrared || []).some(f => f.time === time)) return res.status(404).end();
-            } else {
-                if (!pastTimes.includes(time) && !isNowcast) return res.status(404).end();
-                if (isNowcast && !fc) return res.status(404).end();
-                if (fc && !pastTimes.includes(Number(fc))) return res.status(400).end();
-            }
-            // One zoom action re-requests every visible tile for all 18 frames (~430 misses)
-            if (!takeToken(req.ip, tileBuckets, 500, 20)) return res.status(429).end();
+            // Only frames in that source's index. The extractor answers 404 for
+            // a scan not in its ring, which keeps a few scans past the listed
+            // 60 for pages whose frame list is a minute old
+            if (fc !== 'mrms' && !((await getLibreFrames())[sat ? 'satellite' : 'radar']?.[sat ? 'infrared' : 'past'] || [])
+                .some(f => f.time === time)) return res.status(404).end();
+            // One zoom action re-requests every visible tile for all 60 frames (~1000 misses)
+            if (!takeToken(req.ip, tileBuckets, 1500, 60)) return res.status(429).end();
         }
         const t = await getTile(time, z, x, y, fc);
-        if (t.status !== 200) return res.status(t.status).end();
+        if (t.status !== 200) return res.status(t.status === 404 ? 404 : 502).end();
         res.set('Content-Type', t.type || 'image/png');
         res.set('Cache-Control', 'public, max-age=3600');
         res.send(t.body);
@@ -826,12 +865,10 @@ async function warmRadarTiles() {
 }
 
 async function warmRadarTilesOnce() {
-    const { data } = await getRadarFrames();
-    const past = data.radar?.past || [];
-    const basis = past.length ? String(past[past.length - 1].time) : '';
-    // Newest observed frame first: it is what the page opens on
-    const frames = [...past].reverse().map(f => ({ time: f.time, fc: '' }))
-        .concat((data.radar?.nowcast || []).map(f => ({ time: f.time, fc: basis })));
+    const { radar } = await getRadarFrames();
+    const fc = radar.source === 'mrms' ? 'mrms' : '';
+    // Newest frame first: it is what the page opens on
+    const frames = radar.past.slice(-RADAR_WARM_FRAMES).reverse();
     // Gate on cache state per tile so failures, eviction, expiry and
     // restarts all get re-warmed; in-flight dedup keeps overlapping passes cheap
     const jobs = [];
@@ -839,19 +876,19 @@ async function warmRadarTilesOnce() {
         for (const { z, bbox } of TILE_WARM) {
             for (let x = lonToX(bbox.west, z); x <= lonToX(bbox.east, z); x++) {
                 for (let y = latToY(bbox.north, z); y <= latToY(bbox.south, z); y++) {
-                    if (!freshTile(tileKey(f.time, z, x, y, f.fc))) jobs.push(() => getTile(f.time, z, x, y, f.fc));
+                    if (!freshTile(tileKey(f.time, z, x, y, fc))) jobs.push(() => getTile(f.time, z, x, y, fc));
                 }
             }
         }
     }
     if (!jobs.length) return;
     const t0 = Date.now();
-    // Three at a time: gentle on a volunteer-run service
+    // Three at a time: gentle on the extractor's CPU and on a volunteer-run service
     let i = 0;
     await Promise.all([0, 1, 2].map(async () => {
         while (i < jobs.length) { try { await jobs[i++](); } catch { /* still a miss: next pass retries */ } }
     }));
-    console.log(`[RADAR WARM] ${jobs.length} tiles in ${Math.round((Date.now() - t0) / 1000)}s`);
+    console.log(`[RADAR WARM] ${jobs.length} ${radar.source} tiles in ${Math.round((Date.now() - t0) / 1000)}s`);
 }
 
 // ============ Model fields (RRFS temp/dew point/wind/cloud, rendered by the extractor) ============
@@ -1301,4 +1338,4 @@ if (require.main === module) {
     setInterval(sweep, 10 * MINUTE);
 }
 
-module.exports = { shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };
+module.exports = { shapeRadarFrames, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };

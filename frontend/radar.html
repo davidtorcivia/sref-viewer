@@ -49,7 +49,9 @@
         <button id="themeBtn" class="nav-link theme-btn" aria-label="Switch theme"></button>
     </header>
 
-    <!-- Colors mirror LibreWXR's TWC table (backend TILE_STYLE 4/1_1): 5 dBZ bands, 5-80.
+    <!-- Colors mirror the TWC table (extractor RAIN_HEX/SNOW_HEX, which paints MRMS and the model
+         radar; LibreWXR fallback TILE_STYLE 4/1_1): 5 dBZ bands, 5-80, rain clear below 10.
+         MRMS has no precip type: radar.js sets data-source="mrms" and radar.css drops the Snow row.
          Rates: Marshall-Palmer Z=200R^1.6 for rain, Z=2000S^2 at 10:1 for snow (both approximate). -->
     <details class="radar-legend" id="legend" data-overlay="radar" open>
         <summary class="legend-toggle"><span id="overlayName" class="overlay-name">Radar</span><span class="caret"></span></summary>
