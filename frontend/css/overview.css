@@ -258,20 +258,23 @@ body { -webkit-tap-highlight-color: transparent; }
 .sg-spiral { width: 100%; max-width: 700px; justify-self: end; padding-bottom: 12px; }
 /* the spiral's space is held while it waits for the observed lap, so nothing below moves */
 .sg-spiral:empty::before { content: ''; display: block; aspect-ratio: 600 / 612; }
-.spiral { display: block; width: 100%; height: auto; touch-action: pan-y; cursor: crosshair; user-select: none; }
+.spiral { display: block; width: 100%; height: auto; touch-action: pan-y; user-select: none; }
 .spiral .sp-disk { fill: var(--paper); }
 :root[data-theme="dark"] .spiral .sp-disk { fill: #262522; }
 .spiral .sp-drop { fill: var(--c-rain); }
 .spiral .sp-missing { fill: var(--missing); stroke: var(--missing); stroke-width: 0.6; }
-/* the sky behind the laps: pale blue by day, soft indigo at night, clouds a soft gray that lets
-   a little of the sky through (so night clouds read darker); the cursor's hour washed in its
-   temperature color (set inline) */
-.spiral .sp-sky { fill: oklch(0.95 0.022 232); }
-.spiral .sp-night { fill: oklch(0.72 0.045 268); }
-.spiral .sp-cloud { fill: oklch(0.87 0.008 250); opacity: 0.85; }
-:root[data-theme="dark"] .spiral .sp-sky { fill: oklch(0.36 0.035 240); }
-:root[data-theme="dark"] .spiral .sp-night { fill: oklch(0.24 0.03 268); }
-:root[data-theme="dark"] .spiral .sp-cloud { fill: oklch(0.55 0.008 250); opacity: 0.8; }
+/* the sky behind the laps: pale blue by day, a deeper blue at night; clouds opaque, bright at their
+   billows and grayer toward the rim; night a veil over them too (dimmer clouds); the cursor's hour washed in its temperature color (inline) */
+.spiral .sp-sky { fill: oklch(0.93 0.035 232); }
+.spiral .sp-cloud-top { stop-color: oklch(0.995 0.002 250); }
+.spiral .sp-cloud-base { stop-color: oklch(0.88 0.012 250); }
+.spiral .sp-night-sky { fill: oklch(0.5 0.09 262); }
+.spiral .sp-night { fill: oklch(0.3 0.08 262); opacity: 0.3; }
+:root[data-theme="dark"] .spiral .sp-sky { fill: oklch(0.38 0.04 240); }
+:root[data-theme="dark"] .spiral .sp-cloud-top { stop-color: oklch(0.8 0.008 250); }
+:root[data-theme="dark"] .spiral .sp-cloud-base { stop-color: oklch(0.6 0.012 250); }
+:root[data-theme="dark"] .spiral .sp-night { fill: oklch(0.12 0.03 268); opacity: 0.6; }
+:root[data-theme="dark"] .spiral .sp-night-sky { fill: transparent; }
 .spiral .sp-wedge { fill: transparent; opacity: 0.4; }
 .spiral .sp-sweep { stroke-dasharray: 1; animation: sp-draw 2.2s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
 .spiral .sp-wind line { stroke: var(--c-wind); stroke-width: 2; stroke-linecap: round; }
@@ -365,13 +368,12 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
     line-height: 1;
     font-weight: 800;
     font-variation-settings: 'wdth' 58;
-    cursor: help;
 }
 
 /* ============ 48 hours ============ */
 .sg-hours { margin: 48px var(--gut) 0; }
 .sg-chart { position: relative; margin-top: 20px; }
-.sg-svg { display: block; touch-action: pan-y; cursor: crosshair; user-select: none; overflow: visible; }
+.sg-svg { display: block; touch-action: pan-y; user-select: none; overflow: visible; }
 .sg-svg .g-grid { stroke: var(--ink); stroke-width: 0.5; opacity: 0.25; }
 .sg-svg .g-axis { font-size: 13px; font-weight: 600; fill: var(--ink); }
 .sg-svg .g-day { stroke: var(--ink); stroke-width: 1; opacity: 0.25; }

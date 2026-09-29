@@ -159,7 +159,7 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
     for (const h of past) hour(h.t, (h.t - t0) / HOUR, true, h);
     for (const r of future) hour(r.t, 24 + (r.t - now) / HOUR, false, r);
 
-    // The sky: a cloud bank hanging from each lap's outer edge, as deep as the sky is covered
+    // The clouds: a bank hanging from each lap's outer edge, as deep as the sky is covered
     // (to the lap at overcast), flowing from hour to hour (eased between the hours' middles);
     // hours with no report leave a gap
     const clouds = [];
@@ -175,10 +175,12 @@ export function spiral({ past, future, now, nowTemp, nights = [] }) {
                 const p = run[k - 1], q = run[k], u = (v - p.s) / (q.s - p.s);
                 return (p.cloud + (q.cloud - p.cloud) * (1 - Math.cos(Math.PI * u)) / 2) / 100;
             };
-            // a billowed edge: a soft puff every 20 minutes, fuller as the bank deepens
-            const puff = v => 3.5 * Math.sqrt(c(v)) * (1 - Math.cos(v * 6 * Math.PI)) / 2;
-            const n = Math.max(2, Math.round((b - a) * 24));
-            clouds.push({ d: shape(a, b, v => rOut(v) - (rOut(v) - rIn(v)) * c(v) - puff(v), rOut, n) });
+            // a billowed edge: a round puff every 20 minutes (a half circle), smaller where the sky is nearly clear
+            const puff = v => { const x = ((v * 3) % 1) * 2 - 1; return 5.5 * Math.min(1, c(v) * 4) * Math.sqrt(Math.max(0, 1 - x * x)); };
+            // a run's ends round off over its last 20 minutes (a gap in the reports, the lap's start) instead of a straight cut
+            const taper = v => { const e = Math.min(1, (v - a) / 0.34, (b - v) / 0.34); return Math.sqrt(Math.max(0, e * (2 - e))); };
+            const n = Math.max(2, Math.round((b - a) * 60));
+            clouds.push({ lap: lo ? 1 : 0, d: shape(a, b, v => rOut(v) - ((rOut(v) - rIn(v)) * c(v) + puff(v)) * taper(v), rOut, n) });
             run = [];
         };
         for (const h of known) {

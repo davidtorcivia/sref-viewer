@@ -658,17 +658,27 @@ function spiralSvg(place, f, hist, sweep = true) {
         'aria-label': `The last 24 hours observed and the next 24 forecast, as a spiral colored by temperature` });
 
     svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272, class: 'sp-disk' }, s);
-    // The sky behind the laps: blue by day, indigo at night, clouds hanging from each lap's outer
-    // edge as deep as the sky is covered; soft-edged (a blur)
-    const soft = `sb${Math.random().toString(36).slice(2, 8)}`;
-    svgEl('feGaussianBlur', { stdDeviation: 1.6 }, svgEl('filter', { id: soft, x: '-10%', y: '-10%', width: '120%', height: '120%' }, svgEl('defs', {}, s)));
-    // (inside the disk: the blur would spill past its edge)
-    const clip = `${soft}c`;
-    svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272 }, svgEl('clipPath', { id: clip }, s.querySelector('defs')));
-    const back = svgEl('g', { filter: `url(#${soft})` }, svgEl('g', { 'clip-path': `url(#${clip})` }, s));   // blurred, then clipped
+    // The sky behind the laps: pale blue, clouds hanging from each lap's outer edge as deep as the
+    // sky is covered (bright billows, grayer toward the rim, as lit tops over their bases), and night
+    // a veil over both, soft only at dusk and dawn
+    const uid = Math.random().toString(36).slice(2, 8), defs = s.querySelector('defs') || svgEl('defs', {}, s);
+    const dusk = `dk${uid}`;
+    svgEl('feGaussianBlur', { stdDeviation: 3 }, svgEl('filter', { id: dusk, x: '-10%', y: '-10%', width: '120%', height: '120%' }, defs));
+    // cloud shading per lap: radii of each lap's billows (bright) and rim (base), as fractions of the disk
+    [[140, 205], [185, 272]].forEach(([top, base], lap) => {
+        const gr = svgEl('radialGradient', { id: `cl${uid}${lap}`, gradientUnits: 'userSpaceOnUse', cx: SPIRAL.C, cy: SPIRAL.C, r: 272 }, defs);
+        svgEl('stop', { offset: (top / 272).toFixed(3), class: 'sp-cloud-top' }, gr);
+        svgEl('stop', { offset: (base / 272).toFixed(3), class: 'sp-cloud-base' }, gr);
+    });
+    const clip = `cp${uid}`;
+    svgEl('circle', { cx: SPIRAL.C, cy: SPIRAL.C, r: 272 }, svgEl('clipPath', { id: clip }, defs));
+    const back = svgEl('g', { 'clip-path': `url(#${clip})` }, s);
     for (const k of sp.skies) svgEl('path', { d: k.d, class: 'sp-sky' }, back);
-    for (const n of sp.nights) svgEl('path', { d: n.d, class: 'sp-night' }, back);
-    for (const c of sp.clouds) svgEl('path', { d: c.d, class: 'sp-cloud' }, back);
+    const nightSky = svgEl('g', { filter: `url(#${dusk})` }, back);   // the night's own sky, under its clouds
+    for (const n of sp.nights) svgEl('path', { d: n.d, class: 'sp-night-sky' }, nightSky);
+    for (const c of sp.clouds) svgEl('path', { d: c.d, fill: `url(#cl${uid}${c.lap})` }, back);
+    const veil = svgEl('g', { filter: `url(#${dusk})` }, back);
+    for (const n of sp.nights) svgEl('path', { d: n.d, class: 'sp-night' }, veil);
     // the hours: an invisible wedge each for its title; the cursor's hour lit in its temperature's color
     const wedgeAt = new Map();
     const hoursG = svgEl('g', {}, s);
