@@ -36,6 +36,8 @@ const HOUR = 3600000;
 const ENSEMBLE_MAX_KM = 40;            // farther than this, the station's spread says little about the place
 const NS = 'http://www.w3.org/2000/svg';
 const PAPER = '#f3f0e8';
+const SAVED_KEY = 'wx-fc:';            // + place id: the last forecast, drawn at once on the next visit
+const SAVED_MAX_AGE = 6 * HOUR;        // older than this the page waits for a fresh one
 
 const view = document.getElementById('view');
 const chipsBox = document.getElementById('chips');
@@ -121,10 +123,14 @@ function allPlaces() {
 // ============ Data ============
 
 async function fetchForecast(place) {
+    const url = `/api/forecast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`;
     for (let i = 0; i < POLL_TRIES; i++) {
-        const res = await fetch(`/api/forecast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`);
+        const early = window.earlyForecast?.url === url && window.earlyForecast;   // the page's head started it
+        if (early) window.earlyForecast = null;                                    // a body reads once
+        const res = await (early ? early.res : fetch(url));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const d = await res.json();
+        if (!d.building) store.set(SAVED_KEY + place.id, JSON.stringify({ at: Date.now(), lat: place.lat, lon: place.lon, d }));
         // Still building after every try (a new region while a run lands):
         // show the observations anyway
         if (!d.building || i === POLL_TRIES - 1) return shape(d, place);
@@ -172,12 +178,32 @@ function daysWithObserved(daily, temp, tz) {
     return days;
 }
 
+// The saved forecast from the last visit answers at once (the page is whole on its first
+// paint, not a skeleton for the round trips a phone needs); the fresh one then redraws in place
 function forecastFor(place) {
     if (!forecasts.has(place.id)) {
-        forecasts.set(place.id, fetchForecast(place).then(f => {
+        const fresh = fetchForecast(place).then(f => {
             if (f.raw.building) forecasts.delete(place.id);   // observations only: ask again next time
             return f;
-        }, err => { forecasts.delete(place.id); throw err; }));
+        }, err => { forecasts.delete(place.id); throw err; });
+        const saved = readJson(SAVED_KEY + place.id, null);
+        let instant = null;
+        // the same spot: GPS drifts a little between opens (locate() moves "here" past 0.01°)
+        if (saved && Date.now() - saved.at < SAVED_MAX_AGE && Math.abs(saved.lat - place.lat) <= 0.01 && Math.abs(saved.lon - place.lon) <= 0.01) {
+            try { instant = Promise.resolve(shape(saved.d, place)); } catch { /* an older format: wait for the fresh one */ }
+        }
+        if (instant) {
+            forecasts.set(place.id, instant);
+            fresh.then(f => {
+                // a newer ask (moved, tab back after a while) owns the entry now
+                if (f.raw.building || forecasts.get(place.id) !== instant) return;
+                forecasts.set(place.id, fresh);
+                if (JSON.stringify(f.raw) === JSON.stringify(saved.d)) return;
+                // redraw only a page nobody has touched yet: a scrub, an open row, the full-screen radar stay put
+                if (shownId === place.id && !touched()) route(true, null, true);
+                else if (shownId) renderChips(shownId);
+            }, () => {});
+        } else forecasts.set(place.id, fresh);
     }
     return forecasts.get(place.id);
 }
@@ -366,9 +392,18 @@ let placeSpiral = () => {};   // the current page's: move the spiral in or out o
 narrowScreen.addEventListener?.('change', () => placeSpiral());
 
 let renderSeq = 0;
+// the user has done something on the page a redraw would undo (the radar map reloading is fine:
+// on wide screens it is in view from the start, and old data must not stay for that)
+const touched = () => cursor.t != null || pinned || document.body.classList.contains('no-scroll')
+    || !!view.querySelector('[aria-expanded="true"]');
+let shownId = null;          // the place on screen
+let spiralDrawn = false;     // its spiral has drawn (a quiet redraw does not sweep it in again)
 
-async function renderPlace(place) {
+// quiet: the same place redrawn with fresher data, nothing animates in again
+async function renderPlace(place, quiet = false) {
     const seq = ++renderSeq;
+    if (!quiet || shownId !== place.id) spiralDrawn = false;
+    shownId = place.id;
     cursor.t = null;
     renderChips(place.id);
     view.replaceChildren();
@@ -422,13 +457,14 @@ async function renderPlace(place) {
     // only the first drawing sweeps in; a redraw when the history lands appears in place
     const drawSpiral = () => {
         const hadFocus = spiralBox.contains(document.activeElement);
-        spiralBox.replaceChildren(spiralSvg(place, f, hist, !spiralBox.firstChild));
+        spiralBox.replaceChildren(spiralSvg(place, f, hist, !spiralBox.firstChild && !spiralDrawn));
+        spiralDrawn = true;
         if (hadFocus) spiralBox.firstChild.focus();
     };
     // The spiral grows in its colors: its first drawing waits briefly for the observed lap;
     // a history later than that fills in without growing again
     const history = historyFor(place).then(h => { if (h && seq === renderSeq) hist = h; return h; });
-    Promise.race([history, new Promise(r => setTimeout(r, 1500))]).then(() => {
+    (quiet && spiralDrawn ? Promise.resolve() : Promise.race([history, new Promise(r => setTimeout(r, 1500))])).then(() => {
         if (seq !== renderSeq) return;
         drawSpiral();
         history.then(h => { if (h && seq === renderSeq && !spiralBox.firstChild?.hasHistory) drawSpiral(); });
@@ -1637,7 +1673,7 @@ function renderSettings() {
         li.append(el('span', 'setting-place-name', p.name),
             btn('↑', 'Move up', () => move(-1), i === 0), btn('↓', 'Move down', () => move(1), i === places.length - 1),
             btn('Rename', 'Rename', () => { const n = prompt('Name this place', p.name)?.trim(); if (n) p.name = n.slice(0, 60); }),
-            btn('Remove', 'Remove', () => { places = places.filter(x => x.id !== p.id); }));
+            btn('Remove', 'Remove', () => { places = places.filter(x => x.id !== p.id); try { localStorage.removeItem(SAVED_KEY + p.id); } catch { /* none kept */ } }));
         list.append(li);
     });
     const gps = el('div', 'setting');
@@ -1702,7 +1738,7 @@ function renderEmpty() {
 
 // keepScroll: a redraw of the same page (settings, refresh) stays where the user was
 // restoreY: a scroll position to return to (back and forward)
-function route(keepScroll = false, restoreY = null) {
+function route(keepScroll = false, restoreY = null, quiet = false) {
     document.body.classList.remove('no-scroll');   // a full-screen radar left by back or refresh
     const y = restoreY ?? scrollY;
     cursor.t = null;
@@ -1711,7 +1747,8 @@ function route(keepScroll = false, restoreY = null) {
     const ps = allPlaces();
     const place = (m && ps.find(p => p.id === decodeURIComponent(m[1]))) || ps[0];
     if (m && place && place.id !== decodeURIComponent(m[1])) history.replaceState(null, '', location.pathname);
-    const done = place ? renderPlace(place) : renderEmpty();
+    if (!place) shownId = null;
+    const done = place ? renderPlace(place, quiet) : renderEmpty();
     // once the redraw is in: a place page waits on its forecast before its sections exist
     const seq = renderSeq;
     if (keepScroll || restoreY != null) Promise.resolve(done).then(() => { if (seq === renderSeq) requestAnimationFrame(() => window.scrollTo(0, y)); });

@@ -20,6 +20,26 @@
         if (document.documentElement.dataset.theme === 'dark') document.querySelector('meta[name="theme-color"]').content = '#151413';
     </script>
     <link rel="preload" href="/fonts/anybody-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <!-- The first place's forecast, asked for while the scripts load (overview.js takes it) -->
+    <script>
+        try {
+            const m = location.hash.match(/^#p=(.+)$/);
+            const ps = JSON.parse(localStorage.getItem('wx-places')) || [{ id: 'nyc', lat: 40.7128, lon: -74.006 }];
+            const p = (m && ps.find(x => x.id === decodeURIComponent(m[1]))) || ps[0];
+            if (p) {
+                const url = `/api/forecast?lat=${p.lat.toFixed(4)}&lon=${p.lon.toFixed(4)}`;
+                window.earlyForecast = { url, res: fetch(url) };
+            }
+        } catch { /* overview.js asks itself */ }
+    </script>
+    <!-- overview.js's imports: fetched alongside it, not after it parses -->
+    <link rel="modulepreload" href="/js/overview.js?v=__V__">
+    <link rel="modulepreload" href="/js/config.js?v=__V__">
+    <link rel="modulepreload" href="/js/site.js?v=__V__">
+    <link rel="modulepreload" href="/js/forecast.js?v=__V__">
+    <link rel="modulepreload" href="/js/signal.js?v=__V__">
+    <link rel="modulepreload" href="/js/units.js?v=__V__">
+    <link rel="modulepreload" href="/js/zone.js?v=__V__">
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
