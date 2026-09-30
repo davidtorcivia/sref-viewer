@@ -676,7 +676,7 @@ const MRMS_TTL_MS = 15 * 1000;       // local call; a new scan shows within 15s 
 const MRMS_STALE_S = 20 * 60;        // newest scan older than this: fall back to LibreWXR
 let radarFramesCache = { data: null, fetchedAt: 0 };
 let radarFramesInFlight = null;
-let mrmsCache = { times: [], fetchedAt: 0 };
+let mrmsCache = { times: [], snow: false, fetchedAt: 0 };
 let mrmsInFlight = null;
 
 async function getLibreFrames() {
@@ -700,13 +700,13 @@ async function getLibreFrames() {
     return radarFramesInFlight;
 }
 
-// Scan times (epoch seconds, oldest first) in the extractor's ring; [] when it is unreachable
+// Scan times (epoch seconds, oldest first) in the extractor's ring; [] when it is unreachable.
+// mrmsCache.snow: MRMS PrecipFlag has snow somewhere in the newest scan
 function getMrmsTimes() {
     if (Date.now() - mrmsCache.fetchedAt < MRMS_TTL_MS) return Promise.resolve(mrmsCache.times);
     mrmsInFlight ??= getJson(`${EXTRACTOR_URL}/mrms`, 5000)
-        .then(d => d.frames)
-        .catch(err => { console.error('[MRMS]', err.message); return []; })
-        .then(times => { mrmsCache = { times, fetchedAt: Date.now() }; return times; })
+        .catch(err => { console.error('[MRMS]', err.message); return { frames: [] }; })
+        .then(d => { mrmsCache = { times: d.frames, snow: !!d.snow, fetchedAt: Date.now() }; return d.frames; })
         .finally(() => { mrmsInFlight = null; });
     return mrmsInFlight;
 }
@@ -729,15 +729,15 @@ function getNexrad() {
  * from MRMS while it is current, else LibreWXR's own past frames. Never a
  * nowcast. radar.source says which ('mrms' | 'librewxr'). An MRMS frame
  * with a NEXRAD composite at its time carries the composite's rev as nx, and
- * radar.snow says whether any composite frame has snow.
+ * radar.snow says whether any composite frame (or mrmsSnow: MRMS PrecipFlag) has snow.
  */
-function shapeRadarFrames(libre, mrms, now = Date.now() / 1000, nexrad = null) {
+function shapeRadarFrames(libre, mrms, now = Date.now() / 1000, nexrad = null, mrmsSnow = false) {
     const live = mrms.length > 0 && now - mrms[mrms.length - 1] < MRMS_STALE_S;
     const nx = new Map((nexrad?.frames || []).map((t, i) => [t, nexrad.revs[i]]));
     return {
         ...libre,
         radar: live
-            ? { source: 'mrms', nowcast: [], ...(nx.size ? { snow: !!nexrad.snow } : {}),
+            ? { source: 'mrms', nowcast: [], ...(nx.size || mrmsSnow ? { snow: !!nexrad?.snow || mrmsSnow } : {}),
                 past: mrms.map(time => ({ time, path: `/mrms/${time}`, ...(nx.has(time) ? { nx: nx.get(time) } : {}) })) }
             : { source: 'librewxr', past: libre?.radar?.past || [], nowcast: [] },
     };
@@ -746,7 +746,7 @@ function shapeRadarFrames(libre, mrms, now = Date.now() / 1000, nexrad = null) {
 async function getRadarFrames() {
     const [libre, mrms, nexrad] = await Promise.all([getLibreFrames().catch(() => null), getMrmsTimes(), getNexrad()]);
     if (!libre && !mrms.length) throw new Error('No radar source reachable');
-    return shapeRadarFrames(libre, mrms, undefined, nexrad);
+    return shapeRadarFrames(libre, mrms, undefined, nexrad, mrmsCache.snow);
 }
 
 app.get('/api/radar/frames', async (req, res) => {

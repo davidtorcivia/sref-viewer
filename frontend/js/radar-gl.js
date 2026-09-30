@@ -238,10 +238,18 @@ vec4 nexrad(sampler2D t, vec4 b, vec2 ll) {
     return vec4(den > 0.0 ? num / den : -32.0, den, cov, abs(snow - 1.0) < 0.5 ? 1.0 : 0.0);
 }
 
-// MRMS dBZ d with the NEXRAD sample n over it, blended in dBZ by n's coverage: (dBZ, covered, snow)
-vec3 over(vec2 d, vec4 n) {
-    if (n.y < 0.5) return vec3(d, 0.0);
-    return vec3(d.y >= 0.5 ? mix(d.x, n.x, n.z) : n.x, 1.0, n.z >= 0.5 ? n.w : 0.0);
+// MRMS at ll: (dBZ, covered, snow): dbz() and PrecipFlag's snow (the crop's G, nearest texel)
+vec3 mrms(sampler2D t, vec4 b, vec2 ll) {
+    ivec2 size = textureSize(t, 0);
+    float snow = texelFetch(t, clamp(ivec2(floor(uvIn(b, ll) * vec2(size))), ivec2(0), size - 1), 0).g;
+    return vec3(dbz(t, b, ll), snow > 0.5 ? 1.0 : 0.0);
+}
+
+// MRMS m with the NEXRAD sample n over it, blended in dBZ by n's coverage: (dBZ, covered, snow);
+// NEXRAD's class where it covers, else PrecipFlag's
+vec3 over(vec3 m, vec4 n) {
+    if (n.y < 0.5) return m;
+    return vec3(m.y >= 0.5 ? mix(m.x, n.x, n.z) : n.x, 1.0, n.z >= 0.5 ? n.w : m.z);
 }
 
 // Palette by q (0.5 dBZ steps): the extractor's 5 dBZ bands, clear under 10 dBZ; row 1 snow
@@ -254,12 +262,12 @@ vec4 ramp(vec3 d) {
 void main() {
     vec2 ll = vec2(v_merc.x * 360.0 - 180.0, degrees(atan(sinh(PI * (1.0 - 2.0 * v_merc.y)))));
     vec2 ll0 = u_k0 != 0.0 ? trace(u_fm, u_bfm, ll, -u_k0, u_steps) : ll;
-    vec3 d = u_hasN0 > 0.0 ? over(dbz(u_r0, u_b0, ll0), nexrad(u_n0, u_bn0, ll0)) : vec3(dbz(u_r0, u_b0, ll0), 0.0);
+    vec3 d = u_hasN0 > 0.0 ? over(mrms(u_r0, u_b0, ll0), nexrad(u_n0, u_bn0, ll0)) : mrms(u_r0, u_b0, ll0);
     // blend toward the next scan / step in dBZ, then one palette lookup; where the next
     // scan's data is as old as the step (the same radar data) it holds
     if (u_w > 0.0 && (u_k1 != 0.0 || u_hasN1 > 0.0 || age(u_f1, u_bf1, ll) < u_gap - 1.0)) {
         vec2 ll1 = u_k1 != 0.0 ? trace(u_fm, u_bfm, ll, -u_k1, u_steps) : ll;
-        vec3 d1 = u_hasN1 > 0.0 ? over(dbz(u_r1, u_b1, ll1), nexrad(u_n1, u_bn1, ll1)) : vec3(dbz(u_r1, u_b1, ll1), 0.0);
+        vec3 d1 = u_hasN1 > 0.0 ? over(mrms(u_r1, u_b1, ll1), nexrad(u_n1, u_bn1, ll1)) : mrms(u_r1, u_b1, ll1);
         d = d.y >= 0.5 && d1.y >= 0.5 ? vec3(mix(d.x, d1.x, u_w), 1.0, u_w < 0.5 ? d.z : d1.z) : (u_w < 0.5 ? d : d1);
     }
     color = ramp(d) * u_opacity;   // palette rgb is 0 where clear: premultiplied
@@ -349,7 +357,7 @@ export class MrmsLayer {
     refresh() {
         if (!this.map || this.failed || !this.times.length) return;
         const view = this.view();
-        const want = cropFor(view, { frames: this.times.length, budget: this.opts.budget, texelPx: this.opts.texelPx });
+        const want = cropFor(view, { frames: this.times.length, budget: this.opts.budget, texelPx: this.opts.texelPx, bytes: 2 });   // RG: q, snow
         if (needsCrop(this.crop, view, want)) {
             // bounds are the request box until X-Crop says what the extractor snapped to
             this.crop = { ...want, key: `w=${want.w}&s=${want.s}&e=${want.e}&n=${want.n}&step=${want.step}`,
@@ -501,7 +509,7 @@ export class MrmsLayer {
                     if (e[u.kind]?.tex) gl.deleteTexture(e[u.kind].tex);
                     const crop = u.kind === 'crop', nearest = u.kind !== 'flow';
                     e[u.kind] = { key: u.key, bounds: u.bounds,
-                        tex: this.texture(gl, u.bitmap, crop ? gl.R8 : gl.RGB8, crop ? gl.RED : gl.RGB, nearest ? gl.NEAREST : gl.LINEAR) };
+                        tex: this.texture(gl, u.bitmap, crop ? gl.RG8 : gl.RGB8, crop ? gl.RG : gl.RGB, nearest ? gl.NEAREST : gl.LINEAR) };
                     if (u.kind === 'crop' && u.key === this.crop?.key) this.crop.bounds = u.bounds;
                     if (u.kind === 'nx' && this.nxCrop && u.key.startsWith(`${this.nxCrop.key}&`)) this.nxCrop.bounds = u.bounds;
                 }

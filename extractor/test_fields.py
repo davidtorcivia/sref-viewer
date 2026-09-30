@@ -14,6 +14,7 @@ os.environ['CACHE_DIR'] = tempfile.mkdtemp()
 os.environ.setdefault('STATIONS_FILE', os.path.join(os.environ['CACHE_DIR'], 's.json'))
 os.environ.setdefault('GRID_INDEX_FILE', os.path.join(os.environ['CACHE_DIR'], 'g.json'))
 os.environ.setdefault('NOWCAST_SCORE_FILE', os.path.join(os.environ['CACHE_DIR'], 'n.json'))
+os.environ.setdefault('NOWCAST_PENDING_FILE', os.path.join(os.environ['CACHE_DIR'], 'p.json'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import eccodes as ec
@@ -309,8 +310,16 @@ assert all(X.mrms_crop_query(q) is None for q in ({'w': ['-73'], 's': ['40'], 'e
 t = times[-1] + 120
 cells = X.mrms_crop_box(-74.5, 40.3, -73.5, 41.1)
 cp = X.mrms_crop(t, *cells)
-cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] - cells[0], -1)[:, 1:]
-assert cp[25] == 0 and cpx.shape == (88, 112) and np.argwhere(cpx).tolist() == [[ro[0] - cells[0], co[0] - cells[2]]]
+cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] - cells[0], -1)[:, 1:].reshape(88, -1, 3)
+assert cp[25] == 2 and cpx.shape == (88, 112, 3) and np.argwhere(cpx[..., 0]).tolist() == [[ro[0] - cells[0], co[0] - cells[2]]]
+assert not cpx[..., 1:].any(), 'no PrecipFlag: no snow'
+# PrecipFlag snow rides in G where the scan has it (or the newest type within MRMS_TYPE_AGE before)
+X._mrms_snow[t] = X.mrms_strips(np.ones((X.MRMS_NY, X.MRMS_NX), np.uint8))
+X.mrms_crop.cache_clear()
+cp = X.mrms_crop(t, *cells)
+cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] - cells[0], -1)[:, 1:].reshape(88, -1, 3)
+assert (cpx[..., 1] == 255).all() and X.mrms_snow_src(t + 240) == t and X.mrms_snow_src(t + 480) is None and X.mrms_has_snow(t)
+del X._mrms_snow[t]; X.mrms_crop.cache_clear()
 # Motion: a blob shifted 5 quarter-res px east and 3 south over the 10-minute span is
 # (5, 3) * 4 cells / 5 two-minute steps = (4, 2.4) cells per 2 minutes -> flow units x8
 yy, xx = np.mgrid[:X.MRMS_FLOW_NY * 2, :X.MRMS_NX // 4]
@@ -531,5 +540,13 @@ assert X.nc_class(0.8, 1) == 'light' and X.nc_class(1.5, 1) == 'moderate' and X.
 tot = X.nc_totals()
 X.nc_tally(tot, [(1.0, 1)] * 121, {30: (1.0, 0), 60: (1.0, 2), 90: (0.0, 0)})
 assert tot['type'] == {'30': {'same': 0, 'diff': 1}, '60': {'same': 1, 'diff': 0}}, tot['type']
+# forecasts awaiting scoring outlive a restart; ones the refilled ring cannot score are dropped
+X._nc_log.clear()
+X._nc_log[(5000, 40.7, -74.0)] = {'radar': [(1.0, 1), (None, 0)]}
+X._nc_log[(100, 40.7, -74.0)] = {'radar': [(1.0, 0)]}
+assert X.nc_save() == 2
+X._nc_log.clear()
+assert X.nc_load(100 + X.MRMS_FRAMES * X.MRMS_STEP + 60) == 1 and X._nc_log == {(5000, 40.7, -74.0): {'radar': [(1.0, 1), (None, 0)]}}, X._nc_log
+X._nc_log.clear()
 X._mrms.clear()
 print('nowcast: ok')

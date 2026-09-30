@@ -57,8 +57,10 @@ import math
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -1872,6 +1874,28 @@ def mrms_snow_fetch(t):
             ec.codes_release(g)
 
 
+def mrms_snow_src(T):
+    """The scan whose PrecipFlag stands for scan T: its own, else the newest within
+    MRMS_TYPE_AGE before it (the type changes slowly and lands after the reflectivity)."""
+    with _mrms_lock:
+        return max((s for s in _mrms_snow if T - MRMS_TYPE_AGE <= s <= T), default=None)
+
+
+def mrms_snow_near(T):
+    """Snow mask strips for scan T (mrms_snow_src), or None."""
+    src = mrms_snow_src(T)
+    with _mrms_lock:
+        return _mrms_snow.get(src)
+
+
+@functools.lru_cache(maxsize=8)
+def mrms_has_snow(src):
+    """Whether scan src's snow mask has any snow: the legend's Snow row."""
+    with _mrms_lock:
+        strips = _mrms_snow.get(src)
+    return bool(strips) and any(1 in zlib.decompress(z) for z in strips)
+
+
 def mrms_snow_fill(now):
     """PrecipFlag lands 5-30 s after the reflectivity: fetch it for the recent scans still without."""
     with _mrms_lock:
@@ -2029,14 +2053,21 @@ def mrms_tile(t, z, x, y, nx=None):
         block, base = mrms_rows(strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, MRMS_NY - 1))
         dbz, den = mrms_dbz(block, rc - base, fc[ci] - 0.5)
         snow = None
+        snow_strips = mrms_snow_near(t)
+        if snow_strips is not None:         # PrecipFlag at the nearest cell; NEXRAD's class wins where it covers
+            sblock, sbase = mrms_rows(snow_strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, MRMS_NY - 1))
+            snow = sblock[np.ix_(np.clip(np.rint(rc).astype(np.int64) - sbase, 0, len(sblock) - 1),
+                                 np.clip(np.floor(fc[ci]).astype(np.int64), 0, MRMS_NX - 1))] > 0
         if nx is not None and z >= NX_TILE_MINZOOM:   # zoomed out, a tile spans too many NX cells
             got = nx_tile_sample(t, fr[ri] * NX_SUB - 0.5, fc[ci] * NX_SUB - 0.5)
             if got is not None:
-                ndbz, nden, cov, snow = got
+                ndbz, nden, cov, nsnow = got
+                snow = np.where(nden >= 0.5, nsnow, snow if snow is not None else False)
                 both, only = (den >= 0.5) & (nden >= 0.5), (den < 0.5) & (nden >= 0.5)
                 dbz = np.where(both, dbz + (ndbz - dbz) * cov, np.where(only, ndbz, dbz))
                 den = np.maximum(den, nden)
-                snow &= nden >= 0.5
+        if snow is not None:
+            snow = snow & (den >= 0.5)
         px[np.ix_(ri, ci)] = mrms_bands(dbz, den, snow)
     return indexed_png(px, TILE_PALETTE)
 
@@ -2082,19 +2113,26 @@ def mrms_crop_query(q):
 
 @functools.lru_cache(maxsize=180)           # a view's loop; ~2-400KB each
 def mrms_crop(t, r0, r1, c0, c1, step):
-    """Gray PNG of raw scan values (q: 0 no echo, 255 no coverage), a cell every
-    step, rows north to south; padding past the grid is no coverage."""
+    """RGB PNG, a cell every step, rows north to south: R raw scan values (q: 0 no echo,
+    255 no coverage; padding past the grid is no coverage), G 255 where PrecipFlag says
+    snow (mrms_snow_near), B 0. ponytail: cached with the type it had; a scan cached before
+    its own type landed keeps the one before (at most MRMS_TYPE_AGE old)."""
     with _mrms_lock:
         strips = _mrms.get(t)
     if strips is None:
         raise NotPublished
+    snow_strips = mrms_snow_near(t)
     rows, cols = np.arange(r0 + step // 2, r1, step), np.arange(c0 + step // 2, c1, step)
     ri, ci = np.flatnonzero(rows < MRMS_NY), np.flatnonzero(cols < MRMS_NX)
     px = np.full((len(rows), len(cols)), 255, np.uint8)
+    snow = np.zeros_like(px)
     if len(ri) and len(ci):
         block, base = mrms_rows(strips, rows[ri[0]], rows[ri[-1]])
         px[np.ix_(ri, ci)] = block[np.ix_(rows[ri] - base, cols[ci])]
-    return raw_png(px)
+        if snow_strips is not None:
+            block, base = mrms_rows(snow_strips, rows[ri[0]], rows[ri[-1]])
+            snow[np.ix_(ri, ci)] = block[np.ix_(rows[ri] - base, cols[ci])] * np.uint8(255)
+    return raw_png(np.dstack([px, snow, np.zeros_like(px)]))
 
 
 @functools.lru_cache(maxsize=180)
@@ -2847,6 +2885,10 @@ NC_SCORE_LEADS = (10, 30, 60, 90, 120)
 NC_PLACES = {'New York': (40.713, -74.006), 'Atlanta': (33.749, -84.388), 'Athens': (33.951, -83.357),
              'Augusta': (33.471, -81.975), 'Los Angeles': (34.052, -118.244)}
 NC_LOG_MAX = 4000                           # forecasts awaiting their hours of radar
+# The forecasts awaiting scoring outlive a restart (a deploy): saved on SIGTERM, loaded at
+# start. The radar itself needs nothing: the rings refill from S3 in about a minute.
+# ponytail: a crash (no SIGTERM) still loses them; save on a timer if that starts to matter
+NC_PENDING_FILE = os.environ.get('NOWCAST_PENDING_FILE', '/data/nowcast-pending.json')
 _nc_log = {}                                # (scan, lat, lon) -> {'radar'|'hrrr'|'blend': [(rate, kind) per minute]}
 _nc_lock = threading.Lock()
 NONE = (None, None, 0)                      # a minute nothing covers: (rate, p, kind)
@@ -2898,9 +2940,7 @@ def nc_field(T, r0, r1, c0, c1):
     (NEXRAD's class where it covers, else PrecipFlag's snow)."""
     with _mrms_lock:
         strips = _mrms.get(T)
-        # the type changes slowly: the newest scan's may not be up yet, an earlier one stands in
-        near = [s for s in _mrms_snow if T - MRMS_TYPE_AGE <= s <= T]
-        snow_strips = _mrms_snow[max(near)] if near else None
+    snow_strips = mrms_snow_near(T)
     if strips is None:
         raise NotPublished
     q = np.full((r1 - r0, c1 - c0), 255, np.uint8)
@@ -3218,6 +3258,24 @@ def nc_tally(s, fc, obs):
             o['false'] += 1
 
 
+def nc_save():
+    """Write the forecasts awaiting scoring to NC_PENDING_FILE."""
+    with _nc_lock:
+        rows = [[t, lat, lon, fc] for (t, lat, lon), fc in _nc_log.items()]
+    write_json(NC_PENDING_FILE, rows)
+    return len(rows)
+
+
+def nc_load(now):
+    """Take back saved forecasts whose scans the refilled ring can still score."""
+    rows = read_json(NC_PENDING_FILE) or []
+    keep = {(t, lat, lon): {k: [tuple(x) for x in v] for k, v in fc.items()}
+            for t, lat, lon, fc in rows if t > now - MRMS_FRAMES * MRMS_STEP}
+    with _nc_lock:
+        _nc_log.update(keep)
+    return len(keep)
+
+
 def nc_totals():
     return {'leads': {}, 'type': {}, 'onset': {'n': 0, 'abs_err': 0, 'bias': 0, 'missed': 0, 'false': 0}}
 
@@ -3364,7 +3422,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return self.wfile.write(body)
         if url.path == '/mrms':
-            return self.send_json(200, {'frames': mrms_times()[-MRMS_FRAMES:]})
+            frames = mrms_times()[-MRMS_FRAMES:]
+            src = frames and mrms_snow_src(frames[-1])
+            snow = src is not None and bool(src) and mrms_has_snow(src)
+            return self.send_json(200, {'frames': frames, 'snow': snow})
         if url.path == '/mrms/palette.png':
             return self.send_png(MRMS_PALETTE_PNG)
         m = re.fullmatch(r'/mrms/(\d{10})/(crop|flow)\.png', url.path)
@@ -3462,4 +3523,10 @@ if __name__ == '__main__':
     threading.Thread(target=mrms_poller, daemon=True).start()
     threading.Thread(target=nx_poller, daemon=True).start()
     threading.Thread(target=hrrr_poller, daemon=True).start()
+    print(f'[NOWCAST] {nc_load(time.time())} forecasts awaiting scoring taken back', flush=True)
+
+    def stop(*_):
+        print(f'[NOWCAST] {nc_save()} forecasts awaiting scoring saved', flush=True)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()

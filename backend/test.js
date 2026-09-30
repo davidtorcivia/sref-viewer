@@ -142,6 +142,7 @@ assert.deepStrictEqual([-74, -90, -105, -118].map(zoneByLongitude),
     assert.strictEqual(solo.radar.source, 'mrms');
     assert.strictEqual(solo.satellite, undefined);
     // NEXRAD composite: its frames' revs ride on the MRMS frames at the same times, snow flag with them
+    assert.strictEqual(shapeRadarFrames(libre, [3000], 3100, null, true).radar.snow, true, 'PrecipFlag snow alone keeps the Snow row');
     const nx = shapeRadarFrames(libre, [3000, 3120], 3200, { frames: [3120, 3240], revs: [7, 8], snow: true });
     assert.deepStrictEqual(nx.radar.past, [{ time: 3000, path: '/mrms/3000' }, { time: 3120, path: '/mrms/3120', nx: 7 }]);
     assert.strictEqual(nx.radar.snow, true);

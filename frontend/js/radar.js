@@ -159,7 +159,7 @@ let currentFrame = 0;
 let playing = false;
 let playTimer = null;
 let glLayer = null;               // MRMS on the GPU (radar-gl.js)
-let radarSnow = false;            // some NEXRAD composite frame has snow: the legend keeps its Snow row
+let radarSnow = false;            // some frame has snow (NEXRAD's class or MRMS PrecipFlag): the legend keeps its Snow row
 let glFailed = typeof WebGL2RenderingContext === 'undefined';   // then MRMS plays as raster tiles
 let clockT = null;                // GPU playback clock (epoch seconds)
 let playRaf = 0;
@@ -332,7 +332,7 @@ function syncLayers() {
         pending = [];
         glLayer ??= new MrmsLayer({
             opacity: RADAR_OPACITY, budget: GL_BUDGET, texelPx: GL_TEXEL_PX,
-            url: (t, kind, query) => kind === 'palette' ? '/api/radar/mrms/palette.png?v=__V__' : `/api/radar/mrms/${t}/${kind}.png?${query}`,
+            url: (t, kind, query) => kind === 'palette' ? '/api/radar/mrms/palette.png?v=__V__' : `/api/radar/mrms/${t}/${kind}.png?${query}${kind === 'crop' ? '&v=rg' : ''}`,
             nxUrl: (t, query) => `/api/radar/nexrad/${t}/crop.png?${query}`,
             onFail: glFallback,
         });
