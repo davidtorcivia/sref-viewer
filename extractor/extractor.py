@@ -3387,6 +3387,10 @@ def nc_score():
 
 
 class Handler(BaseHTTPRequestHandler):
+    # keep-alive: the backend's fetch (and Cloudflare's container proxy) reuse connections, and an
+    # HTTP/1.0 server closing each one after its response races the next request on it
+    # ('Network connection lost'). Every response sets Content-Length, which 1.1 needs.
+    protocol_version = 'HTTP/1.1'
     def log_message(self, fmt, *args):
         if not self.path.startswith(('/health', '/status', '/mrms', '/nexrad')):  # polled constantly
             print('[HTTP]', fmt % args, flush=True)
@@ -3611,4 +3615,5 @@ if __name__ == '__main__':
         print(f'[NOWCAST] {nc_save()} forecasts awaiting scoring saved', flush=True)
         sys.exit(0)
     signal.signal(signal.SIGTERM, stop)
+    ThreadingHTTPServer.request_queue_size = 128   # the default backlog of 5 resets connections past a handful at once
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
