@@ -2772,7 +2772,7 @@ NC_CLASSES = ((37.0, 'heavy'), (29.5, 'moderate'), (NC_RAIN_DBZ, 'light'))   # 7
 # ponytail: the widening neighborhood stands in for motion uncertainty and growth/decay;
 # upgrade to the spread of the 30-minute flows and the RRFS reflectivity trend when the scores ask
 NC_R0, NC_RGROW = 1.0, 0.2                  # radius in MRMS cells: ~1 km now, ~13 km at an hour
-NC_SCORE_FILE = os.path.join(CACHE_DIR, 'nowcast-score.json')
+NC_SCORE_FILE = os.environ.get('NOWCAST_SCORE_FILE', '/data/nowcast-score.json')   # outside CACHE_DIR: prune_cache ages out all of it
 NC_SCORE_LEADS = (10, 30, 60)
 NC_LOG_MAX = 4000                           # forecasts awaiting their hour of radar
 _nc_log = {}                                # (scan, lat, lon) -> [dbz per minute]
