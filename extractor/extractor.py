@@ -1901,8 +1901,14 @@ def mrms_poller():
             except Exception as err:  # noqa: BLE001 - the page falls back to a plain cross-fade
                 print(f'[MRMS] flow {want}: {err}', flush=True)
             try:
-                nc_score()
+                nc_train(want)
+            except NotPublished:
+                pass                        # no motion yet (a young ring)
             except Exception as err:  # noqa: BLE001 - scoring must not stop the radar
+                print(f'[NOWCAST] train: {err}', flush=True)
+            try:
+                nc_score()
+            except Exception as err:  # noqa: BLE001
                 print(f'[NOWCAST] score: {err}', flush=True)
             want += MRMS_STEP
         elif mrms_gap(want, time.time()):
@@ -2766,16 +2772,20 @@ def nx_index():
 # page's shader moves the nowcast along). Each minute reads the newest scan (NEXRAD
 # over MRMS, as the tiles draw it) in a neighborhood of the upstream point that
 # widens with the lead: dbz is its median, p the share of it raining.
-NC_LEAD = 60                                # minutes
+NC_LEAD = 60                                # minutes the page gets
+NC_TRACK = 120                              # minutes traced and scored: how far radar alone holds up
 NC_RAIN_DBZ = 20.0                          # ponytail: ~0.5 mm/h rain (Marshall-Palmer); the scorer below says if it is right
 NC_CLASSES = ((37.0, 'heavy'), (29.5, 'moderate'), (NC_RAIN_DBZ, 'light'))   # 7.6 and 2.5 mm/h (AMS)
 # ponytail: the widening neighborhood stands in for motion uncertainty and growth/decay;
 # upgrade to the spread of the 30-minute flows and the RRFS reflectivity trend when the scores ask
 NC_R0, NC_RGROW = 1.0, 0.2                  # radius in MRMS cells: ~1 km now, ~13 km at an hour
 NC_SCORE_FILE = os.environ.get('NOWCAST_SCORE_FILE', '/data/nowcast-score.json')   # outside CACHE_DIR: prune_cache ages out all of it
-NC_SCORE_LEADS = (10, 30, 60)
+NC_SCORE_LEADS = (10, 30, 60, 90, 120)
+# Forecast and scored every scan whether or not anyone looks (saved places live in browsers)
+NC_PLACES = {'New York': (40.713, -74.006), 'Atlanta': (33.749, -84.388), 'Athens': (33.951, -83.357),
+             'Augusta': (33.471, -81.975), 'Los Angeles': (34.052, -118.244)}
 NC_LOG_MAX = 4000                           # forecasts awaiting their hour of radar
-_nc_log = {}                                # (scan, lat, lon) -> [dbz per minute]
+_nc_log = {}                                # (scan, lat, lon) -> [dbz per minute to NC_TRACK]
 _nc_lock = threading.Lock()
 
 
@@ -2891,15 +2901,16 @@ def nc_summary(t, dbz):
 def nowcast_at(t, rev, lat, lon):
     """The next hour at lat/lon from scan t (rev: its NEXRAD frame's, keys the cache)."""
     f = mrms_flow_array(mrms_mean_flow(t)).astype(np.float32)
-    path = nc_path(f, lat, lon)
+    path = nc_path(f, lat, lon, NC_TRACK)
     r0, r1, c0, c1 = nc_box(path)
     d, snow = nc_field(t, r0, r1, c0, c1)
     rows = nc_read(d, snow, (r0, c0), path)
-    dbz = [v for v, _, _ in rows]
     with _nc_lock:
-        _nc_log[(t, lat, lon)] = dbz
+        _nc_log[(t, lat, lon)] = [v for v, _, _ in rows]
         for k in sorted(_nc_log)[:-NC_LOG_MAX]:
             del _nc_log[k]
+    rows = rows[:NC_LEAD + 1]
+    dbz = [v for v, _, _ in rows]
     out = {'time': t, 'step': 60, 'dbz': dbz, 'p': [p for _, p, _ in rows], 'rain': nc_summary(t, dbz)}
     if any(s for _, _, s in rows):
         out['snow'] = [s for _, _, s in rows]
@@ -2915,6 +2926,13 @@ def nowcast(lat, lon):
     return nowcast_at(t, nc_rev(t), lat, lon)
 
 
+def nc_train(t):
+    """Forecast NC_PLACES from scan t, for the scorer. ponytail: no nx_touch, so outside
+    the always-on NYC radars these read MRMS unless a viewer has NEXRAD on there."""
+    for lat, lon in NC_PLACES.values():
+        nowcast_at(t, nc_rev(t), lat, lon)
+
+
 def nc_observed(T, lat, lon):
     """Median dBZ at the place in scan T, as a lead-0 forecast reads it; None uncovered."""
     path = [((MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES)]
@@ -2922,41 +2940,52 @@ def nc_observed(T, lat, lon):
     return nc_read(*nc_field(T, r0, r1, c0, c1), (r0, c0), path)[0][0]
 
 
+def nc_tally(s, dbz, obs):
+    """Add one forecast (dbz per minute) against the radar that came (obs: minute -> dBZ) to totals s."""
+    wet = lambda v: v is not None and v >= NC_RAIN_DBZ
+    for m in NC_SCORE_LEADS:
+        if m not in obs or m >= len(dbz) or dbz[m] is None or obs[m] is None:
+            continue
+        cell = s['leads'].setdefault(str(m), {'hit': 0, 'miss': 0, 'false': 0, 'dry': 0})
+        cell[{(True, True): 'hit', (False, True): 'miss', (True, False): 'false', (False, False): 'dry'}[(wet(dbz[m]), wet(obs[m]))]] += 1
+    if obs.get(0) is not None and not wet(obs[0]) and not wet(dbz[0]):   # dry at the start: when did rain begin (within the page's hour)?
+        fc = next((m for m in range(1, NC_LEAD + 1) if wet(dbz[m])), None)
+        ob = next((m for m in sorted(obs) if 0 < m <= NC_LEAD and wet(obs[m])), None)
+        o = s['onset']
+        if fc is not None and ob is not None:
+            o['n'] += 1
+            o['abs_err'] += abs(fc - ob)
+            o['bias'] += fc - ob
+        elif ob is not None:
+            o['missed'] += 1
+        elif fc is not None:
+            o['false'] += 1
+
+
+def nc_totals():
+    return {'leads': {}, 'onset': {'n': 0, 'abs_err': 0, 'bias': 0, 'missed': 0, 'false': 0}}
+
+
 def nc_score():
-    """Score each logged forecast whose hour of radar has arrived: rain/no rain at
-    +10/+30/+60 min against the scan then, and the onset minute against the observed
-    one. Totals accumulate in NC_SCORE_FILE."""
+    """Score each logged forecast once NC_TRACK minutes of radar have arrived: rain/no rain
+    at each of NC_SCORE_LEADS against the scan then, and the onset minute in the page's hour
+    against the observed one. Totals, and per NC_PLACES place, accumulate in NC_SCORE_FILE."""
     times = set(mrms_times())
     if not times:
         return
     newest = max(times)
     with _nc_lock:
-        due = [(k, _nc_log.pop(k)) for k in [k for k in _nc_log if k[0] + NC_LEAD * 60 <= newest]]
+        due = [(k, _nc_log.pop(k)) for k in [k for k in _nc_log if k[0] + NC_TRACK * 60 <= newest]]
     if not due:
         return
-    s = read_json(NC_SCORE_FILE) or {'leads': {}, 'onset': {'n': 0, 'abs_err': 0, 'bias': 0, 'missed': 0, 'false': 0}, 'since': int(time.time())}
-    wet = lambda v: v is not None and v >= NC_RAIN_DBZ
+    s = read_json(NC_SCORE_FILE) or {**nc_totals(), 'since': int(time.time())}
+    names = {ll: name for name, ll in NC_PLACES.items()}
     for (t, lat, lon), dbz in due:
-        obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_LEAD + 1) if t + m * 60 in times}
-        for m in NC_SCORE_LEADS:
-            if m not in obs or dbz[m] is None or obs[m] is None:
-                continue
-            cell = s['leads'].setdefault(str(m), {'hit': 0, 'miss': 0, 'false': 0, 'dry': 0})
-            cell[{(True, True): 'hit', (False, True): 'miss', (True, False): 'false', (False, False): 'dry'}[(wet(dbz[m]), wet(obs[m]))]] += 1
-        if obs.get(0) is not None and not wet(obs[0]) and not wet(dbz[0]):   # dry at the start: when did rain begin?
-            fc = next((m for m in range(1, NC_LEAD + 1) if wet(dbz[m])), None)
-            ob = next((m for m in sorted(obs) if wet(obs[m])), None)
-            o = s['onset']
-            if fc is not None and ob is not None:
-                o['n'] += 1
-                o['abs_err'] += abs(fc - ob)
-                o['bias'] += fc - ob
-            elif ob is not None:
-                o['missed'] += 1
-            elif fc is not None:
-                o['false'] += 1
+        obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_TRACK + 1) if t + m * 60 in times}
+        nc_tally(s, dbz, obs)
+        if (lat, lon) in names:
+            nc_tally(s.setdefault('places', {}).setdefault(names[(lat, lon)], nc_totals()), dbz, obs)
     write_json(NC_SCORE_FILE, s)
-
 
 
 class Handler(BaseHTTPRequestHandler):

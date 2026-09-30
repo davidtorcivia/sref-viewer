@@ -1058,6 +1058,40 @@ app.get('/api/nowcast', async (req, res) => {
     }
 });
 
+// For the app's notifications: should it tell the user now? notify is true when rain starts
+// within `within` minutes (default 20, 5-60) and it is dry now; text is the page's own sentence
+// ("Heavy rain starting in 12 min, for about 20 min"). raining says whether rain is over the place
+// now, so a caller can notify once per wet spell (again only after raining and rain went quiet).
+// start/end: epoch seconds, null = already started / past the hour; peak: light | moderate | heavy.
+function shapeNotify(nc, now, within, nextHour) {
+    const r = nc?.rain;
+    const soon = !!r && r.start != null && r.start * 1000 > now && r.start * 1000 - now <= within * 60000;
+    return {
+        notify: soon, raining: !!r && r.start == null, text: r ? nextHour(nc, now) : '',
+        start: r?.start ?? null, end: r?.end ?? null, peak: r?.peak ?? null,
+        snow: !!r && !!nc.snow?.[Math.max(0, Math.round(((r.start ?? nc.time) - nc.time) / 60))], scan: nc?.time ?? null,
+    };
+}
+
+app.get('/api/nowcast/notify', async (req, res) => {
+    const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+    const within = req.query.within === undefined ? 20 : Number(req.query.within);
+    if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180) || !(within >= 5 && within <= 60)) return res.status(400).json({ error: 'Invalid lat/lon/within' });
+    if (rateLimited(req, res)) return;
+    try {
+        const up = await fetch(`${EXTRACTOR_URL}/nowcast?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`, { signal: AbortSignal.timeout(20000) });
+        const nc = await up.json();
+        res.set('Cache-Control', 'no-store');
+        if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).json(nc);
+        // a stale ring says nothing about the next hour: never notify from it
+        if (!(Date.now() / 1000 - nc.time < MRMS_STALE_S)) return res.status(503).json({ error: 'Radar is stale' });
+        const [, forecast] = await sharedModules();
+        res.json(shapeNotify(nc, Date.now(), within, forecast.nextHour));
+    } catch (err) {
+        res.status(502).json({ error: 'Nowcast unavailable', details: err.message });
+    }
+});
+
 // IANA zone for a place: NWS /points (cached with the station lookup), or
 // the longitude guess when NWS has no answer within 1.5 s (the lookup keeps
 // going and fills the cache for the next request) or none at all.
@@ -1612,4 +1646,4 @@ app.get('/api/og.png', async (req, res) => {
     }
 });
 
-module.exports = { app, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };
+module.exports = { app, shapeNotify, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };

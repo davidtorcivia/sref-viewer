@@ -144,12 +144,26 @@ sref-viewer/
 - `GET /api/radar/tile/:time/:z/:x/:y.png?fc=` - Radar tile proxy: cached 3h, and the
   NYC viewport (z7-8) is pre-rendered for every new frame within a couple of minutes of it appearing
 - `GET /api/radar/alerts?lat=&lon=&radius=` - Weather warning polygons (GeoJSON, 2min shared cache)
+- `GET /api/nowcast?lat=&lon=` - Rain in the next hour from the radar, a minute at a time from the newest
+  2-minute scan (`time`, epoch s): `dbz[61]` (median reflectivity of a patch that widens with the lead;
+  rain at 20+), `p[61]` (share of the patch raining), `snow[61]` (only when any), and
+  `rain: {start, end, peak} | null` (epoch s; start null = raining now, end null = past the hour;
+  peak light | moderate | heavy). Cached 60 s; `{stale: true}` when the radar feed is behind.
+- `GET /api/nowcast/notify?lat=&lon=&within=20` - For app notifications: `{notify, raining, text,
+  start, end, peak, snow, scan}`. `notify` is true when rain starts within `within` minutes (5-60)
+  and it is dry now; `text` is the page's sentence ("Heavy rain starting in 12 min, for about 20 min").
+  Notify once per wet spell: after notifying, wait until `raining` has been true and `raining` and
+  `notify` have gone false before notifying again. 503 when the radar is stale (never notify then).
+  Poll no more than every 2 minutes (a scan every 2).
 
 ### Extractor (internal, port 3002)
 
 - `GET /plume?sid=744860&date=YYYYMMDD&cycle=00` - Deterministic RRFS series plus REFS mean/spread at the station
 - `GET /status?date=YYYYMMDD&cycle=00` - Build progress for a cycle
 - `GET /stations` - ICAO -> BUFR station-number index (rebuilt monthly from the feed)
+- `GET /nowcast/score` - How the next-hour forecasts verified (`data/nowcast-score.json`): per lead
+  `{hit, miss, false, dry}` out to 2 hours, onset error (`abs_err / n` = mean minutes off), and the
+  same per training place (New York, Atlanta, Athens GA, Augusta GA/SC, Los Angeles)
 
 ### Operational niceties
 

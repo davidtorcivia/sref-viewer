@@ -1,6 +1,6 @@
 // Run: node test.js
 const assert = require('assert');
-const { app, oklchHex, shapeRadarFrames, mrmsCropQuery, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
+const { app, shapeNotify, oklchHex, shapeRadarFrames, mrmsCropQuery, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone } = require('./server');
 
 // Latest ready run rolls back to yesterday before the first cycle is out
 const at = (iso) => Date.parse(iso);
@@ -192,4 +192,19 @@ assert.match(oklchHex('oklch(0.58 0.14 248)'), /^#[0-9a-f]{6}$/);
     }
     server.close();
     console.log('backend: all checks passed');
+})();
+
+// Notifications: rain within the window and dry now; never while it already rains
+(async () => {
+    const { nextHour } = await import('../frontend/js/forecast.js');
+    const T = 1790000000, nc = rain => ({ time: T, dbz: [], rain });
+    const soon = shapeNotify(nc({ start: T + 720, end: T + 1920, peak: 'heavy' }), T * 1000, 20, nextHour);
+    assert.strictEqual(soon.notify, true);
+    assert.strictEqual(soon.text, 'Heavy rain starting in 12 min, for about 20 min');
+    assert.strictEqual(shapeNotify(nc({ start: T + 1800, end: null, peak: 'light' }), T * 1000, 20, nextHour).notify, false, 'past the window');
+    const now = shapeNotify(nc({ start: null, end: T + 600, peak: 'light' }), T * 1000, 20, nextHour);
+    assert.strictEqual(now.notify, false);
+    assert.strictEqual(now.raining, true);
+    assert.deepStrictEqual(shapeNotify(nc(null), T * 1000, 20, nextHour), { notify: false, raining: false, text: '', start: null, end: null, peak: null, snow: false, scan: T });
+    console.log('notify: ok');
 })();

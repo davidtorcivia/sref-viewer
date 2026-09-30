@@ -481,13 +481,14 @@ X.mrms_mean_flow = real_mean
 wet = [m for m, v in enumerate(nc['dbz']) if v is not None and v >= X.NC_RAIN_DBZ]
 assert abs(wet[0] - 30) <= 1 and abs(wet[-1] - 45) <= 2 and wet == list(range(wet[0], wet[-1] + 1)), wet
 assert nc['rain']['start'] == t0 + wet[0] * 60 and nc['rain']['end'] == t0 + (wet[-1] + 1) * 60 and nc['rain']['peak'] == 'heavy', nc['rain']
+assert len(nc['dbz']) == X.NC_LEAD + 1 and len(X._nc_log[(t0, lat, lon)]) == X.NC_TRACK + 1
 assert nc['p'][0] == 0 and nc['p'][38] > 0.5 and nc['p'][20] == 0 and 'snow' not in nc, nc['p']
 # the scorer: the radar that then arrives moved as forecast
-for m in range(2, 61, 2):
+for m in range(2, X.NC_TRACK + 1, 2):
     X.mrms_store(t0 + m * 60, scan(m))
 X.nc_score()
 s = X.read_json(X.NC_SCORE_FILE)
-assert s['leads']['10'] == {'hit': 0, 'miss': 0, 'false': 0, 'dry': 1} and s['leads']['60']['dry'] == 1, s
+assert s['leads']['10'] == {'hit': 0, 'miss': 0, 'false': 0, 'dry': 1} and s['leads']['60']['dry'] == s['leads']['120']['dry'] == 1, s
 assert s['onset']['n'] == 1 and s['onset']['abs_err'] <= 2 and not X._nc_log, s
 X._mrms.clear()
 print('nowcast: ok')
