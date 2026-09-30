@@ -1058,18 +1058,21 @@ app.get('/api/nowcast', async (req, res) => {
     }
 });
 
-// For the app's notifications: should it tell the user now? notify is true when rain starts
-// within `within` minutes (default 20, 5-60) and it is dry now; text is the page's own sentence
-// ("Heavy rain starting in 12 min, for about 20 min"). raining says whether rain is over the place
-// now, so a caller can notify once per wet spell (again only after raining and rain went quiet).
-// start/end: epoch seconds, null = already started / past the hour; peak: light | moderate | heavy.
+// For the app's notifications: should it tell the user now? notify is true when rain or snow
+// starts within `within` minutes (default 20, 5-60) and it is dry now; text is the page's own
+// sentence ("Heavy snow starting in 12 min, for about 40 min, up to 1.2 in an hour"). raining says
+// whether anything is falling now, so a caller can notify once per wet spell. start/end: epoch s,
+// null = already started / past the lead; peak: light | moderate | heavy (snow on its own scale);
+// kind: rain | snow | wet snow | sleet | freezing rain (the spell's worst); rate: peak liquid mm/h.
 function shapeNotify(nc, now, within, nextHour) {
     const r = nc?.rain;
     const soon = !!r && r.start != null && r.start * 1000 > now && r.start * 1000 - now <= within * 60000;
+    const at = r ? Math.max(0, Math.round(((r.start ?? nc.time) - nc.time) / 60)) : 0;
+    const kind = r ? r.kind ?? (nc.snow?.[at] ? 'snow' : 'rain') : null;
     return {
         notify: soon, raining: !!r && r.start == null, text: r ? nextHour(nc, now) : '',
-        start: r?.start ?? null, end: r?.end ?? null, peak: r?.peak ?? null,
-        snow: !!r && !!nc.snow?.[Math.max(0, Math.round(((r.start ?? nc.time) - nc.time) / 60))], scan: nc?.time ?? null,
+        start: r?.start ?? null, end: r?.end ?? null, peak: r?.peak ?? null, kind, rate: r?.rate ?? null,
+        snow: kind === 'snow' || kind === 'wet snow', scan: nc?.time ?? null,
     };
 }
 

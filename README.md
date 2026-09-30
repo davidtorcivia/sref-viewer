@@ -144,18 +144,23 @@ sref-viewer/
 - `GET /api/radar/tile/:time/:z/:x/:y.png?fc=` - Radar tile proxy: cached 3h, and the
   NYC viewport (z7-8) is pre-rendered for every new frame within a couple of minutes of it appearing
 - `GET /api/radar/alerts?lat=&lon=&radius=` - Weather warning polygons (GeoJSON, 2min shared cache)
-- `GET /api/nowcast?lat=&lon=` - Rain in the next 2 hours, a minute at a time from the newest radar
-  scan (`time`, epoch s): the radar moved along its motion, handing over to HRRR's 15-minute rain rate
-  between 60 and 120 min. `dbz[121]` (median reflectivity of a patch that widens with the lead; rain
-  at 20+), `p[121]` (share of the patch raining), `snow[121]` (only when any), and
-  `rain: {start, end, peak} | null` (epoch s; start null = raining now, end null = past 2 hours;
-  peak light | moderate | heavy). `hrrr: {run, step: 900, times, dbz, p, snow?} | null` is HRRR alone
-  every 15 minutes to 6 hours ahead. Cached 60 s; `{stale: true}` when the radar feed is behind.
+- `GET /api/nowcast?lat=&lon=` - Rain and snow in the next 2 hours, a minute at a time from the
+  newest radar scan (`time`, epoch s): the radar moved along its motion, handing over to HRRR's
+  15-minute forecast between 60 and 120 min. `rate[121]` (liquid-equivalent mm/h, the median of a
+  patch that widens with the lead; wet at 0.45+), `dbz[121]` (its rain-equivalent reflectivity),
+  `p[121]` (share of the patch wet), `kind[121]` (only when any is not rain: rain | snow | wet snow |
+  sleet | freezing rain; the radar's type from NEXRAD or MRMS PrecipFlag, sleet and freezing rain
+  from HRRR only), `snow[121]` (only when any is snow or wet snow), and
+  `rain: {start, end, kind, rate, peak} | null` (epoch s; start null = falling now, end null = past
+  2 hours; kind the spell's worst; rate its peak mm/h; peak light | moderate | heavy, snow on its own
+  scale). `hrrr: {run, step: 900, times, rate, dbz, p, kind?, snow?} | null` is HRRR alone every 15
+  minutes to 6 hours ahead. Cached 60 s; `{stale: true}` when the radar feed is behind.
 - `GET /api/nowcast/notify?lat=&lon=&within=20` - For app notifications: `{notify, raining, text,
-  start, end, peak, snow, scan}`. `notify` is true when rain starts within `within` minutes (5-60)
-  and it is dry now; `text` is the page's sentence ("Heavy rain starting in 12 min, for about 20 min").
-  Notify once per wet spell: after notifying, wait until `raining` has been true and `raining` and
-  `notify` have gone false before notifying again. 503 when the radar is stale (never notify then).
+  start, end, peak, kind, rate, snow, scan}`. `notify` is true when rain, snow or ice starts within
+  `within` minutes (5-60) and it is dry now; `text` is the page's sentence ("Heavy snow starting in
+  12 min, for about 40 min, up to 1.2 in an hour"). Notify once per wet spell: after notifying, wait
+  until `raining` has been true and `raining` and `notify` have gone false before notifying again.
+  503 when the radar is stale (never notify then).
   Poll no more than every 2 minutes (a scan every 2).
 
 ### Extractor (internal, port 3002)
@@ -165,7 +170,8 @@ sref-viewer/
 - `GET /stations` - ICAO -> BUFR station-number index (rebuilt monthly from the feed)
 - `GET /nowcast/score` - How the nowcasts verified (`data/nowcast-score.json`), for `radar` alone,
   `hrrr` alone and the served `blend`: per lead `{hit, miss, false, dry}` out to 2 hours, onset error
-  (`abs_err / n` = mean minutes off), and the same per training place under `places` (New York,
+  (`abs_err / n` = mean minutes off), `type` per lead `{same, diff}` (snow or not, where both were
+  wet), and the same per training place under `places` (New York,
   Atlanta, Athens GA, Augusta GA/SC, Los Angeles). Radar vs HRRR per lead sets the handoff (`NC_BLEND`).
 
 ### Operational niceties

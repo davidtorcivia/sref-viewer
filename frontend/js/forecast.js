@@ -119,23 +119,34 @@ export function nowcast(rows, now, clock = clock12) {
 
 /**
  * The next hours from /api/nowcast (the radar, then HRRR) in words, or '' when they stay dry:
- * "Heavy rain starting in 12 min, for about 20 min", "Light rain ending in 1 h 25 min",
- * "Rain for the next 2 hours". Minutes count from `now`, not the scan.
+ * "Heavy rain starting in 12 min, for about 20 min", "Light freezing rain ending in 1 h 25 min",
+ * "Heavy snow for the next 2 hours, up to 1.2 in an hour". Minutes count from `now`, not the
+ * scan; `snowDepth` words inches of snow (the page passes its units).
  */
 const span = m => (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`);
-export function nextHour(nc, now) {
+export const WET_MMH = 0.45;   // liquid mm/h that counts as wet (the extractor's NC_WET_MMH)
+const snowy = kind => kind === 'snow' || kind === 'wet snow';
+// light / moderate / heavy of a liquid-equivalent rate, on snow's scale for snow (the extractor's NC_CLASSES)
+export function rateClass(mmh, kind = 'rain') {
+    if (!(mmh >= WET_MMH)) return null;
+    const [mod, heavy] = snowy(kind) ? [1, 2.5] : [2.5, 7.6];
+    return mmh >= heavy ? 'heavy' : mmh >= mod ? 'moderate' : 'light';
+}
+export function nextHour(nc, now, snowDepth = inches => `${inches.toFixed(1)} in`) {
     const r = nc?.rain;
     if (!r) return '';
     const mins = t => span(Math.max(1, Math.round((t * 1000 - now) / 60000)));
     const lead = (nc.dbz?.length ?? 61) - 1;
     const whole = lead === 60 ? 'hour' : lead % 60 ? span(lead) : `${lead / 60} hours`;
     const at = Math.max(0, Math.round(((r.start ?? nc.time) - nc.time) / 60));
-    const kind = nc.snow?.[at] ? 'snow' : 'rain';
+    const kind = r.kind ?? (nc.snow?.[at] ? 'snow' : 'rain');
     const what = r.peak === 'heavy' ? `Heavy ${kind}` : r.peak === 'light' ? `Light ${kind}` : kind[0].toUpperCase() + kind.slice(1);
+    const depth = snowy(kind) && r.rate ? r.rate * 10 / 25.4 : 0;   // liquid mm/h as inches of snow an hour, at 10:1
+    const rate = depth >= 0.1 ? `, up to ${snowDepth(depth)} an hour` : '';
     if (r.start != null && r.start * 1000 > now) {
-        return `${what} starting in ${mins(r.start)}${r.end != null ? `, for about ${span(Math.round((r.end - r.start) / 60))}` : ''}`;
+        return `${what} starting in ${mins(r.start)}${r.end != null ? `, for about ${span(Math.round((r.end - r.start) / 60))}` : ''}${rate}`;
     }
-    return r.end != null ? `${what} ending in ${mins(r.end)}` : `${what} for the next ${whole}`;
+    return `${what} ${r.end != null ? `ending in ${mins(r.end)}` : `for the next ${whole}`}${rate}`;
 }
 
 /**

@@ -18,7 +18,7 @@ import { store, getLatestRunWithDate, previousCycle } from './config.js?v=__V__'
 import { applySiteSettings } from './site.js?v=__V__';
 import {
     hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
-    comfort, compass, monotonePath, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex, uvCategory, sky, outlook, nextHour,
+    comfort, compass, monotonePath, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex, uvCategory, sky, outlook, nextHour, rateClass, WET_MMH,
 } from './forecast.js?v=__V__';
 import { rampColor, lineColor, windArrow, spiral, spiralTimeAt, SPIRAL, fieldColor } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
@@ -625,12 +625,15 @@ function minuteBars(box, nc, now = Date.now()) {
     const skip = Math.max(0, Math.round((now / 1000 - nc.time) / 60));
     const out = [el('b')];   // the plate
     for (let k = 0; k < n && skip + k < nc.dbz.length; k++) {
-        const v = nc.dbz[skip + k];
-        if (!(v >= 20)) continue;
-        const bar = el('i', nc.snow?.[skip + k] ? 'snow' : null);
+        const v = nc.rate[skip + k], kind = nc.kind?.[skip + k] ?? 'rain';
+        const cls = rateClass(v, kind);
+        if (!cls) continue;
+        const bar = el('i', kind === 'snow' || kind === 'wet snow' ? 'snow' : kind === 'rain' ? null : 'ice');
         bar.style.gridColumn = String(k + 1);
-        bar.style.height = `${Math.round(Math.min(1, Math.max(0.2, (v - 10) / 40)) * 100)}%`;
-        bar.title = `${timeOf(now + k * 60000)} · ${v >= 37 ? 'heavy' : v >= 29.5 ? 'moderate' : 'light'} ${nc.snow?.[skip + k] ? 'snow' : 'rain'}`;
+        // height on a log scale of the liquid rate: the wet threshold low, 12 mm/h (a downpour) full
+        const frac = Math.log(v / WET_MMH) / Math.log(12 / WET_MMH);
+        bar.style.height = `${Math.round(Math.min(1, 0.2 + 0.8 * Math.max(0, frac)) * 100)}%`;
+        bar.title = `${timeOf(now + k * 60000)} · ${cls} ${kind}`;
         out.push(bar);
     }
     const every = n > 60 ? 30 : 15;
@@ -646,7 +649,7 @@ function minuteBars(box, nc, now = Date.now()) {
 // the radar's next hour (nc) words the near part when it has rain
 function headline(f, nc = null) {
     const now = Date.now();
-    const soon = nextHour(nc, now) || nowcast(f.rows, now, hourText);
+    const soon = nextHour(nc, now, v => rain(v, true)) || nowcast(f.rows, now, hourText);
     const wetSoon = !!soon && !soon.startsWith('Dry');
     // the weekday within six days, else the date
     const name = d => (Math.round((d.t - zNoon(now)) / 86400000) <= 6 ? zDate(d.t, { weekday: 'long' }) : zDate(d.t, { month: 'short', day: 'numeric' }));

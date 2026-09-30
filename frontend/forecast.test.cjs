@@ -42,6 +42,17 @@ const assert = require('node:assert/strict');
     assert.equal(f.nextHour({ ...two, rain: { start: null, end: null, peak: 'heavy' } }, T * 1000), 'Heavy rain for the next 2 hours');
     assert.equal(f.nextHour({ ...two, rain: { start: T + 600, end: T + 600 + 3900, peak: 'light' } }, T * 1000), 'Light rain starting in 10 min, for about 1 h 5 min');
 
+    const winter = rain => ({ ...nc(rain), dbz: Array(121).fill(-32) });
+    assert.equal(f.nextHour(winter({ start: T + 900, end: T + 4500, peak: 'heavy', kind: 'snow', rate: 3.05 }), T * 1000),
+        'Heavy snow starting in 15 min, for about 1 h, up to 1.2 in an hour');
+    assert.equal(f.nextHour(winter({ start: null, end: T + 1200, peak: 'light', kind: 'freezing rain', rate: 1 }), T * 1000),
+        'Light freezing rain ending in 20 min', 'no snow depth for ice');
+    assert.equal(f.nextHour(winter({ start: null, end: null, peak: 'moderate', kind: 'snow', rate: 1.5 }), T * 1000, i => `${(i * 2.54).toFixed(1)} cm`),
+        'Snow for the next 2 hours, up to 1.5 cm an hour', 'depth in the page\'s units');
+    assert.equal(f.rateClass(1.5, 'snow'), 'moderate');
+    assert.equal(f.rateClass(1.5, 'rain'), 'light');
+    assert.equal(f.rateClass(0.2, 'rain'), null);
+
     // The days ahead in one sentence
     const od = (pops, snow = 0) => pops.map((pop, i) => ({ key: `d${i}`, t: i, pop, snow }));
     const nm = d => ['Today', 'Friday', 'Saturday', 'Sunday', 'Oct 8'][d.t];

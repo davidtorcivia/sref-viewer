@@ -479,9 +479,9 @@ t0 = 1790000040
 X.mrms_store(t0, scan(0))
 nc = X.nowcast_at(t0, 0, lat, lon)
 X.mrms_mean_flow = real_mean
-wet = [m for m, v in enumerate(nc['dbz']) if v is not None and v >= X.NC_RAIN_DBZ]
+wet = [m for m, v in enumerate(nc['rate']) if X.nc_wet(v)]
 assert abs(wet[0] - 30) <= 1 and abs(wet[-1] - 45) <= 2 and wet == list(range(wet[0], wet[-1] + 1)), wet
-assert nc['rain']['start'] == t0 + wet[0] * 60 and nc['rain']['end'] == t0 + (wet[-1] + 1) * 60 and nc['rain']['peak'] == 'heavy', nc['rain']
+assert nc['rain']['start'] == t0 + wet[0] * 60 and nc['rain']['end'] == t0 + (wet[-1] + 1) * 60 and nc['rain']['peak'] == 'heavy' and nc['rain']['kind'] == 'rain', nc['rain']
 assert len(nc['dbz']) == X.NC_LEAD + 1 and len(X._nc_log[(t0, lat, lon)]['radar']) == X.NC_LEAD + 1 and nc['hrrr'] is None
 assert nc['p'][0] == 0 and nc['p'][38] > 0.5 and nc['p'][20] == 0 and 'snow' not in nc, nc['p']
 # the scorer: the radar that then arrives moved as forecast
@@ -499,7 +499,7 @@ X.mrms_store(t1, np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8))
 hp = LAMBERT_P
 run = t1 - 3600
 wet_q = np.full((hp['Ny'], hp['Nx']), (40 + 32) * 2, np.uint8)
-no_snow = zlib.compress(np.packbits(np.zeros(hp['Ny'] * hp['Nx'], bool)).tobytes())
+no_snow = zlib.compress(np.zeros((hp['Ny'], hp['Nx']), np.uint8).tobytes())
 X._hrrr = (run, hp, {run + 60 * k: (zlib.compress((wet_q if run + 60 * k >= t1 + 5400 else wet_q * 0).tobytes()), no_snow)
                      for k in range(15, 8 * 60 + 1, 15)})
 X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
@@ -509,5 +509,27 @@ assert nc['p'][30] == 0 and nc['p'][90] == 0.5 and nc['p'][120] == 1 and abs(nc[
 assert nc['hrrr']['run'] == run and nc['hrrr']['times'][0] >= t1 and nc['hrrr']['times'][-1] <= t1 + X.HRRR_AHEAD
 assert nc['hrrr']['p'][nc['hrrr']['times'].index(t1 + 5400)] == 1
 assert abs(X.rate_dbz(X.dbz_rate(33.0)) - 33) < 1e-3 and X.rate_dbz(0) == -32
-X._hrrr = (None, None, {}); X._mrms.clear()
+# freezing rain from HRRR's flag past 90 minutes: the spell's worst kind names it
+X.nowcast_at.cache_clear(); X.hrrr_point_run.cache_clear()
+fzra = zlib.compress(np.full((hp['Ny'], hp['Nx']), 4, np.uint8).tobytes())
+X._hrrr = (run, hp, {v: (zq, fzra if v >= t1 + 5400 else zk) for v, (zq, zk) in X._hrrr[2].items()})
+X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
+nc = X.nowcast_at(t1, 0, lat, lon)
+assert nc['kind'][120] == 'freezing rain' and nc['rain']['kind'] == 'freezing rain' and 'snow' not in nc, nc['rain']
+assert nc['hrrr']['kind'][nc['hrrr']['times'].index(t1 + 5400)] == 'freezing rain'
+# radar snow from PrecipFlag: the same 40 dBZ band as snow is heavy snow by the snow relation
+X._hrrr = (None, None, {}); X._mrms.clear(); X.nowcast_at.cache_clear()
+band = scan(0)
+X.mrms_store(t0, band, snow=(band > 0).astype(np.uint8))
+nc = X.nowcast_at(t0, 0, lat, lon)
+X.mrms_mean_flow = real_mean
+wet = [m for m, v in enumerate(nc['rate']) if X.nc_wet(v)]
+assert abs(wet[0] - 30) <= 1 and nc['rain']['kind'] == 'snow' and nc['rain']['peak'] == 'heavy', nc['rain']
+assert abs(nc['rain']['rate'] - (10 ** 4 / X.NC_SNOW_ZS) ** 0.5) < 0.1 and nc['snow'][wet[0] + 3] and not nc['snow'][0]
+assert X.nc_class(0.8, 1) == 'light' and X.nc_class(1.5, 1) == 'moderate' and X.nc_class(1.5, 0) == 'light'
+# the type score: snowy or not where both are wet
+tot = X.nc_totals()
+X.nc_tally(tot, [(1.0, 1)] * 121, {30: (1.0, 0), 60: (1.0, 2), 90: (0.0, 0)})
+assert tot['type'] == {'30': {'same': 0, 'diff': 1}, '60': {'same': 1, 'diff': 0}}, tot['type']
+X._mrms.clear()
 print('nowcast: ok')

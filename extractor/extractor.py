@@ -1640,6 +1640,9 @@ _mrms = {}                                  # scan epoch -> [zlib strip]
 _mrms_small = {}                            # scan epoch -> zlib quarter-res flow image
 _mrms_flow = {}                             # scan epoch -> zlib int8 motion field (MRMS_FLOW_NY, MRMS_FLOW_NX, 2)
 _mrms_age = {}                              # scan epoch -> zlib uint8 (MRMS_FLOW_NY, MRMS_FLOW_NX) data age
+_mrms_snow = {}                             # scan epoch -> [zlib strip] uint8 1 where PrecipFlag says snow
+MRMS_TYPE_PRODUCT = 'PrecipFlag_00.00'      # surface precip type, same grid and scans: 3 = snow
+MRMS_TYPE_AGE = 360                         # a scan without its type reads the newest one this recent
 _mrms_flow_lock = threading.RLock()         # one Farneback at a time (ages are computed under it too)
 _mrms_lock = threading.Lock()
 _mrms_decode_lock = threading.Lock()        # one ~200MB float64 decode at a time
@@ -1681,15 +1684,21 @@ def mrms_small(q):
     return cv2.resize(img, (MRMS_NX // 4, MRMS_FLOW_NY * 2), interpolation=cv2.INTER_AREA)
 
 
-def mrms_store(t, q, small=None):
-    strips = [zlib.compress(q[r:r + MRMS_STRIP].tobytes(), 6) for r in range(0, MRMS_NY, MRMS_STRIP)]
+def mrms_strips(a):
+    return [zlib.compress(a[r:r + MRMS_STRIP].tobytes(), 6) for r in range(0, MRMS_NY, MRMS_STRIP)]
+
+
+def mrms_store(t, q, small=None, snow=None):
+    strips = mrms_strips(q)
     with _mrms_lock:
         _mrms[t] = strips
+        if snow is not None:
+            _mrms_snow[t] = mrms_strips(snow)
         if small is not None:
             _mrms_small[t] = zlib.compress(small.tobytes(), 6)
         for old in sorted(_mrms)[:-(MRMS_FRAMES + MRMS_GRACE)]:
             del _mrms[old]
-        for d in (_mrms_small, _mrms_flow, _mrms_age):
+        for d in (_mrms_small, _mrms_flow, _mrms_age, _mrms_snow):
             for old in [k for k in d if k not in _mrms]:
                 del d[old]
 
@@ -1831,11 +1840,49 @@ def mrms_fetch(t):
             q = mrms_quantize(ec.codes_get_values(g).reshape(MRMS_NY, MRMS_NX))
         finally:
             ec.codes_release(g)
+    try:
+        snow = mrms_snow_fetch(t)
+    except Exception as err:  # noqa: BLE001 - the scan's echo still counts, as rain
+        print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} type: {err}', flush=True)
+        snow = None
     t2 = time.time()
-    mrms_store(t, q, mrms_small(q))
+    mrms_store(t, q, mrms_small(q), snow)
     print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} +{t2 - t:.0f}s: fetch {t1 - t0:.2f}s '
           f'decode {t2 - t1:.2f}s pack {time.time() - t2:.2f}s', flush=True)
     return True
+
+
+def mrms_snow_fetch(t):
+    """uint8 (MRMS_NY, MRMS_NX) snow mask of scan t from PrecipFlag; None when it is not up
+    (that scan's echo then reads as rain where NEXRAD does not say otherwise)."""
+    key = mrms_key(t).replace(MRMS_PRODUCT, MRMS_TYPE_PRODUCT)
+    try:
+        gz = http_get(f'{MRMS_URL}/{key}')
+    except urllib.error.HTTPError as err:
+        if err.code in (403, 404):
+            return None
+        raise
+    with _mrms_decode_lock:
+        g = ec.codes_new_from_message(gzip.decompress(gz))
+        try:
+            if (ec.codes_get(g, 'Ni'), ec.codes_get(g, 'Nj')) != (MRMS_NX, MRMS_NY):
+                raise RuntimeError(f'MRMS grid changed: {key}')
+            return (ec.codes_get_values(g).reshape(MRMS_NY, MRMS_NX) == 3).astype(np.uint8)
+        finally:
+            ec.codes_release(g)
+
+
+def mrms_snow_fill(now):
+    """PrecipFlag lands 5-30 s after the reflectivity: fetch it for the recent scans still without."""
+    with _mrms_lock:
+        missing = [t for t in sorted(_mrms)[-5:] if t not in _mrms_snow]
+    for t in missing:
+        snow = mrms_snow_fetch(t)
+        if snow is not None:
+            strips = mrms_strips(snow)
+            with _mrms_lock:
+                if t in _mrms:
+                    _mrms_snow[t] = strips
 
 
 def mrms_backfill():
@@ -1900,6 +1947,10 @@ def mrms_poller():
                 mrms_flow_field(want)
             except Exception as err:  # noqa: BLE001 - the page falls back to a plain cross-fade
                 print(f'[MRMS] flow {want}: {err}', flush=True)
+            try:
+                mrms_snow_fill(time.time())
+            except Exception as err:  # noqa: BLE001
+                print(f'[MRMS] type fill: {err}', flush=True)
             try:
                 nc_train(want)
             except NotPublished:
@@ -2766,19 +2817,27 @@ def nx_index():
                 'sites': sorted(s for s in _nx_active if _nx_scans.get(s))}
 
 
-# ============ Rain in the next hours at a place (point nowcast) ============
+# ============ Rain and snow in the next hours at a place (point nowcast) ============
 # The map's hatched nowcast, read at one point: the echo over a place m minutes
 # from the newest scan is the one upstream along the mean motion (the field the
 # page's shader moves the nowcast along). Each minute reads the newest scan (NEXRAD
 # over MRMS, as the tiles draw it) in a neighborhood of the upstream point that
-# widens with the lead: dbz is its median, p the share of it raining. Past an hour
-# the minutes hand over to HRRR's 15-minute rain rate, read the same way.
+# widens with the lead, as a liquid-equivalent rate: its median, and p the share of
+# it wet. Past an hour the minutes hand over to HRRR's 15-minute rate, read the same way.
+# Each minute has a kind (NC_KINDS): the radar's from NEXRAD's class where a radar is
+# on, else MRMS's PrecipFlag (snow or not); HRRR's from its categorical flags. The
+# radar cannot see sleet or freezing rain: those come from HRRR alone.
 NC_LEAD = 120                               # minutes traced, served and scored
 # ponytail: a guess until the scores compare radar, HRRR and the blend per lead:
 # radar alone to NC_BLEND[0] minutes, then linearly HRRR's by NC_BLEND[1]
 NC_BLEND = (60, 120)
-NC_RAIN_DBZ = 20.0                          # ponytail: ~0.5 mm/h rain (Marshall-Palmer); the scorer below says if it is right
-NC_CLASSES = ((37.0, 'heavy'), (29.5, 'moderate'), (NC_RAIN_DBZ, 'light'))   # 7.6 and 2.5 mm/h (AMS)
+NC_KINDS = ('rain', 'snow', 'wet snow', 'sleet', 'freezing rain')   # codes 0-4, higher = the worse to be out in
+NC_SNOWY = (1, 2)
+NC_WET_MMH = 0.45                           # ponytail: liquid mm/h that counts (rain ~19 dBZ, snow ~15 dBZ); the scorer says if it is right
+# liquid mm/h: rain (AMS 2.5 / 7.6) and snow (about 0.4 / 1 in/h of snow at 10:1)
+NC_CLASSES = {'rain': ((7.6, 'heavy'), (2.5, 'moderate'), (NC_WET_MMH, 'light')),
+              'snow': ((2.5, 'heavy'), (1.0, 'moderate'), (NC_WET_MMH, 'light'))}
+NC_SNOW_ZS = 150.0                          # ponytail: Z = 150 S^2 (S liquid mm/h), a Great Lakes relation; snow's varies 75-2000
 # ponytail: the widening neighborhood stands in for motion uncertainty and growth/decay;
 # upgrade to the spread of the 30-minute flows and the RRFS reflectivity trend when the scores ask
 NC_R0, NC_RGROW = 1.0, 0.2                  # radius in MRMS cells: ~1 km now, ~13 km at an hour
@@ -2787,13 +2846,28 @@ NC_SCORE_LEADS = (10, 30, 60, 90, 120)
 # Forecast and scored every scan whether or not anyone looks (saved places live in browsers)
 NC_PLACES = {'New York': (40.713, -74.006), 'Atlanta': (33.749, -84.388), 'Athens': (33.951, -83.357),
              'Augusta': (33.471, -81.975), 'Los Angeles': (34.052, -118.244)}
-NC_LOG_MAX = 4000                           # forecasts awaiting their hour of radar
-_nc_log = {}                                # (scan, lat, lon) -> {'radar'|'hrrr'|'blend': [dbz per minute]}
+NC_LOG_MAX = 4000                           # forecasts awaiting their hours of radar
+_nc_log = {}                                # (scan, lat, lon) -> {'radar'|'hrrr'|'blend': [(rate, kind) per minute]}
 _nc_lock = threading.Lock()
+NONE = (None, None, 0)                      # a minute nothing covers: (rate, p, kind)
 
 
 def nc_radius(m):
     return NC_R0 + NC_RGROW * m
+
+
+def rate_dbz(mmh):
+    """Marshall-Palmer Z = 200 R^1.6 in dBZ (rain-equivalent); -32 for none."""
+    r = np.asarray(mmh, np.float32)
+    return np.where(r >= HRRR_MIN_MMH, 10 * np.log10(200 * np.maximum(r, HRRR_MIN_MMH) ** 1.6), -32).astype(np.float32)
+
+
+def dbz_rate(dbz, kind=0):
+    """Liquid mm/h of reflectivity: Marshall-Palmer, or Z = NC_SNOW_ZS S^2 for snow kinds."""
+    d = np.asarray(dbz, np.float32)
+    z = 10 ** (d / 10)
+    r = np.where(np.isin(kind, NC_SNOWY), np.sqrt(z / NC_SNOW_ZS), (z / 200) ** (1 / 1.6))
+    return np.where(d > -32, r, 0).astype(np.float32)
 
 
 def nc_bilinear(a, y, x):
@@ -2820,20 +2894,27 @@ def nc_path(f, lat, lon, minutes=NC_LEAD):
 
 def nc_field(T, r0, r1, c0, c1):
     """dBZ of scan T over MRMS cells [r0, r1) x [c0, c1): no echo -32, no coverage nan,
-    NEXRAD blended over MRMS by its coverage (as mrms_tile); and where it is snow."""
+    NEXRAD blended over MRMS by its coverage (as mrms_tile); and each cell's kind code
+    (NEXRAD's class where it covers, else PrecipFlag's snow)."""
     with _mrms_lock:
         strips = _mrms.get(T)
+        # the type changes slowly: the newest scan's may not be up yet, an earlier one stands in
+        near = [s for s in _mrms_snow if T - MRMS_TYPE_AGE <= s <= T]
+        snow_strips = _mrms_snow[max(near)] if near else None
     if strips is None:
         raise NotPublished
     q = np.full((r1 - r0, c1 - c0), 255, np.uint8)
+    kind = np.zeros(q.shape, np.uint8)
     rr, cc = np.arange(r0, r1), np.arange(c0, c1)
     ri, ci = np.flatnonzero((rr >= 0) & (rr < MRMS_NY)), np.flatnonzero((cc >= 0) & (cc < MRMS_NX))
     if len(ri) and len(ci):
         block, base = mrms_rows(strips, rr[ri[0]], rr[ri[-1]])
         q[np.ix_(ri, ci)] = block[np.ix_(rr[ri] - base, cc[ci])]
+        if snow_strips is not None:
+            block, base = mrms_rows(snow_strips, rr[ri[0]], rr[ri[-1]])
+            kind[np.ix_(ri, ci)] = block[np.ix_(rr[ri] - base, cc[ci])]   # 1 = snow
     d = np.where(q == 0, -32, q * np.float32(0.5) - 32).astype(np.float32)
     covered = q != 255
-    snow = np.zeros(q.shape, bool)
     got = len(ri) and len(ci) and nx_sample(T, np.arange(rr[ri[0]] * NX_SUB, (rr[ri[-1]] + 1) * NX_SUB),
                                             np.arange(cc[ci[0]] * NX_SUB, (cc[ci[-1]] + 1) * NX_SUB))
     if got:
@@ -2847,14 +2928,16 @@ def nc_field(T, r0, r1, c0, c1):
         both, only = mc & (nden >= 0.5), ~mc & (nden >= 0.5)
         d[sub] = np.where(both, md + (nd - md) * cov, np.where(only, nd, md))
         covered[sub] = mc | (nden >= 0.5)
-        snow[sub] = ((ncls == 1).sum((1, 3)) * 2 > n) & (nden >= 0.5)
+        # NEXRAD's class 1 snow, 2 wet snow are kind codes 1, 2; the majority of a cell's gates
+        cls = np.where((ncls == 1).sum((1, 3)) * 2 > n, 1, np.where((ncls == 2).sum((1, 3)) * 2 > n, 2, 0))
+        kind[sub] = np.where(nden >= 0.5, cls, kind[sub])
     d[~covered] = np.nan
-    return d, snow
+    return d, kind
 
 
-def nc_read(d, snow, box, path):
-    """Per minute along path: (median dBZ, share raining, snow at the center) over the
-    widening neighborhood; (None, None, False) where none of it is covered."""
+def nc_read(d, kind, box, path):
+    """Per minute along path: (median liquid mm/h, share wet, kind) over the widening
+    neighborhood, read as the center's kind; NONE where none of it is covered."""
     r0, c0 = box
     R = int(math.ceil(nc_radius(len(path) - 1)))
     oy, ox = np.mgrid[-R:R + 1, -R:R + 1]
@@ -2866,9 +2949,11 @@ def nc_read(d, snow, box, path):
         v = d[i + oy[k], j + ox[k]]
         v = v[~np.isnan(v)]
         if not len(v):
-            out.append((None, None, False))
+            out.append(NONE)
             continue
-        out.append((round(float(np.median(v)), 1), round(float((v >= NC_RAIN_DBZ).mean()), 2), bool(snow[i, j])))
+        kd = int(kind[i, j])
+        rate = dbz_rate(v, kd)
+        out.append((round(float(np.median(rate)), 2), round(float((rate >= NC_WET_MMH).mean()), 2), kd))
     return out
 
 
@@ -2884,56 +2969,55 @@ def nc_rev(T):
         return f['rev'] if f and f['blocks'] else 0
 
 
-def nc_class(dbz):
-    return next((name for lo, name in NC_CLASSES if dbz is not None and dbz >= lo), None)
+def nc_wet(rate):
+    return rate is not None and rate >= NC_WET_MMH
 
 
-def nc_summary(t, dbz):
-    """Server-side words for the minutes (a push needs them without the page):
-    start/end epochs of the first wet spell (None: raining now / past the hour), its peak class."""
-    wet = [v is not None and v >= NC_RAIN_DBZ for v in dbz]
+def nc_class(rate, kind):
+    table = NC_CLASSES['snow' if kind in NC_SNOWY else 'rain']
+    return next((name for lo, name in table if nc_wet(rate) and rate >= lo), None)
+
+
+def nc_summary(t, rows):
+    """Server-side words for the minutes (the app's notifications need them without the page):
+    start/end epochs of the first wet spell (None: wet now / past the lead), its worst kind,
+    its peak liquid mm/h and that peak's class in the kind's scale."""
+    wet = [nc_wet(r) for r, _, _ in rows]
     if not any(wet):
         return None
     a = wet.index(True)
     b = next((m for m in range(a, len(wet)) if not wet[m]), None)
+    spell = rows[a:b]
+    kind = max(k for r, _, k in spell if nc_wet(r))
+    peak = max(r for r, _, k in spell if nc_wet(r))
     return {'start': None if a == 0 else t + a * 60, 'end': None if b is None else t + b * 60,
-            'peak': nc_class(max(v for v, w in zip(dbz[a:b], wet[a:b]) if w))}
+            'kind': NC_KINDS[kind], 'rate': peak, 'peak': nc_class(peak, kind)}
 
 
-# HRRR's sub-hourly files: surface precipitation rate (mm/s) and the snow flag every
-# 15 minutes, ~67 KB a step by .idx byte range. Each hourly run's first HRRR_HOURS
-# hours live in RAM as rain-rate dBZ (Marshall-Palmer, so NC_RAIN_DBZ holds for both)
-# quantized like MRMS, zlib per step, a few MB a run. Column-max REFC exaggerates
-# the surface rain; freezing rain and sleet flags are not read (the page shows rain or snow).
+# HRRR's sub-hourly files: surface precipitation rate (mm/s, liquid equivalent) and the
+# snow / sleet / freezing rain flags every 15 minutes, ~68 KB a step by .idx byte range.
+# Each hourly run's first HRRR_HOURS hours live in RAM as rate dBZ (Marshall-Palmer)
+# quantized like MRMS plus a kind code per cell, zlib per step, a few MB a run.
+# Column-max REFC would exaggerate the surface rate.
 HRRR_URL = os.environ.get('HRRR_URL', 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{date}/conus/hrrr.t{cycle}z.wrfsubhf{fh}.grib2')
 HRRR_STEP = 900
 HRRR_HOURS = 8                              # a run up to 2 hours old still reaches 6 hours ahead
 HRRR_AHEAD = 6 * 3600                       # served past the scan
 HRRR_POLL = 300
-HRRR_MIN_MMH = 0.05                         # below this no rain (~-4 dBZ)
-_hrrr = (None, None, {})                    # (run epoch, grid params, {valid epoch: (zlib q, zlib snow)}), swapped whole
-
-
-def rate_dbz(mmh):
-    """Marshall-Palmer Z = 200 R^1.6 in dBZ; -32 for no rain."""
-    r = np.asarray(mmh, np.float32)
-    return np.where(r >= HRRR_MIN_MMH, 10 * np.log10(200 * np.maximum(r, HRRR_MIN_MMH) ** 1.6), -32).astype(np.float32)
-
-
-def dbz_rate(dbz):
-    d = np.asarray(dbz, np.float32)
-    return np.where(d > -32, (10 ** (d / 10) / 200) ** (1 / 1.6), 0).astype(np.float32)
+HRRR_MIN_MMH = 0.05                         # below this nothing (~-4 dBZ)
+HRRR_FLAGS = (('CSNOW', 1), ('CICEP', 3), ('CFRZR', 4))   # flag -> kind; the higher code wins where several are set
+_hrrr = (None, None, {})                    # (run epoch, grid params, {valid epoch: (zlib q, zlib kind)}), swapped whole
 
 
 def hrrr_fetch(date, cycle):
-    """(params, {valid: (zlib q, zlib snow)}) of a run's first HRRR_HOURS hours."""
+    """(params, {valid: (zlib q, zlib kind)}) of a run's first HRRR_HOURS hours."""
     run = calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H'))
     steps, p = {}, None
     for fh in range(1, HRRR_HOURS + 1):
         url = HRRR_URL.format(date=date, cycle=cycle, fh=f'{fh:02d}')
         for k in range(1, 5):
             minute = (fh - 1) * 60 + 15 * k
-            msgs = fetch_idx_fields(url, [('PRATE', 'surface'), ('CSNOW', 'surface')], f'{minute} min fcst')
+            msgs = fetch_idx_fields(url, [('PRATE', 'surface')] + [(f, 'surface') for f, _ in HRRR_FLAGS], f'{minute} min fcst')
             if msgs is None:
                 raise NotPublished
             vals = []
@@ -2944,8 +3028,12 @@ def hrrr_fetch(date, cycle):
                     vals.append(grid_values(g, p))
                 finally:
                     ec.codes_release(g)
-            q = np.where(vals[0] * 3600 >= HRRR_MIN_MMH, np.clip(np.rint((rate_dbz(vals[0] * 3600) + 32) * 2), 1, 254), 0).astype(np.uint8)
-            steps[run + minute * 60] = (zlib.compress(q.tobytes(), 6), zlib.compress(np.packbits(vals[1] > 0.5).tobytes(), 6))
+            mmh = vals[0] * 3600
+            q = np.where(mmh >= HRRR_MIN_MMH, np.clip(np.rint((rate_dbz(mmh) + 32) * 2), 1, 254), 0).astype(np.uint8)
+            kind = np.zeros(q.shape, np.uint8)
+            for flag, (_, code) in zip(vals[1:], HRRR_FLAGS):
+                kind[flag > 0.5] = code
+            steps[run + minute * 60] = (zlib.compress(q.tobytes(), 6), zlib.compress(kind.tobytes(), 6))
     return p, steps
 
 
@@ -2973,27 +3061,28 @@ def hrrr_poller():
         time.sleep(HRRR_POLL)
 
 
-def hrrr_read(q, snow, p, lat, lon, radius_km):
-    """(median dBZ, share raining, snow at the center) of a step (q, snow: (ny, nx)) in
-    radius_km of lat/lon; None off the grid."""
+def hrrr_read(q, kind, p, lat, lon, radius_km):
+    """(median liquid mm/h, share wet, kind at the center) of a step (q, kind: (ny, nx))
+    in radius_km of lat/lon; NONE off the grid."""
     fi, fj = lambert_ij(p, np.array([lat]), np.array([lon]))
     i, j = int(round(float(fi[0]))), int(round(float(fj[0])))
     R = max(1.0, radius_km * 1000 / p['DxInMetres'])
     n = int(math.ceil(R))
     ny, nx = q.shape
     if not (n <= i < nx - n and n <= j < ny - n):
-        return None, None, False
+        return NONE
     oy, ox = np.mgrid[-n:n + 1, -n:n + 1]
     k = np.hypot(oy, ox) <= R
-    v = np.where(q[j + oy[k], i + ox[k]] > 0, q[j + oy[k], i + ox[k]] * np.float32(0.5) - 32, -32)
-    return round(float(np.median(v)), 1), round(float((v >= NC_RAIN_DBZ).mean()), 2), bool(snow[j, i])
+    v = q[j + oy[k], i + ox[k]]
+    rate = dbz_rate(np.where(v > 0, v * np.float32(0.5) - 32, -32))   # stored as Marshall-Palmer of the rate
+    return round(float(np.median(rate)), 2), round(float((rate >= NC_WET_MMH).mean()), 2), int(kind[j, i])
 
 
 NC_CELL_KM = 1.0                            # ponytail: an MRMS cell as ~1 km (1.1 N-S, 0.85 E-W at 40N)
 
 
 def hrrr_point(lat, lon, t):
-    """(run, [(valid, dBZ, p, snow)]) of the kept HRRR run at lat/lon from the step before
+    """(run, [(valid, rate, p, kind)]) of the kept HRRR run at lat/lon from the step before
     scan t to HRRR_AHEAD past it, the neighborhood widening with the lead from t like the radar's."""
     return hrrr_point_run(lat, lon, t, _hrrr[0])
 
@@ -3005,34 +3094,33 @@ def hrrr_point_run(lat, lon, t, key):
         return None, []
     out = []
     for v in sorted(v for v in steps if t - HRRR_STEP < v <= t + HRRR_AHEAD):
-        zq, zs = steps[v]
+        zq, zk = steps[v]
         q = np.frombuffer(zlib.decompress(zq), np.uint8).reshape(p['Ny'], p['Nx'])
-        snow = np.unpackbits(np.frombuffer(zlib.decompress(zs), np.uint8))[:p['Ny'] * p['Nx']].reshape(p['Ny'], p['Nx'])
-        out.append((v, *hrrr_read(q, snow, p, lat, lon, nc_radius(max(0, (v - t) / 60)) * NC_CELL_KM)))
+        kind = np.frombuffer(zlib.decompress(zk), np.uint8).reshape(p['Ny'], p['Nx'])
+        out.append((v, *hrrr_read(q, kind, p, lat, lon, nc_radius(max(0, (v - t) / 60)) * NC_CELL_KM)))
     return run, out
 
 
 def hrrr_minutes(steps, t):
-    """Per minute 0..NC_LEAD from scan t: HRRR steps interpolated in rain rate (dBZ) and
-    share (p); (None, None, False) outside the steps."""
-    good = [(v, d, q, w) for v, d, q, w in steps if d is not None]
+    """Per minute 0..NC_LEAD from scan t: HRRR steps interpolated in rate and share, the
+    nearer step's kind; NONE outside the steps."""
+    good = [x for x in steps if x[1] is not None]
     out = []
     for m in range(NC_LEAD + 1):
         T = t + m * 60
         a = next((x for x in reversed(good) if x[0] <= T), None)
         b = next((x for x in good if x[0] >= T), None)
         if a is None or b is None:
-            out.append((None, None, False))
+            out.append(NONE)
             continue
         f = 0 if b[0] == a[0] else (T - a[0]) / (b[0] - a[0])
-        rate = float(dbz_rate(a[1]) * (1 - f) + dbz_rate(b[1]) * f)
-        out.append((round(float(rate_dbz(rate)), 1), round(a[2] * (1 - f) + b[2] * f, 2), a[3] if f < 0.5 else b[3]))
+        out.append((round(a[1] * (1 - f) + b[1] * f, 2), round(a[2] * (1 - f) + b[2] * f, 2), a[3] if f < 0.5 else b[3]))
     return out
 
 
 def nc_blend(radar, model):
-    """Per minute: radar alone to NC_BLEND[0], HRRR's by NC_BLEND[1], linear between (rain
-    rate and share); either alone where the other has nothing."""
+    """Per minute: radar alone to NC_BLEND[0], HRRR's by NC_BLEND[1], linear between (rate
+    and share, the heavier side's kind); either alone where the other has nothing."""
     out = []
     for m, (r, h) in enumerate(zip(radar, model)):
         w = min(1.0, max(0.0, (NC_BLEND[1] - m) / (NC_BLEND[1] - NC_BLEND[0])))
@@ -3041,8 +3129,21 @@ def nc_blend(radar, model):
         elif r[0] is None or w == 0:
             out.append(h)
         else:
-            rate = float(dbz_rate(r[0]) * w + dbz_rate(h[0]) * (1 - w))
-            out.append((round(float(rate_dbz(rate)), 1), round(r[1] * w + h[1] * (1 - w), 2), r[2] if w >= 0.5 else h[2]))
+            out.append((round(r[0] * w + h[0] * (1 - w), 2), round(r[1] * w + h[1] * (1 - w), 2),
+                        r[2] if r[0] * w >= h[0] * (1 - w) else h[2]))
+    return out
+
+
+def nc_series(rows):
+    """API arrays of minutes or steps: rate (liquid mm/h), dbz (its rain-equivalent),
+    p, and kind (only when any is not rain) with snow (only when any is snowy)."""
+    out = {'rate': [r for r, _, _ in rows],
+           'dbz': [None if r is None else round(float(rate_dbz(r)), 1) for r, _, _ in rows],
+           'p': [p for _, p, _ in rows]}
+    if any(k for _, _, k in rows):
+        out['kind'] = [NC_KINDS[k] for _, _, k in rows]
+    if any(k in NC_SNOWY for _, _, k in rows):
+        out['snow'] = [k in NC_SNOWY for _, _, k in rows]
     return out
 
 
@@ -3053,23 +3154,17 @@ def nowcast_at(t, rev, lat, lon):
     f = mrms_flow_array(mrms_mean_flow(t)).astype(np.float32)
     path = nc_path(f, lat, lon, NC_LEAD)
     r0, r1, c0, c1 = nc_box(path)
-    d, snow = nc_field(t, r0, r1, c0, c1)
-    radar = nc_read(d, snow, (r0, c0), path)
+    radar = nc_read(*nc_field(t, r0, r1, c0, c1), (r0, c0), path)
     run, steps = hrrr_point(lat, lon, t)
     model = hrrr_minutes(steps, t)
     rows = nc_blend(radar, model)
     with _nc_lock:
-        _nc_log[(t, lat, lon)] = {k: [v for v, _, _ in r] for k, r in (('radar', radar), ('hrrr', model), ('blend', rows))}
+        _nc_log[(t, lat, lon)] = {k: [(r, kd) for r, _, kd in v] for k, v in (('radar', radar), ('hrrr', model), ('blend', rows))}
         for k in sorted(_nc_log)[:-NC_LOG_MAX]:
             del _nc_log[k]
-    dbz = [v for v, _, _ in rows]
-    out = {'time': t, 'step': 60, 'dbz': dbz, 'p': [p for _, p, _ in rows], 'rain': nc_summary(t, dbz),
-           'hrrr': run and {'run': run, 'step': HRRR_STEP, 'times': [v for v, *_ in steps if v >= t],
-                            'dbz': [d for v, d, _, _ in steps if v >= t], 'p': [q for v, _, q, _ in steps if v >= t],
-                            **({'snow': [w for v, _, _, w in steps if v >= t]} if any(w for *_, w in steps) else {})}}
-    if any(s for _, _, s in rows):
-        out['snow'] = [s for _, _, s in rows]
-    return out
+    ahead = [x for x in steps if x[0] >= t]
+    return {'time': t, 'step': 60, **nc_series(rows), 'rain': nc_summary(t, rows),
+            'hrrr': run and {'run': run, 'step': HRRR_STEP, 'times': [v for v, *_ in ahead], **nc_series([x[1:] for x in ahead])}}
 
 
 def nowcast(lat, lon):
@@ -3089,42 +3184,47 @@ def nc_train(t):
 
 
 def nc_observed(T, lat, lon):
-    """Median dBZ at the place in scan T, as a lead-0 forecast reads it; None uncovered."""
+    """(liquid mm/h, kind) at the place in scan T, as a lead-0 forecast reads it; rate None uncovered."""
     path = [((MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES)]
     r0, r1, c0, c1 = nc_box(path)
-    return nc_read(*nc_field(T, r0, r1, c0, c1), (r0, c0), path)[0][0]
+    rate, _, kind = nc_read(*nc_field(T, r0, r1, c0, c1), (r0, c0), path)[0]
+    return rate, kind
 
 
-def nc_tally(s, dbz, obs):
-    """Add one forecast (dbz per minute) against the radar that came (obs: minute -> dBZ) to totals s."""
-    wet = lambda v: v is not None and v >= NC_RAIN_DBZ
+def nc_tally(s, fc, obs):
+    """Add one forecast ([(rate, kind)] per minute) against the radar that came (obs: minute ->
+    (rate, kind)) to totals s: wet or dry per lead, snow or not where both are wet (the radar
+    cannot see sleet or freezing rain, so the kinds compare as snowy or not), and the onset."""
+    wet = lambda x: nc_wet(x[0])
     for m in NC_SCORE_LEADS:
-        if m not in obs or m >= len(dbz) or dbz[m] is None or obs[m] is None:
+        if m not in obs or m >= len(fc) or fc[m][0] is None or obs[m][0] is None:
             continue
         cell = s['leads'].setdefault(str(m), {'hit': 0, 'miss': 0, 'false': 0, 'dry': 0})
-        cell[{(True, True): 'hit', (False, True): 'miss', (True, False): 'false', (False, False): 'dry'}[(wet(dbz[m]), wet(obs[m]))]] += 1
-    if obs.get(0) is not None and not wet(obs[0]) and not wet(dbz[0]):   # dry at the start: when did rain begin?
-        fc = next((m for m in range(1, NC_LEAD + 1) if wet(dbz[m])), None)
-        ob = next((m for m in sorted(obs) if 0 < m <= NC_LEAD and wet(obs[m])), None)
+        cell[{(True, True): 'hit', (False, True): 'miss', (True, False): 'false', (False, False): 'dry'}[(wet(fc[m]), wet(obs[m]))]] += 1
+        if wet(fc[m]) and wet(obs[m]):
+            kind = s.setdefault('type', {}).setdefault(str(m), {'same': 0, 'diff': 0})
+            kind['same' if (fc[m][1] in NC_SNOWY) == (obs[m][1] in NC_SNOWY) else 'diff'] += 1
+    if obs.get(0, NONE)[0] is not None and not wet(obs[0]) and not wet(fc[0]):   # dry at the start: when did it begin?
+        f = next((m for m in range(1, NC_LEAD + 1) if wet(fc[m])), None)
+        o_ = next((m for m in sorted(obs) if 0 < m <= NC_LEAD and wet(obs[m])), None)
         o = s['onset']
-        if fc is not None and ob is not None:
+        if f is not None and o_ is not None:
             o['n'] += 1
-            o['abs_err'] += abs(fc - ob)
-            o['bias'] += fc - ob
-        elif ob is not None:
+            o['abs_err'] += abs(f - o_)
+            o['bias'] += f - o_
+        elif o_ is not None:
             o['missed'] += 1
-        elif fc is not None:
+        elif f is not None:
             o['false'] += 1
 
 
 def nc_totals():
-    return {'leads': {}, 'onset': {'n': 0, 'abs_err': 0, 'bias': 0, 'missed': 0, 'false': 0}}
+    return {'leads': {}, 'type': {}, 'onset': {'n': 0, 'abs_err': 0, 'bias': 0, 'missed': 0, 'false': 0}}
 
 
 def nc_score():
-    """Score each logged forecast once NC_LEAD minutes of radar have arrived: rain/no rain
-    at each of NC_SCORE_LEADS against the scan then, and the onset minute against the observed
-    one, for the radar alone, HRRR alone and the blend served. Totals, and per NC_PLACES place,
+    """Score each logged forecast once NC_LEAD minutes of radar have arrived (nc_tally), for
+    the radar alone, HRRR alone and the blend served. Totals, and per NC_PLACES place,
     accumulate in NC_SCORE_FILE."""
     times = set(mrms_times())
     if not times:
@@ -3140,10 +3240,10 @@ def nc_score():
     names = {ll: name for name, ll in NC_PLACES.items()}
     for (t, lat, lon), fc in due:
         obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_LEAD + 1) if t + m * 60 in times}
-        for kind, dbz in fc.items():
-            nc_tally(s.setdefault(kind, nc_totals()), dbz, obs)
+        for kind, series in fc.items():
+            nc_tally(s.setdefault(kind, nc_totals()), series, obs)
             if (lat, lon) in names:
-                nc_tally(s['places'].setdefault(names[(lat, lon)], {}).setdefault(kind, nc_totals()), dbz, obs)
+                nc_tally(s['places'].setdefault(names[(lat, lon)], {}).setdefault(kind, nc_totals()), series, obs)
     write_json(NC_SCORE_FILE, s)
 
 
