@@ -118,6 +118,24 @@ export function nowcast(rows, now, clock = clock12) {
 }
 
 /**
+ * The next hour from the radar (/api/nowcast) in words, or '' when it stays dry:
+ * "Heavy rain starting in 12 min, for about 20 min", "Light rain ending in 25 min",
+ * "Rain for the next hour". Minutes count from `now`, not the scan.
+ */
+export function nextHour(nc, now) {
+    const r = nc?.rain;
+    if (!r) return '';
+    const mins = t => Math.max(1, Math.round((t * 1000 - now) / 60000));
+    const at = Math.max(0, Math.round(((r.start ?? nc.time) - nc.time) / 60));
+    const kind = nc.snow?.[at] ? 'snow' : 'rain';
+    const what = r.peak === 'heavy' ? `Heavy ${kind}` : r.peak === 'light' ? `Light ${kind}` : kind[0].toUpperCase() + kind.slice(1);
+    if (r.start != null && r.start * 1000 > now) {
+        return `${what} starting in ${mins(r.start)} min${r.end != null ? `, for about ${Math.round((r.end - r.start) / 60)} min` : ''}`;
+    }
+    return r.end != null ? `${what} ending in ${mins(r.end)} min` : `${what} for the next hour`;
+}
+
+/**
  * The days ahead in one sentence: the wettest day after today when its chance
  * is 20% or more, else how long it stays dry. `name` words a day ("Sunday",
  * "Oct 8"); `wetSoon` when rain is already in the next hours' sentence.

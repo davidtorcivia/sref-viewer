@@ -1040,6 +1040,24 @@ app.get('/api/forecast', async (req, res) => {
     }
 });
 
+// Rain in the next hour: a minute at a time from the newest radar scan. Apart from
+// /api/forecast, whose answer the page keeps for its instant paint: minutes go stale in one.
+app.get('/api/nowcast', async (req, res) => {
+    const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+    if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return res.status(400).json({ error: 'Invalid lat/lon' });
+    if (rateLimited(req, res)) return;
+    try {
+        const up = await fetch(`${EXTRACTOR_URL}/nowcast?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`, { signal: AbortSignal.timeout(20000) });
+        const body = await up.json();
+        const fresh = up.ok && Date.now() / 1000 - body.time < MRMS_STALE_S;
+        res.set('Cache-Control', fresh ? 'public, max-age=60' : 'no-store');
+        if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).json(body);
+        res.json(fresh ? body : { stale: true });
+    } catch (err) {
+        res.status(502).json({ error: 'Nowcast unavailable', details: err.message });
+    }
+});
+
 // IANA zone for a place: NWS /points (cached with the station lookup), or
 // the longitude guess when NWS has no answer within 1.5 s (the lookup keeps
 // going and fills the cache for the next request) or none at all.

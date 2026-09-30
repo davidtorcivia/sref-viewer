@@ -18,7 +18,7 @@ import { store, getLatestRunWithDate, previousCycle } from './config.js?v=__V__'
 import { applySiteSettings } from './site.js?v=__V__';
 import {
     hourlyRows, condition, nowcast, sunAltitude, sunPosition, sunTimes, moonPhase, moonPath, humidity, feelsLike,
-    comfort, compass, monotonePath, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex, uvCategory, sky, outlook,
+    comfort, compass, monotonePath, nbmDays, sunCross, solarNoon, moonTimes, nextPhases, uvIndex, uvCategory, sky, outlook, nextHour,
 } from './forecast.js?v=__V__';
 import { rampColor, lineColor, windArrow, spiral, spiralTimeAt, SPIRAL, fieldColor } from './signal.js?v=__V__';
 import * as U from './units.js?v=__V__';
@@ -218,6 +218,17 @@ function historyFor(place) {
             .then(h => { if (!h) histories.delete(place.id); return h; }));
     }
     return histories.get(place.id);
+}
+
+// The radar's next hour at a place (/api/nowcast), or null
+async function nowcastFor(place) {
+    try {
+        const res = await fetch(`/api/nowcast?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`);
+        const nc = res.ok ? await res.json() : null;
+        return nc?.dbz ? nc : null;
+    } catch {
+        return null;
+    }
 }
 
 async function alertsFor(place) {
@@ -453,7 +464,19 @@ async function renderPlace(place, quiet = false) {
     const strip = hourStrip(next24);
 
     const sentence = el('p', 'sg-sentence', headline(f));
-    heroText.append(sentence);
+    const minutes = el('div', 'sg-minutes');   // empty (hidden) unless the radar has rain within the hour
+    heroText.append(sentence, minutes);
+    const showMinutes = nc => {
+        if (seq !== renderSeq) return;
+        sentence.textContent = headline(f, nc);
+        minutes.replaceChildren(...minuteBars(nc));
+    };
+    nowcastFor(place).then(showMinutes);
+    // a scan every 2 minutes; the minutes move on with it
+    const tick = setInterval(() => {
+        if (seq !== renderSeq) clearInterval(tick);
+        else if (document.visibilityState === 'visible') nowcastFor(place).then(showMinutes);
+    }, 120000);
     const alerts = el('section', 'sg-alertbox');   // empty (hidden) unless an alert covers the place
     alerts.setAttribute('aria-label', 'Weather alerts');
     top.after(alerts);
@@ -593,16 +616,42 @@ function showHero({ label, num, place, f }, t, ens) {
 // "12 min ago", "1 h 35 min ago"
 const ago = min => (min < 60 ? `${min} min ago` : `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ''} ago`);
 
-// One sentence: the sky now, the next 12 hours, and the next rain in the days
-function headline(f) {
+// The radar's next hour as a bar a minute, from now: height the rain rate; nothing when it stays dry
+function minuteBars(nc, now = Date.now()) {
+    if (!nc?.rain) return [];
+    const skip = Math.max(0, Math.round((now / 1000 - nc.time) / 60));
+    const out = [el('b')];   // the hour's plate
+    for (let k = 0; k < 60 && skip + k < nc.dbz.length; k++) {
+        const v = nc.dbz[skip + k];
+        if (!(v >= 20)) continue;
+        const bar = el('i', nc.snow?.[skip + k] ? 'snow' : null);
+        bar.style.gridColumn = String(k + 1);
+        bar.style.height = `${Math.round(Math.min(1, Math.max(0.2, (v - 10) / 40)) * 100)}%`;
+        bar.title = `${timeOf(now + k * 60000)} · ${v >= 37 ? 'heavy' : v >= 29.5 ? 'moderate' : 'light'} ${nc.snow?.[skip + k] ? 'snow' : 'rain'}`;
+        out.push(bar);
+    }
+    for (const k of [0, 15, 30, 45]) {
+        const t = el('span', null, k ? timeOf(now + k * 60000) : 'now');
+        t.style.gridColumn = `${k + 1} / span 15`;
+        out.push(t);
+    }
+    return out;
+}
+
+// One sentence: the sky now, the next 12 hours, and the next rain in the days;
+// the radar's next hour (nc) words the near part when it has rain
+function headline(f, nc = null) {
     const now = Date.now();
-    const soon = nowcast(f.rows, now, hourText);
+    const soon = nextHour(nc, now) || nowcast(f.rows, now, hourText);
     const wetSoon = !!soon && !soon.startsWith('Dry');
     // the weekday within six days, else the date
     const name = d => (Math.round((d.t - zNoon(now)) / 86400000) <= 6 ? zDate(d.t, { weekday: 'long' }) : zDate(d.t, { month: 'short', day: 'numeric' }));
     const days = outlook(f.days, zDay(now), name, wetSoon);
     // "Dry for the next 12 hours" says nothing that "No rain expected through ..." does not
-    const parts = [f.cond.label, days.startsWith('No rain') ? '' : soon, days].filter(Boolean);
+    // the radar knows better than the model's hour whether it is raining now
+    const radarSays = nc && (f.cond.key === 'rain' || f.cond.key === 'snow');
+    const cond = radarSays ? (nc.rain ? '' : sky(f.nowRow?.cloud ?? 0, f.night)) : f.cond.label;
+    const parts = [cond, days.startsWith('No rain') ? '' : soon, days].filter(Boolean);
     return parts.length ? `${parts.join('. ')}.` : '';
 }
 

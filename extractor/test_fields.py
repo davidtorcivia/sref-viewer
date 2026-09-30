@@ -459,3 +459,34 @@ X._nx_frames[5000] = {'blocks': {(0, 0): b''}, 'sig': {}, 'snow': {}, 'rev': 42}
 assert X.nx_rev_is(5000, 42) and X.nx_rev_is(5000, 41) and not X.nx_rev_is(5000, 43) and not X.nx_rev_is(5120, 42)
 del X._nx_frames[5000]
 print('nexrad: ok')
+
+# ---- point nowcast: a band of 40 dBZ 30-45 cells west of the place, moving east a cell a minute
+import zlib
+X._mrms.clear(); X._nx_frames.clear(); X.nowcast_at.cache_clear()
+lat, lon = 40.705, -74.005
+pr, pc = int((X.MRMS_NORTH - lat) / X.MRMS_RES), int((lon - X.MRMS_WEST) / X.MRMS_RES)
+def scan(shift):
+    q = np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8)
+    q[pr - 25:pr + 26, pc - 45 + shift:pc - 30 + shift] = (40 + 32) * 2
+    return q
+field = np.zeros((X.MRMS_FLOW_NY, X.MRMS_FLOW_NX, 2), np.int8)
+field[..., 0] = 2 * X.MRMS_FLOW_SCALE      # 2 cells east per 2 minutes
+real_mean = X.mrms_mean_flow
+X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
+t0 = 1790000040
+X.mrms_store(t0, scan(0))
+nc = X.nowcast_at(t0, 0, lat, lon)
+X.mrms_mean_flow = real_mean
+wet = [m for m, v in enumerate(nc['dbz']) if v is not None and v >= X.NC_RAIN_DBZ]
+assert abs(wet[0] - 30) <= 1 and abs(wet[-1] - 45) <= 2 and wet == list(range(wet[0], wet[-1] + 1)), wet
+assert nc['rain']['start'] == t0 + wet[0] * 60 and nc['rain']['end'] == t0 + (wet[-1] + 1) * 60 and nc['rain']['peak'] == 'heavy', nc['rain']
+assert nc['p'][0] == 0 and nc['p'][38] > 0.5 and nc['p'][20] == 0 and 'snow' not in nc, nc['p']
+# the scorer: the radar that then arrives moved as forecast
+for m in range(2, 61, 2):
+    X.mrms_store(t0 + m * 60, scan(m))
+X.nc_score()
+s = X.read_json(X.NC_SCORE_FILE)
+assert s['leads']['10'] == {'hit': 0, 'miss': 0, 'false': 0, 'dry': 1} and s['leads']['60']['dry'] == 1, s
+assert s['onset']['n'] == 1 and s['onset']['abs_err'] <= 2 and not X._nc_log, s
+X._mrms.clear()
+print('nowcast: ok')

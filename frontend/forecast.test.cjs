@@ -29,6 +29,15 @@ const assert = require('node:assert/strict');
     assert.match(f.nowcast(now, start + 30 * 60000), /^Snow ending around 2 AM$/);
     assert.equal(f.nowcast(later, start, () => '03:00'), 'Rain starting around 03:00', 'the clock comes from the caller');
 
+    // The next hour from the radar
+    const T = 1790000000, nc = (rain, snow) => ({ time: T, rain, ...(snow ? { snow } : {}) });
+    assert.equal(f.nextHour(nc(null), T * 1000), '');
+    assert.equal(f.nextHour(nc({ start: T + 720, end: T + 1920, peak: 'heavy' }), T * 1000), 'Heavy rain starting in 12 min, for about 20 min');
+    assert.equal(f.nextHour(nc({ start: T + 720, end: null, peak: 'moderate' }), (T + 120) * 1000), 'Rain starting in 10 min', 'counts from now, not the scan');
+    assert.equal(f.nextHour(nc({ start: null, end: T + 1500, peak: 'light' }), T * 1000), 'Light rain ending in 25 min');
+    assert.equal(f.nextHour(nc({ start: null, end: null, peak: 'moderate' }, [true]), T * 1000), 'Snow for the next hour');
+    assert.equal(f.nextHour(nc({ start: T + 120, end: T + 600, peak: 'light' }), (T + 180) * 1000), 'Light rain ending in 7 min', 'a start already past is now');
+
     // The days ahead in one sentence
     const od = (pops, snow = 0) => pops.map((pop, i) => ({ key: `d${i}`, t: i, pop, snow }));
     const nm = d => ['Today', 'Friday', 'Saturday', 'Sunday', 'Oct 8'][d.t];

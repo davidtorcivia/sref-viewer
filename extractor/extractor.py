@@ -1900,6 +1900,10 @@ def mrms_poller():
                 mrms_flow_field(want)
             except Exception as err:  # noqa: BLE001 - the page falls back to a plain cross-fade
                 print(f'[MRMS] flow {want}: {err}', flush=True)
+            try:
+                nc_score()
+            except Exception as err:  # noqa: BLE001 - scoring must not stop the radar
+                print(f'[NOWCAST] score: {err}', flush=True)
             want += MRMS_STEP
         elif mrms_gap(want, time.time()):
             print(f'[MRMS] {mrms_key(want)}: missing, skipping', flush=True)
@@ -2756,6 +2760,204 @@ def nx_index():
                 'sites': sorted(s for s in _nx_active if _nx_scans.get(s))}
 
 
+# ============ Rain in the next hour at a place (point nowcast) ============
+# The map's hatched nowcast, read at one point: the echo over a place m minutes
+# from the newest scan is the one upstream along the mean motion (the field the
+# page's shader moves the nowcast along). Each minute reads the newest scan (NEXRAD
+# over MRMS, as the tiles draw it) in a neighborhood of the upstream point that
+# widens with the lead: dbz is its median, p the share of it raining.
+NC_LEAD = 60                                # minutes
+NC_RAIN_DBZ = 20.0                          # ponytail: ~0.5 mm/h rain (Marshall-Palmer); the scorer below says if it is right
+NC_CLASSES = ((37.0, 'heavy'), (29.5, 'moderate'), (NC_RAIN_DBZ, 'light'))   # 7.6 and 2.5 mm/h (AMS)
+# ponytail: the widening neighborhood stands in for motion uncertainty and growth/decay;
+# upgrade to the spread of the 30-minute flows and the RRFS reflectivity trend when the scores ask
+NC_R0, NC_RGROW = 1.0, 0.2                  # radius in MRMS cells: ~1 km now, ~13 km at an hour
+NC_SCORE_FILE = os.path.join(CACHE_DIR, 'nowcast-score.json')
+NC_SCORE_LEADS = (10, 30, 60)
+NC_LOG_MAX = 4000                           # forecasts awaiting their hour of radar
+_nc_log = {}                                # (scan, lat, lon) -> [dbz per minute]
+_nc_lock = threading.Lock()
+
+
+def nc_radius(m):
+    return NC_R0 + NC_RGROW * m
+
+
+def nc_bilinear(a, y, x):
+    """a (h, w, ...) bilinear at fractional texel coordinates (texel centers at integers), clamped."""
+    h, w = a.shape[:2]
+    y, x = min(max(y, 0), h - 1), min(max(x, 0), w - 1)
+    i, j = min(int(y), h - 2), min(int(x), w - 2)
+    fy, fx = y - i, x - j
+    return (a[i, j] * (1 - fy) * (1 - fx) + a[i, j + 1] * (1 - fy) * fx
+            + a[i + 1, j] * fy * (1 - fx) + a[i + 1, j + 1] * fy * fx)
+
+
+def nc_path(f, lat, lon, minutes=NC_LEAD):
+    """MRMS cell coordinates (row, col; cell edges at integers) the echo over lat/lon m
+    minutes on is at now, m = 0..minutes: backward along the flow f a minute at a time."""
+    r, c = (MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES
+    path = [(r, c)]
+    for _ in range(minutes):
+        vx, vy = nc_bilinear(f, r / MRMS_FLOW_RES - 0.5, c / MRMS_FLOW_RES - 0.5) / MRMS_FLOW_SCALE   # cells per 2 min
+        r, c = r - vy * 60 / MRMS_STEP, c - vx * 60 / MRMS_STEP
+        path.append((r, c))
+    return path
+
+
+def nc_field(T, r0, r1, c0, c1):
+    """dBZ of scan T over MRMS cells [r0, r1) x [c0, c1): no echo -32, no coverage nan,
+    NEXRAD blended over MRMS by its coverage (as mrms_tile); and where it is snow."""
+    with _mrms_lock:
+        strips = _mrms.get(T)
+    if strips is None:
+        raise NotPublished
+    q = np.full((r1 - r0, c1 - c0), 255, np.uint8)
+    rr, cc = np.arange(r0, r1), np.arange(c0, c1)
+    ri, ci = np.flatnonzero((rr >= 0) & (rr < MRMS_NY)), np.flatnonzero((cc >= 0) & (cc < MRMS_NX))
+    if len(ri) and len(ci):
+        block, base = mrms_rows(strips, rr[ri[0]], rr[ri[-1]])
+        q[np.ix_(ri, ci)] = block[np.ix_(rr[ri] - base, cc[ci])]
+    d = np.where(q == 0, -32, q * np.float32(0.5) - 32).astype(np.float32)
+    covered = q != 255
+    snow = np.zeros(q.shape, bool)
+    got = len(ri) and len(ci) and nx_sample(T, np.arange(rr[ri[0]] * NX_SUB, (rr[ri[-1]] + 1) * NX_SUB),
+                                            np.arange(cc[ci[0]] * NX_SUB, (cc[ci[-1]] + 1) * NX_SUB))
+    if got:
+        nq, ncls, ncov = (a.reshape(len(ri), NX_SUB, len(ci), NX_SUB) for a in got)
+        has = nq != 255
+        n = has.sum((1, 3))
+        nd = np.where(has, np.where(nq == 0, -32, nq * np.float32(0.5) - 32), 0).sum((1, 3)) / np.maximum(n, 1)
+        nden, cov = n / NX_SUB ** 2, ncov[:, 0, :, 0] / np.float32(255)
+        sub = np.ix_(ri, ci)
+        md, mc = d[sub], covered[sub]
+        both, only = mc & (nden >= 0.5), ~mc & (nden >= 0.5)
+        d[sub] = np.where(both, md + (nd - md) * cov, np.where(only, nd, md))
+        covered[sub] = mc | (nden >= 0.5)
+        snow[sub] = ((ncls == 1).sum((1, 3)) * 2 > n) & (nden >= 0.5)
+    d[~covered] = np.nan
+    return d, snow
+
+
+def nc_read(d, snow, box, path):
+    """Per minute along path: (median dBZ, share raining, snow at the center) over the
+    widening neighborhood; (None, None, False) where none of it is covered."""
+    r0, c0 = box
+    R = int(math.ceil(nc_radius(len(path) - 1)))
+    oy, ox = np.mgrid[-R:R + 1, -R:R + 1]
+    dist = np.hypot(oy, ox)
+    out = []
+    for m, (r, c) in enumerate(path):
+        i, j = int(math.floor(r)) - r0, int(math.floor(c)) - c0
+        k = dist <= nc_radius(m)
+        v = d[i + oy[k], j + ox[k]]
+        v = v[~np.isnan(v)]
+        if not len(v):
+            out.append((None, None, False))
+            continue
+        out.append((round(float(np.median(v)), 1), round(float((v >= NC_RAIN_DBZ).mean()), 2), bool(snow[i, j])))
+    return out
+
+
+def nc_box(path):
+    R = int(math.ceil(nc_radius(len(path) - 1))) + 1
+    rs, cs = [int(math.floor(r)) for r, _ in path], [int(math.floor(c)) for _, c in path]
+    return min(rs) - R, max(rs) + R + 1, min(cs) - R, max(cs) + R + 1
+
+
+def nc_rev(T):
+    with _nx_lock:
+        f = _nx_frames.get(T)
+        return f['rev'] if f and f['blocks'] else 0
+
+
+def nc_class(dbz):
+    return next((name for lo, name in NC_CLASSES if dbz is not None and dbz >= lo), None)
+
+
+def nc_summary(t, dbz):
+    """Server-side words for the minutes (a push needs them without the page):
+    start/end epochs of the first wet spell (None: raining now / past the hour), its peak class."""
+    wet = [v is not None and v >= NC_RAIN_DBZ for v in dbz]
+    if not any(wet):
+        return None
+    a = wet.index(True)
+    b = next((m for m in range(a, len(wet)) if not wet[m]), None)
+    return {'start': None if a == 0 else t + a * 60, 'end': None if b is None else t + b * 60,
+            'peak': nc_class(max(v for v, w in zip(dbz[a:b], wet[a:b]) if w))}
+
+
+@functools.lru_cache(maxsize=512)
+def nowcast_at(t, rev, lat, lon):
+    """The next hour at lat/lon from scan t (rev: its NEXRAD frame's, keys the cache)."""
+    f = mrms_flow_array(mrms_mean_flow(t)).astype(np.float32)
+    path = nc_path(f, lat, lon)
+    r0, r1, c0, c1 = nc_box(path)
+    d, snow = nc_field(t, r0, r1, c0, c1)
+    rows = nc_read(d, snow, (r0, c0), path)
+    dbz = [v for v, _, _ in rows]
+    with _nc_lock:
+        _nc_log[(t, lat, lon)] = dbz
+        for k in sorted(_nc_log)[:-NC_LOG_MAX]:
+            del _nc_log[k]
+    out = {'time': t, 'step': 60, 'dbz': dbz, 'p': [p for _, p, _ in rows], 'rain': nc_summary(t, dbz)}
+    if any(s for _, _, s in rows):
+        out['snow'] = [s for _, _, s in rows]
+    return out
+
+
+def nowcast(lat, lon):
+    nx_touch(lon - 1, lat - 1, lon + 1, lat + 1, time.time())   # the radars near the place come on
+    times = mrms_times()
+    if not times:
+        raise NotPublished
+    t = times[-1]
+    return nowcast_at(t, nc_rev(t), lat, lon)
+
+
+def nc_observed(T, lat, lon):
+    """Median dBZ at the place in scan T, as a lead-0 forecast reads it; None uncovered."""
+    path = [((MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES)]
+    r0, r1, c0, c1 = nc_box(path)
+    return nc_read(*nc_field(T, r0, r1, c0, c1), (r0, c0), path)[0][0]
+
+
+def nc_score():
+    """Score each logged forecast whose hour of radar has arrived: rain/no rain at
+    +10/+30/+60 min against the scan then, and the onset minute against the observed
+    one. Totals accumulate in NC_SCORE_FILE."""
+    times = set(mrms_times())
+    if not times:
+        return
+    newest = max(times)
+    with _nc_lock:
+        due = [(k, _nc_log.pop(k)) for k in [k for k in _nc_log if k[0] + NC_LEAD * 60 <= newest]]
+    if not due:
+        return
+    s = read_json(NC_SCORE_FILE) or {'leads': {}, 'onset': {'n': 0, 'abs_err': 0, 'bias': 0, 'missed': 0, 'false': 0}, 'since': int(time.time())}
+    wet = lambda v: v is not None and v >= NC_RAIN_DBZ
+    for (t, lat, lon), dbz in due:
+        obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_LEAD + 1) if t + m * 60 in times}
+        for m in NC_SCORE_LEADS:
+            if m not in obs or dbz[m] is None or obs[m] is None:
+                continue
+            cell = s['leads'].setdefault(str(m), {'hit': 0, 'miss': 0, 'false': 0, 'dry': 0})
+            cell[{(True, True): 'hit', (False, True): 'miss', (True, False): 'false', (False, False): 'dry'}[(wet(dbz[m]), wet(obs[m]))]] += 1
+        if obs.get(0) is not None and not wet(obs[0]) and not wet(dbz[0]):   # dry at the start: when did rain begin?
+            fc = next((m for m in range(1, NC_LEAD + 1) if wet(dbz[m])), None)
+            ob = next((m for m in sorted(obs) if wet(obs[m])), None)
+            o = s['onset']
+            if fc is not None and ob is not None:
+                o['n'] += 1
+                o['abs_err'] += abs(fc - ob)
+                o['bias'] += fc - ob
+            elif ob is not None:
+                o['missed'] += 1
+            elif fc is not None:
+                o['false'] += 1
+    write_json(NC_SCORE_FILE, s)
+
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -2891,6 +3093,20 @@ class Handler(BaseHTTPRequestHandler):
             except NotPublished:
                 return self.send_json(404, {'error': 'Not in the radar ring'})
             return self.send_png(body, {'X-Crop': mrms_crop_bounds(*cells)})
+        if url.path == '/nowcast':
+            q = parse_qs(url.query)
+            try:
+                lat, lon = float(q.get('lat', ['nan'])[0]), float(q.get('lon', ['nan'])[0])
+            except ValueError:
+                lat = lon = math.nan
+            if not (MRMS_NORTH - MRMS_NY * MRMS_RES < lat < MRMS_NORTH and MRMS_WEST < lon < MRMS_WEST + MRMS_NX * MRMS_RES):
+                return self.send_json(400, {'error': 'lat/lon outside the radar mosaic'})
+            try:
+                return self.send_json(200, nowcast(round(lat, 3), round(lon, 3)))
+            except NotPublished:
+                return self.send_json(503, {'error': 'Radar motion not ready'})
+        if url.path == '/nowcast/score':
+            return self.send_json(200, read_json(NC_SCORE_FILE) or {})
         if url.path == '/nexrad':
             return self.send_json(200, nx_index())
         m = re.fullmatch(r'/nexrad/(\d{10})/crop\.png', url.path)
