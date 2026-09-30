@@ -169,10 +169,14 @@ sref-viewer/
 - `GET /status?date=YYYYMMDD&cycle=00` - Build progress for a cycle
 - `GET /stations` - ICAO -> BUFR station-number index (rebuilt monthly from the feed)
 - `GET /nowcast/score` - How the nowcasts verified (`data/nowcast-score.json`), for `radar` alone,
-  `hrrr` alone and the served `blend`: per lead `{hit, miss, false, dry}` out to 2 hours, onset error
-  (`abs_err / n` = mean minutes off), `type` per lead `{same, diff}` (snow or not, where both were
-  wet), and the same per training place under `places` (New York,
-  Atlanta, Athens GA, Augusta GA/SC, Los Angeles). Radar vs HRRR per lead sets the handoff (`NC_BLEND`).
+  `hrrr` alone, the served `blend`, and `radar@<growth>` for each patch growth run side by side:
+  per lead `{hit, miss, false, dry}` out to 2 hours, onset error (`abs_err / n` = mean minutes
+  off), `type` per lead `{same, diff}` (snow or not, where both were wet), and the same per
+  training place under `places` (New York, Atlanta, Athens GA, Augusta GA/SC, Los Angeles).
+  Training runs itself: counts fade with a 30-day half-life, and once a lead has 20+ wet cases
+  (correct-dry does not count) the scores set the radar/HRRR weight there and pick the growth
+  that verifies best; `learned` shows what is being served. All-dry forecasts wait for scoring
+  as a single number, and waiting forecasts are saved across restarts.
 
 ### Operational niceties
 

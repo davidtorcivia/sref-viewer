@@ -2866,7 +2866,7 @@ def nx_index():
 # on, else MRMS's PrecipFlag (snow or not); HRRR's from its categorical flags. The
 # radar cannot see sleet or freezing rain: those come from HRRR alone.
 NC_LEAD = 120                               # minutes traced, served and scored
-# ponytail: a guess until the scores compare radar, HRRR and the blend per lead:
+# The starting handoff, until the scores have enough wet cases to set it (nc_learn):
 # radar alone to NC_BLEND[0] minutes, then linearly HRRR's by NC_BLEND[1]
 NC_BLEND = (60, 120)
 NC_KINDS = ('rain', 'snow', 'wet snow', 'sleet', 'freezing rain')   # codes 0-4, higher = the worse to be out in
@@ -2879,6 +2879,13 @@ NC_SNOW_ZS = 150.0                          # ponytail: Z = 150 S^2 (S liquid mm
 # ponytail: the widening neighborhood stands in for motion uncertainty and growth/decay;
 # upgrade to the spread of the 30-minute flows and the RRFS reflectivity trend when the scores ask
 NC_R0, NC_RGROW = 1.0, 0.2                  # radius in MRMS cells: ~1 km now, ~13 km at an hour
+NC_RGROWS = (0.1, 0.2, 0.35)                # growths run side by side for the scorer; the best-scoring one serves
+# Training runs itself: every scored forecast adds to totals that fade (half-life below, so
+# a season's storms steer the next season less), and once a lead has NC_MIN_EVENTS wet cases
+# (hit + miss + false: correct-dry says nothing about skill) its scores set the handoff
+# weight there and pick the growth (nc_learn). Applied on the next scan; no restart.
+NC_HALF_LIFE_DAYS = 30
+NC_MIN_EVENTS = 20
 NC_SCORE_FILE = os.environ.get('NOWCAST_SCORE_FILE', '/data/nowcast-score.json')   # outside CACHE_DIR: prune_cache ages out all of it
 NC_SCORE_LEADS = (10, 30, 60, 90, 120)
 # Forecast and scored every scan whether or not anyone looks (saved places live in browsers)
@@ -2894,8 +2901,16 @@ _nc_lock = threading.Lock()
 NONE = (None, None, 0)                      # a minute nothing covers: (rate, p, kind)
 
 
-def nc_radius(m):
-    return NC_R0 + NC_RGROW * m
+def nc_default_w(m):
+    """The radar's weight at minute m before the scores say otherwise (NC_BLEND)."""
+    return min(1.0, max(0.0, (NC_BLEND[1] - m) / (NC_BLEND[1] - NC_BLEND[0])))
+
+
+_nc_learn = {'rgrow': NC_RGROW, 'weights': [nc_default_w(m) for m in range(NC_LEAD + 1)]}   # swapped whole by nc_learn
+
+
+def nc_radius(m, grow=None):
+    return NC_R0 + (_nc_learn['rgrow'] if grow is None else grow) * m
 
 
 def rate_dbz(mmh):
@@ -2975,17 +2990,18 @@ def nc_field(T, r0, r1, c0, c1):
     return d, kind
 
 
-def nc_read(d, kind, box, path):
-    """Per minute along path: (median liquid mm/h, share wet, kind) over the widening
-    neighborhood, read as the center's kind; NONE where none of it is covered."""
+def nc_read(d, kind, box, path, grow=None):
+    """Per minute along path: (median liquid mm/h, share wet, kind) over the neighborhood
+    widening by grow cells a minute (the learned one by default), read as the center's kind;
+    NONE where none of it is covered."""
     r0, c0 = box
-    R = int(math.ceil(nc_radius(len(path) - 1)))
+    R = int(math.ceil(nc_radius(len(path) - 1, grow)))
     oy, ox = np.mgrid[-R:R + 1, -R:R + 1]
     dist = np.hypot(oy, ox)
     out = []
     for m, (r, c) in enumerate(path):
         i, j = int(math.floor(r)) - r0, int(math.floor(c)) - c0
-        k = dist <= nc_radius(m)
+        k = dist <= nc_radius(m, grow)
         v = d[i + oy[k], j + ox[k]]
         v = v[~np.isnan(v)]
         if not len(v):
@@ -2998,7 +3014,7 @@ def nc_read(d, kind, box, path):
 
 
 def nc_box(path):
-    R = int(math.ceil(nc_radius(len(path) - 1))) + 1
+    R = int(math.ceil(nc_radius(len(path) - 1, max(*NC_RGROWS, _nc_learn['rgrow'])))) + 1
     rs, cs = [int(math.floor(r)) for r, _ in path], [int(math.floor(c)) for _, c in path]
     return min(rs) - R, max(rs) + R + 1, min(cs) - R, max(cs) + R + 1
 
@@ -3159,11 +3175,13 @@ def hrrr_minutes(steps, t):
 
 
 def nc_blend(radar, model):
-    """Per minute: radar alone to NC_BLEND[0], HRRR's by NC_BLEND[1], linear between (rate
-    and share, the heavier side's kind); either alone where the other has nothing."""
+    """Per minute: the radar and HRRR weighted by the learned weights (NC_BLEND's until the
+    scores set them), in rate and share, the heavier side's kind; either alone where the other
+    has nothing."""
+    weights = _nc_learn['weights']
     out = []
     for m, (r, h) in enumerate(zip(radar, model)):
-        w = min(1.0, max(0.0, (NC_BLEND[1] - m) / (NC_BLEND[1] - NC_BLEND[0])))
+        w = weights[m]
         if h[0] is None or w == 1:
             out.append(r if r[0] is not None or h[0] is None else h)
         elif r[0] is None or w == 0:
@@ -3194,12 +3212,16 @@ def nowcast_at(t, rev, lat, lon):
     f = mrms_flow_array(mrms_mean_flow(t)).astype(np.float32)
     path = nc_path(f, lat, lon, NC_LEAD)
     r0, r1, c0, c1 = nc_box(path)
-    radar = nc_read(*nc_field(t, r0, r1, c0, c1), (r0, c0), path)
+    field = nc_field(t, r0, r1, c0, c1)
+    served = _nc_learn['rgrow']
+    variants = {g: nc_read(*field, (r0, c0), path, g) for g in sorted({*NC_RGROWS, served})}
+    radar = variants[served]
     run, steps = hrrr_point(lat, lon, t)
     model = hrrr_minutes(steps, t)
     rows = nc_blend(radar, model)
+    log = {'radar': radar, 'hrrr': model, 'blend': rows, **{f'radar@{g}': v for g, v in variants.items()}}
     with _nc_lock:
-        _nc_log[(t, lat, lon)] = {k: [(r, kd) for r, _, kd in v] for k, v in (('radar', radar), ('hrrr', model), ('blend', rows))}
+        _nc_log[(t, lat, lon)] = {k: nc_pack(v) for k, v in log.items()}
         for k in sorted(_nc_log)[:-NC_LOG_MAX]:
             del _nc_log[k]
     ahead = [x for x in steps if x[0] >= t]
@@ -3231,10 +3253,23 @@ def nc_observed(T, lat, lon):
     return rate, kind
 
 
+def nc_pack(rows):
+    """A logged series: [(rate, kind)] per minute, or 0 when every minute is covered and dry
+    (most forecasts: one number instead of NC_LEAD + 1 pairs)."""
+    if all(r is not None and not nc_wet(r) for r, *_ in rows):
+        return 0
+    return [(r, kd) for r, _, kd in rows]
+
+
+def nc_unpack(series):
+    return [(0.0, 0)] * (NC_LEAD + 1) if series == 0 else series
+
+
 def nc_tally(s, fc, obs):
     """Add one forecast ([(rate, kind)] per minute) against the radar that came (obs: minute ->
     (rate, kind)) to totals s: wet or dry per lead, snow or not where both are wet (the radar
     cannot see sleet or freezing rain, so the kinds compare as snowy or not), and the onset."""
+    fc = nc_unpack(fc)
     wet = lambda x: nc_wet(x[0])
     for m in NC_SCORE_LEADS:
         if m not in obs or m >= len(fc) or fc[m][0] is None or obs[m][0] is None:
@@ -3269,11 +3304,55 @@ def nc_save():
 def nc_load(now):
     """Take back saved forecasts whose scans the refilled ring can still score."""
     rows = read_json(NC_PENDING_FILE) or []
-    keep = {(t, lat, lon): {k: [tuple(x) for x in v] for k, v in fc.items()}
+    keep = {(t, lat, lon): {k: v if v == 0 else [tuple(x) for x in v] for k, v in fc.items()}
             for t, lat, lon, fc in rows if t > now - MRMS_FRAMES * MRMS_STEP}
     with _nc_lock:
         _nc_log.update(keep)
     return len(keep)
+
+
+def nc_decay(s, now):
+    """Fade every count in s by the time since it was last faded (NC_HALF_LIFE_DAYS)."""
+    f = 0.5 ** ((now - s.get('decayed_at', now)) / (NC_HALF_LIFE_DAYS * 86400))
+    s['decayed_at'] = now
+
+    def scale(o):
+        for k, v in o.items():
+            if isinstance(v, dict):
+                scale(v)
+            elif isinstance(v, (int, float)):
+                o[k] = round(v * f, 4)
+    if f < 1:
+        scale({k: v for k, v in s.items() if k not in ('since', 'decayed_at', 'learned')})
+
+
+def nc_csi(cell):
+    """Critical success index hit / (hit + miss + false) of a lead's counts, or None short of
+    NC_MIN_EVENTS wet cases."""
+    ev = cell.get('hit', 0) + cell.get('miss', 0) + cell.get('false', 0)
+    return cell['hit'] / ev if ev >= NC_MIN_EVENTS else None
+
+
+def nc_learn(s):
+    """Set the served weights and growth from score totals s: at each scored lead with enough
+    wet cases for both, the radar's weight is its share of the two CSIs (anchored at 1 at minute
+    0, linear between leads, NC_BLEND's where the scores are thin); the growth is the variant
+    with the best mean CSI over the leads all variants can score (at least three). Returns what it set."""
+    global _nc_learn
+    lead = lambda kind, m: s.get(kind, {}).get('leads', {}).get(str(m), {})
+    xs, ws = [0], [1.0]
+    for m in NC_SCORE_LEADS:
+        cr, ch = nc_csi(lead('radar', m)), nc_csi(lead('hrrr', m))
+        xs.append(m)
+        ws.append(cr / (cr + ch) if cr is not None and ch is not None and cr + ch > 0 else nc_default_w(m))
+    weights = [round(float(w), 3) for w in np.interp(np.arange(NC_LEAD + 1), xs, ws)]
+    rgrow = NC_RGROW
+    scored = {g: [nc_csi(lead(f'radar@{g}', m)) for m in NC_SCORE_LEADS] for g in NC_RGROWS}
+    both = [i for i in range(len(NC_SCORE_LEADS)) if all(v[i] is not None for v in scored.values())]
+    if len(both) >= 3:
+        rgrow = max(NC_RGROWS, key=lambda g: sum(scored[g][i] for i in both))
+    _nc_learn = {'rgrow': rgrow, 'weights': weights}
+    return {'rgrow': rgrow, 'weights': dict(zip(map(str, xs), [round(float(w), 3) for w in ws]))}
 
 
 def nc_totals():
@@ -3295,13 +3374,15 @@ def nc_score():
     s = read_json(NC_SCORE_FILE)
     if not s or 'blend' not in s:           # an earlier layout: start over
         s = {'since': int(time.time()), 'places': {}}
+    nc_decay(s, int(time.time()))
     names = {ll: name for name, ll in NC_PLACES.items()}
     for (t, lat, lon), fc in due:
         obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_LEAD + 1) if t + m * 60 in times}
         for kind, series in fc.items():
             nc_tally(s.setdefault(kind, nc_totals()), series, obs)
-            if (lat, lon) in names:
+            if (lat, lon) in names and '@' not in kind:   # per place: what was served and its parts
                 nc_tally(s['places'].setdefault(names[(lat, lon)], {}).setdefault(kind, nc_totals()), series, obs)
+    s['learned'] = nc_learn(s)
     write_json(NC_SCORE_FILE, s)
 
 
@@ -3523,7 +3604,8 @@ if __name__ == '__main__':
     threading.Thread(target=mrms_poller, daemon=True).start()
     threading.Thread(target=nx_poller, daemon=True).start()
     threading.Thread(target=hrrr_poller, daemon=True).start()
-    print(f'[NOWCAST] {nc_load(time.time())} forecasts awaiting scoring taken back', flush=True)
+    print(f'[NOWCAST] {nc_load(time.time())} forecasts awaiting scoring taken back; '
+          f'learned {nc_learn(read_json(NC_SCORE_FILE) or {})}', flush=True)
 
     def stop(*_):
         print(f'[NOWCAST] {nc_save()} forecasts awaiting scoring saved', flush=True)

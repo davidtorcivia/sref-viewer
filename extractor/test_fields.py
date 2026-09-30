@@ -548,5 +548,21 @@ assert X.nc_save() == 2
 X._nc_log.clear()
 assert X.nc_load(100 + X.MRMS_FRAMES * X.MRMS_STEP + 60) == 1 and X._nc_log == {(5000, 40.7, -74.0): {'radar': [(1.0, 1), (None, 0)]}}, X._nc_log
 X._nc_log.clear()
+# training runs itself: dry forecasts log as one number, counts fade, the scores steer
+assert X.nc_pack([(0.1, 0, 0)] * 121) == 0 and X.nc_pack([(None, None, 0)] + [(0.0, 0, 0)] * 120) != 0
+assert X.nc_unpack(0) == [(0.0, 0)] * 121
+tot = X.nc_totals(); X.nc_tally(tot, 0, {10: (0.0, 0), 30: (2.0, 0)})
+assert tot['leads']['10']['dry'] == 1 and tot['leads']['30']['miss'] == 1, tot
+old = {'decayed_at': 0, 'since': 0, 'radar': {'leads': {'10': {'hit': 10, 'miss': 4, 'false': 0, 'dry': 8}}}}
+X.nc_decay(old, 30 * 86400)
+assert old['radar']['leads']['10'] == {'hit': 5, 'miss': 2, 'false': 0, 'dry': 4} and old['since'] == 0, old
+cell = lambda hit, miss, false: {'hit': hit, 'miss': miss, 'false': false, 'dry': 500}
+sc = {'radar': {'leads': {'10': cell(40, 5, 5), '120': cell(5, 20, 20)}}, 'hrrr': {'leads': {'10': cell(10, 20, 20), '120': cell(20, 10, 10)}},
+      **{f'radar@{g}': {'leads': {str(m): cell(20 + (10 if g == 0.35 else 0), 10, 10) for m in X.NC_SCORE_LEADS}} for g in X.NC_RGROWS}}
+got = X.nc_learn(sc)
+w = X._nc_learn['weights']
+assert w[0] == 1 and w[10] == round(0.8 / (0.8 + 0.2), 3) and w[120] == round((5 / 45) / (5 / 45 + 0.5), 3), (w[10], w[120])
+assert w[60] == X.nc_default_w(60) and got['rgrow'] == 0.35 and X.nc_radius(10) == X.NC_R0 + 3.5, got
+assert X.nc_learn({})['rgrow'] == X.NC_RGROW and X._nc_learn['weights'] == [round(X.nc_default_w(m), 3) for m in range(121)], 'thin scores: the defaults'
 X._mrms.clear()
 print('nowcast: ok')
