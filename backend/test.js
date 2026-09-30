@@ -90,6 +90,18 @@ assert.strictEqual(f19.text, 'five');
 assert.strictEqual(f19.precip, 0.1);
 assert.strictEqual(five.find(h => h.t === at('2026-09-28T18:00Z')).tmp, 53.6);
 
+// Clouds come from METARs: a 5-minute report (sensor below 12,000 ft) saying clear under an
+// observer's cirrus does not empty the sky; the hour in progress keeps the last METAR's
+{
+    const sky = bucketObservations([
+        ob('2026-09-30T18:52:00Z', 29, { rawMessage: 'KATL 301852Z', cloudLayers: [{ amount: 'FEW' }, { amount: 'SCT' }] }),
+        ob('2026-09-30T19:10:00Z', 30, { rawMessage: '', cloudLayers: [{ amount: 'CLR' }] })
+    ], at('2026-09-30T19:15Z'));
+    assert.strictEqual(sky.find(h => h.t === at('2026-09-30T18:00Z')).cloud, 44);
+    assert.strictEqual(sky.find(h => h.t === at('2026-09-30T19:00Z')).cloud, 44, 'the 19:10 sensor report does not clear it');
+    assert.strictEqual(sky.find(h => h.t === at('2026-09-30T19:00Z')).tmp, 86, 'temperature still from the nearest report');
+}
+
 // Place zones: NWS names pass, anything else is refused; longitude fallback bands
 assert.ok(validZone('America/Los_Angeles') && validZone('America/Indiana/Indianapolis'));
 assert.ok(!validZone('Nowhere/Land') && !validZone('UTC') && !validZone('../x') && !validZone(null));

@@ -1269,6 +1269,11 @@ function bucketObservations(features, nowMs) {
         // 5-minute reports carry no precipitation; take it from the hour's METAR
         const metar = nearest51(obs.filter(o => o.p.rawMessage && o.p.precipitationLastHour?.value != null));
         const mm = (metar?.p || p).precipitationLastHour?.value;
+        // Clouds from the latest METAR (the hour's, else the last hour's while this one's :51 is not in):
+        // 5-minute reports see only what the sensor does below 12,000 ft, so between METARs a sky of
+        // observer-reported cirrus would drop to clear
+        const sky = [...(byHour.get(t - HOUR) || []), ...obs].filter(o => o.p.rawMessage && o.p.cloudLayers?.length)
+            .reduce((a, b) => (!a || b.at > a.at ? b : a), null);
         hours.push({
             t,
             tmp: cToF(p.temperature?.value),
@@ -1278,7 +1283,7 @@ function bucketObservations(features, nowMs) {
             gust: kmhToMph(p.windGust?.value),
             precip: mm == null ? null : Math.round(mm / 25.4 * 1000) / 1000,
             text: p.textDescription || null,
-            cloud: cloudCover(p.cloudLayers)
+            cloud: cloudCover((sky?.p || p).cloudLayers)
         });
     }
     return hours;
