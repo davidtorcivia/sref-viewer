@@ -37,6 +37,10 @@ const assert = require('node:assert/strict');
     assert.equal(f.nextHour(nc({ start: null, end: T + 1500, peak: 'light' }), T * 1000), 'Light rain ending in 25 min');
     assert.equal(f.nextHour(nc({ start: null, end: null, peak: 'moderate' }, [true]), T * 1000), 'Snow for the next hour');
     assert.equal(f.nextHour(nc({ start: T + 120, end: T + 600, peak: 'light' }), (T + 180) * 1000), 'Light rain ending in 7 min', 'a start already past is now');
+    const two = { ...nc({ start: T + 4800, end: null, peak: 'moderate' }), dbz: Array(121).fill(-32) };
+    assert.equal(f.nextHour(two, T * 1000), 'Rain starting in 1 h 20 min');
+    assert.equal(f.nextHour({ ...two, rain: { start: null, end: null, peak: 'heavy' } }, T * 1000), 'Heavy rain for the next 2 hours');
+    assert.equal(f.nextHour({ ...two, rain: { start: T + 600, end: T + 600 + 3900, peak: 'light' } }, T * 1000), 'Light rain starting in 10 min, for about 1 h 5 min');
 
     // The days ahead in one sentence
     const od = (pops, snow = 0) => pops.map((pop, i) => ({ key: `d${i}`, t: i, pop, snow }));

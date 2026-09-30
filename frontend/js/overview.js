@@ -464,12 +464,12 @@ async function renderPlace(place, quiet = false) {
     const strip = hourStrip(next24);
 
     const sentence = el('p', 'sg-sentence', headline(f));
-    const minutes = el('div', 'sg-minutes');   // empty (hidden) unless the radar has rain within the hour
+    const minutes = el('div', 'sg-minutes');   // empty (hidden) unless rain is due within the nowcast's two hours
     heroText.append(sentence, minutes);
     const showMinutes = nc => {
         if (seq !== renderSeq) return;
         sentence.textContent = headline(f, nc);
-        minutes.replaceChildren(...minuteBars(nc));
+        minutes.replaceChildren(...minuteBars(minutes, nc));
     };
     nowcastFor(place).then(showMinutes);
     // a scan every 2 minutes; the minutes move on with it
@@ -616,12 +616,15 @@ function showHero({ label, num, place, f }, t, ens) {
 // "12 min ago", "1 h 35 min ago"
 const ago = min => (min < 60 ? `${min} min ago` : `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ''} ago`);
 
-// The radar's next hour as a bar a minute, from now: height the rain rate; nothing when it stays dry
-function minuteBars(nc, now = Date.now()) {
+// The next hours (the radar, then HRRR) as a bar a minute, from now: height the rain rate;
+// nothing when they stay dry
+function minuteBars(box, nc, now = Date.now()) {
     if (!nc?.rain) return [];
+    const n = nc.dbz.length - 1;
+    box.style.gridTemplateColumns = `repeat(${n}, minmax(0, 1fr))`;
     const skip = Math.max(0, Math.round((now / 1000 - nc.time) / 60));
-    const out = [el('b')];   // the hour's plate
-    for (let k = 0; k < 60 && skip + k < nc.dbz.length; k++) {
+    const out = [el('b')];   // the plate
+    for (let k = 0; k < n && skip + k < nc.dbz.length; k++) {
         const v = nc.dbz[skip + k];
         if (!(v >= 20)) continue;
         const bar = el('i', nc.snow?.[skip + k] ? 'snow' : null);
@@ -630,9 +633,10 @@ function minuteBars(nc, now = Date.now()) {
         bar.title = `${timeOf(now + k * 60000)} · ${v >= 37 ? 'heavy' : v >= 29.5 ? 'moderate' : 'light'} ${nc.snow?.[skip + k] ? 'snow' : 'rain'}`;
         out.push(bar);
     }
-    for (const k of [0, 15, 30, 45]) {
+    const every = n > 60 ? 30 : 15;
+    for (let k = 0; k < n; k += every) {
         const t = el('span', null, k ? timeOf(now + k * 60000) : 'now');
-        t.style.gridColumn = `${k + 1} / span 15`;
+        t.style.gridColumn = `${k + 1} / span ${every}`;
         out.push(t);
     }
     return out;

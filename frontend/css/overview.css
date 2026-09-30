@@ -231,10 +231,9 @@ body { -webkit-tap-highlight-color: transparent; }
     font-variation-settings: 'wdth' 92;
     padding-top: 16px;
 }
-/* The radar's next hour: a bar a minute on a plate, only when rain is near */
+/* The next two hours: a bar a minute on a plate (columns set per answer), only when rain is near */
 .sg-minutes {
     display: grid;
-    grid-template-columns: repeat(60, minmax(0, 1fr));
     grid-template-rows: 44px auto;
     max-width: 640px;
     margin-top: 14px;

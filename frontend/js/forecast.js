@@ -118,21 +118,24 @@ export function nowcast(rows, now, clock = clock12) {
 }
 
 /**
- * The next hour from the radar (/api/nowcast) in words, or '' when it stays dry:
- * "Heavy rain starting in 12 min, for about 20 min", "Light rain ending in 25 min",
- * "Rain for the next hour". Minutes count from `now`, not the scan.
+ * The next hours from /api/nowcast (the radar, then HRRR) in words, or '' when they stay dry:
+ * "Heavy rain starting in 12 min, for about 20 min", "Light rain ending in 1 h 25 min",
+ * "Rain for the next 2 hours". Minutes count from `now`, not the scan.
  */
+const span = m => (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`);
 export function nextHour(nc, now) {
     const r = nc?.rain;
     if (!r) return '';
-    const mins = t => Math.max(1, Math.round((t * 1000 - now) / 60000));
+    const mins = t => span(Math.max(1, Math.round((t * 1000 - now) / 60000)));
+    const lead = (nc.dbz?.length ?? 61) - 1;
+    const whole = lead === 60 ? 'hour' : lead % 60 ? span(lead) : `${lead / 60} hours`;
     const at = Math.max(0, Math.round(((r.start ?? nc.time) - nc.time) / 60));
     const kind = nc.snow?.[at] ? 'snow' : 'rain';
     const what = r.peak === 'heavy' ? `Heavy ${kind}` : r.peak === 'light' ? `Light ${kind}` : kind[0].toUpperCase() + kind.slice(1);
     if (r.start != null && r.start * 1000 > now) {
-        return `${what} starting in ${mins(r.start)} min${r.end != null ? `, for about ${Math.round((r.end - r.start) / 60)} min` : ''}`;
+        return `${what} starting in ${mins(r.start)}${r.end != null ? `, for about ${span(Math.round((r.end - r.start) / 60))}` : ''}`;
     }
-    return r.end != null ? `${what} ending in ${mins(r.end)} min` : `${what} for the next hour`;
+    return r.end != null ? `${what} ending in ${mins(r.end)}` : `${what} for the next ${whole}`;
 }
 
 /**

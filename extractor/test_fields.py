@@ -29,6 +29,7 @@ for k, v in (('Nx', 450), ('Ny', 265), ('LoVInDegrees', 262.5), ('LaDInDegrees',
     ec.codes_set(g, k, v)
 ec.codes_set_values(g, np.full(450 * 265, 273.15))
 p = X.grid_params(g)
+LAMBERT_P = dict(p)                       # the nowcast test's HRRR stand-in grid
 lats = ec.codes_get_array(g, 'latitudes')
 lons = ec.codes_get_array(g, 'longitudes')
 fi, fj = X.lambert_ij(p, lats, lons)
@@ -481,14 +482,32 @@ X.mrms_mean_flow = real_mean
 wet = [m for m, v in enumerate(nc['dbz']) if v is not None and v >= X.NC_RAIN_DBZ]
 assert abs(wet[0] - 30) <= 1 and abs(wet[-1] - 45) <= 2 and wet == list(range(wet[0], wet[-1] + 1)), wet
 assert nc['rain']['start'] == t0 + wet[0] * 60 and nc['rain']['end'] == t0 + (wet[-1] + 1) * 60 and nc['rain']['peak'] == 'heavy', nc['rain']
-assert len(nc['dbz']) == X.NC_LEAD + 1 and len(X._nc_log[(t0, lat, lon)]) == X.NC_TRACK + 1
+assert len(nc['dbz']) == X.NC_LEAD + 1 and len(X._nc_log[(t0, lat, lon)]['radar']) == X.NC_LEAD + 1 and nc['hrrr'] is None
 assert nc['p'][0] == 0 and nc['p'][38] > 0.5 and nc['p'][20] == 0 and 'snow' not in nc, nc['p']
 # the scorer: the radar that then arrives moved as forecast
-for m in range(2, X.NC_TRACK + 1, 2):
+for m in range(2, X.NC_LEAD + 1, 2):
     X.mrms_store(t0 + m * 60, scan(m))
 X.nc_score()
 s = X.read_json(X.NC_SCORE_FILE)
-assert s['leads']['10'] == {'hit': 0, 'miss': 0, 'false': 0, 'dry': 1} and s['leads']['60']['dry'] == s['leads']['120']['dry'] == 1, s
-assert s['onset']['n'] == 1 and s['onset']['abs_err'] <= 2 and not X._nc_log, s
-X._mrms.clear()
+r = s['radar']
+assert r['leads']['10'] == {'hit': 0, 'miss': 0, 'false': 0, 'dry': 1} and r['leads']['60']['dry'] == r['leads']['120']['dry'] == 1, s
+assert r['onset']['n'] == 1 and r['onset']['abs_err'] <= 2 and not X._nc_log and s['blend'] == r and not s['hrrr']['leads'], s
+# HRRR takes over past an hour: dry radar, the model raining (40 dBZ of rate) from +90 min
+X._mrms.clear(); X.nowcast_at.cache_clear()
+t1 = t0 + 7200
+X.mrms_store(t1, np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8))
+hp = LAMBERT_P
+run = t1 - 3600
+wet_q = np.full((hp['Ny'], hp['Nx']), (40 + 32) * 2, np.uint8)
+no_snow = zlib.compress(np.packbits(np.zeros(hp['Ny'] * hp['Nx'], bool)).tobytes())
+X._hrrr = (run, hp, {run + 60 * k: (zlib.compress((wet_q if run + 60 * k >= t1 + 5400 else wet_q * 0).tobytes()), no_snow)
+                     for k in range(15, 8 * 60 + 1, 15)})
+X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
+nc = X.nowcast_at(t1, 0, lat, lon)
+X.mrms_mean_flow = real_mean
+assert nc['p'][30] == 0 and nc['p'][90] == 0.5 and nc['p'][120] == 1 and abs(nc['dbz'][120] - 40) < 0.5, (nc['p'][85:95], nc['dbz'][120])
+assert nc['hrrr']['run'] == run and nc['hrrr']['times'][0] >= t1 and nc['hrrr']['times'][-1] <= t1 + X.HRRR_AHEAD
+assert nc['hrrr']['p'][nc['hrrr']['times'].index(t1 + 5400)] == 1
+assert abs(X.rate_dbz(X.dbz_rate(33.0)) - 33) < 1e-3 and X.rate_dbz(0) == -32
+X._hrrr = (None, None, {}); X._mrms.clear()
 print('nowcast: ok')
