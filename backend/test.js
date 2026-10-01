@@ -225,3 +225,23 @@ assert.match(oklchHex('oklch(0.58 0.14 248)'), /^#[0-9a-f]{6}$/);
     assert.strictEqual(ice.snow, false);
     console.log('notify: ok');
 })();
+
+// AirNow: the worse of the nearest PM2.5 and ozone monitors, none past AIR_KM
+{
+    const { parseAirnow, airAt, shapePollen } = require('./server');
+    const sites = parseAirnow(`"AQSID","SiteName","Latitude","Longitude","ValidDate","ValidTime","OZONE_AQI","PM25_AQI"
+"1","Near, NY","40.72","-74.00","10/01/2026","18:00","21","56"
+"2","Nearer","40.713","-74.006","10/01/2026","18:00","30",""
+"3","Far","42.0","-74.0","10/01/2026","18:00","90","150"
+"4","Empty","40.71","-74.00","10/01/2026","18:00","",""`);
+    assert.strictEqual(sites.length, 3);
+    assert.strictEqual(sites[0].at, Date.parse('2026-10-01T18:00Z'));
+    const a = airAt(sites, 40.7128, -74.006);
+    assert.deepStrictEqual([a.aqi, a.main, a.pm25.site, a.o3.site], [56, 'pm25', 'Near, NY', 'Nearer']);
+    assert.strictEqual(airAt(sites, 30, -90), null);
+    const p = shapePollen({ dailyInfo: [{ date: { year: 2026, month: 10, day: 1 },
+        pollenTypeInfo: [{ code: 'WEED', indexInfo: { value: 3 } }, { code: 'GRASS', indexInfo: { value: 1 } }, { code: 'TREE' }],
+        plantInfo: [{ displayName: 'Grasses', indexInfo: { value: 1 } }, { displayName: 'Ragweed', indexInfo: { value: 3 } }, { displayName: 'Oak' }] }] });
+    assert.deepStrictEqual(p, [{ date: '2026-10-01', tree: null, grass: 1, weed: 3, plants: ['Ragweed', 'Grasses'] }]);
+    console.log('air: ok');
+}

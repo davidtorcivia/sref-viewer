@@ -305,7 +305,7 @@ body { -webkit-tap-highlight-color: transparent; }
 /* ============ Readouts ============ */
 .sg-cells {
     display: grid;
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 8px;
     margin: 40px var(--gut) 0;
 }
@@ -628,6 +628,8 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
 /* ============ Narrower screens ============ */
 @media (max-width: 1180px) {
     .sg-cells { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    /* ten cards in rows of four: rain's squares and the sun's day take two columns */
+    .sg-cell-rain, .sg-cell-sun { grid-column: span 2; }
     .sg-more { grid-template-columns: 1fr; }
 }
 
@@ -680,6 +682,7 @@ button.sg-cell[aria-expanded="true"] .mini .sq:not(.sq-on) { fill: none; }
     .sg-detail.open .sg-detail-inner { padding: 14px; }
     .sg-detail-inner .detail-rows { columns: 1; }
     .sg-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .sg-cell-rain, .sg-cell-sun { grid-column: auto; }
     .sg-cell { min-height: max(150px, var(--cell-h, 0px)); }
     .sg-cell-v { font-size: 38px; }
     .sg-num { font-size: 260px; }

@@ -25,6 +25,8 @@ services:
       # Admin is disabled until this is set (in .env)
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - EXTRACTOR_URL=http://extractor:3002
+      # Pollen card (Google Pollen API); the card stays empty without it
+      - GOOGLE_POLLEN_KEY=${GOOGLE_POLLEN_KEY:-}
     volumes:
       - ./data:/app/data
     depends_on:

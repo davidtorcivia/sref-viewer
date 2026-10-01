@@ -53,6 +53,7 @@ const savePlaces = () => store.set(PLACES_KEY, JSON.stringify(places));
 
 const forecasts = new Map();   // place id -> Promise<forecast>
 const histories = new Map();   // place id -> Promise<history | null>
+const airs = new Map();        // place id -> Promise<{ air, pollen } | null>
 let units = U.parseUnits(store.get(UNITS_KEY));
 
 // ============ Small DOM helpers ============
@@ -218,6 +219,17 @@ function historyFor(place) {
             .then(h => { if (!h) histories.delete(place.id); return h; }));
     }
     return histories.get(place.id);
+}
+
+// Air quality at the nearest monitors and the pollen forecast (/api/air); null on failure
+function airFor(place) {
+    if (!airs.has(place.id)) {
+        airs.set(place.id, fetch(`/api/air?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`)
+            .then(r => (r.ok ? r.json() : null))
+            .catch(() => null)
+            .then(a => { if (!a) airs.delete(place.id); return a; }));
+    }
+    return airs.get(place.id);
 }
 
 // The radar's next hour at a place (/api/nowcast), or null
@@ -846,6 +858,15 @@ function squares(n) {
     for (let i = 0; i < 20; i++) svgEl('rect', { x: (i % 10) * 13 + 1, y: Math.floor(i / 10) * 13 + 3, width: 10, height: 10, class: i < n ? 'sq sq-on' : 'sq' }, s);
     return s;
 }
+// The Universal Pollen Index, 0-5, as five blocks
+function pollenBar(v) {
+    const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
+    for (let i = 0; i < 5; i++) svgEl('rect', { x: i * 28 + 1, y: 10, width: 24, height: 10, class: i < v ? 'sq sq-on' : 'sq' }, s);
+    return s;
+}
+const POLLEN_WORDS = ['None', 'Very low', 'Low', 'Moderate', 'High', 'Very high'];
+const POLLEN_TYPES = { tree: 'Trees', grass: 'Grass', weed: 'Weeds' };
+const AQI_WORDS = [[50, 'Good'], [100, 'Moderate'], [150, 'Unhealthy for sensitive groups'], [200, 'Unhealthy'], [300, 'Very unhealthy'], [Infinity, 'Hazardous']];
 function coverBar(pct) {
     const s = svgEl('svg', { viewBox: '0 0 140 30', class: 'mini', 'aria-hidden': 'true' });
     svgEl('rect', { x: 1, y: 10, width: 136, height: 10, class: 'sq' }, s);
@@ -899,11 +920,9 @@ function readouts(place, f) {
     const inner = el('div', 'sg-detail-inner');
     detail.append(inner);
     let open = null;
-    // The detail sits in the grid right after the row of the card that opened it
+    // The detail sits in the grid right after the row of the card that opened it (cards span unevenly)
     const place_ = btn => {
-        const cols = getComputedStyle(sec).gridTemplateColumns.split(' ').length;
-        const cards = [...sec.querySelectorAll('.sg-cell')];
-        const last = cards[Math.min(cards.length - 1, (Math.floor(cards.indexOf(btn) / cols) + 1) * cols - 1)];
+        const last = [...sec.querySelectorAll('.sg-cell')].filter(c => c.offsetTop === btn.offsetTop).pop();
         if (last.nextElementSibling !== detail) last.after(detail);
     };
     const toggle = (key, btn) => {
@@ -939,9 +958,9 @@ function readouts(place, f) {
         if (!sec.isConnected) { document.removeEventListener('click', outside); return; }
         if (open && !sec.contains(e.target)) close();
     });
-    const keys = ['feels', 'dew', 'wind', 'sky', 'rain', 'later3', 'later12', 'sun'];
+    const keys = ['feels', 'dew', 'wind', 'sky', 'rain', 'later3', 'later12', 'sun', 'air', 'pollen'];
     const cells = Object.fromEntries(keys.map(k => {
-        const c = el(CELL_DETAIL[k] ? 'button' : 'div', 'sg-cell');
+        const c = el(CELL_DETAIL[k] ? 'button' : 'div', `sg-cell sg-cell-${k}`);
         if (CELL_DETAIL[k]) {
             c.type = 'button';
             c.setAttribute('aria-expanded', 'false');
@@ -1008,9 +1027,25 @@ function readouts(place, f) {
             const len = st.rise && st.set ? Math.round((st.set - st.rise) / 60000) : null;
             put('sun', name, timeOf(when), len != null ? `${Math.floor(len / 60)} h ${len % 60} m of daylight.` : '', dayBar(st.rise, st.set, tt));
         }
+        // air is the latest hour measured, whatever the cursor; pollen follows the cursor's day
+        const aq = air?.air;
+        if (aq) {
+            const m = aq[aq.main];
+            put('air', 'Air quality', String(aq.aqi), `${AQI_WORDS.find(([top]) => aq.aqi <= top)[1]}. ${aq.main === 'pm25' ? 'Fine particles' : 'Ozone'} at ${m.site}, ${Math.round(m.km)} km.`,
+                gauge(Math.min(aq.aqi, 200), 0, 200, [50, 100, 150]));
+        } else put('air', 'Air quality', '--', '', null);
+        const pd = air?.pollen?.find(d => d.date === zDay(tt));
+        const worst = pd && Math.max(...['tree', 'grass', 'weed'].map(x => pd[x] ?? -1));
+        if (worst >= 0) {
+            const main = ['weed', 'grass', 'tree'].filter(x => pd[x] === worst && worst > 0);
+            put('pollen', `Pollen ${zDay(tt) === zDay(Date.now()) ? 'today' : zDate(tt, { weekday: 'short' })}`, String(worst),
+                `${POLLEN_WORDS[worst]}.${main.length ? ` Mostly ${(pd.plants.length ? pd.plants.slice(0, 2) : main.map(x => POLLEN_TYPES[x])).join(' and ').toLowerCase()}.` : ''}`,
+                pollenBar(worst));
+        } else put('pollen', 'Pollen', '--', '', null);
     };
-    let shownT = null, shownEns = null;
+    let shownT = null, shownEns = null, air = null;
     const update = (t, ens) => { shownT = t; shownEns = ens; draw(t, ens); };
+    airFor(place).then(a => { if (a && sec.isConnected) { air = a; lock(); } });
     // Scrubbing must not move the page: every card holds the height of the tallest reading over
     // the hours the cursor reaches, measured once in place and again when the width changes
     const lock = () => {
@@ -1745,7 +1780,7 @@ function locate(prompted) {
         here = { lat, lon, name };
         store.set(HERE_KEY, JSON.stringify(here));
         store.set(GPS_KEY, '1');
-        if (moved) { forecasts.delete('here'); histories.delete('here'); }
+        if (moved) { forecasts.delete('here'); histories.delete('here'); airs.delete('here'); }
         if (prompted && dialog.open) dialog.close();
         if (prompted) navigate('#p=here');
         else if (moved) route(true);
@@ -1970,7 +2005,7 @@ function route(keepScroll = false, restoreY = null, quiet = false) {
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
-    if (Date.now() - hiddenAt > 10 * 60000) { forecasts.clear(); histories.clear(); refsCache.clear(); route(true); }
+    if (Date.now() - hiddenAt > 10 * 60000) { forecasts.clear(); histories.clear(); airs.clear(); refsCache.clear(); route(true); }
 });
 applySiteSettings();
 route();

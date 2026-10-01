@@ -1368,6 +1368,104 @@ app.get('/api/history', async (req, res) => {
     }
 });
 
+// ============ Air quality (AirNow monitors) and pollen (Google) ============
+// AirNow's hourly file holds every monitor's latest AQI (~4,400 sites, ~1 MB),
+// posted ~45 minutes after the hour; one fetch serves every place.
+// ponytail: nearest monitor per pollutant; NOAA AQM 5 km forecasts (NOMADS only, no idx) if a monitor is too far
+const AIRNOW_URL = 'https://files.airnowtech.org/airnow';
+const AIR_KM = 40;   // farther than this a monitor says little about the place
+let airnowCache = null;
+
+function parseAirnow(text) {
+    const [head, ...lines] = text.trim().split('\n').map(l => l.trim().slice(1, -1).split('","'));
+    const col = Object.fromEntries(head.map((k, i) => [k, i]));
+    const aqi = v => v === '' || v == null ? null : Number(v);
+    return lines.map(r => ({
+        name: r[col.SiteName], lat: Number(r[col.Latitude]), lon: Number(r[col.Longitude]),
+        // ValidDate/ValidTime are GMT
+        at: Date.parse(`${r[col.ValidDate].replace(/(\d+)\/(\d+)\/(\d+)/, '$3-$1-$2')}T${r[col.ValidTime]}Z`),
+        pm25: aqi(r[col.PM25_AQI]), o3: aqi(r[col.OZONE_AQI])
+    })).filter(s => Number.isFinite(s.lat) && Number.isFinite(s.lon) && (s.pm25 != null || s.o3 != null));
+}
+
+function airnowSites() {
+    if (airnowCache && (airnowCache.pending || Date.now() - airnowCache.at < 15 * MINUTE)) return airnowCache.promise;
+    const promise = (async () => {
+        for (let back = 1; back <= 4; back++) {   // the newest hour's file may not be posted yet
+            const ymdh = new Date(Date.now() - back * HOUR).toISOString().slice(0, 13).replace(/[-T]/g, '');
+            try {
+                const res = await httpGet(`${AIRNOW_URL}/${ymdh.slice(0, 4)}/${ymdh.slice(0, 8)}/HourlyAQObs_${ymdh}.dat`, 20000);
+                return parseAirnow(await res.text());
+            } catch (err) {
+                if (err.status !== 404 && err.status !== 403) throw err;
+            }
+        }
+        throw new Error('No recent AirNow file');
+    })();
+    const entry = { promise, pending: true };
+    airnowCache = entry;
+    promise.then(() => Object.assign(entry, { pending: false, at: Date.now() }),
+        () => { if (airnowCache === entry) airnowCache = null; });
+    return promise;
+}
+
+// The AQI at a place: the worse of its nearest PM2.5 and nearest ozone monitors
+function airAt(sites, lat, lon) {
+    const nearest = key => sites.reduce((best, s) => {
+        if (s[key] == null) return best;
+        const km = kmBetween(lat, lon, s.lat, s.lon);
+        return km <= AIR_KM && (!best || km < best.km) ? { aqi: s[key], site: s.name, km: Math.round(km * 10) / 10, at: s.at } : best;
+    }, null);
+    const pm25 = nearest('pm25'), o3 = nearest('o3');
+    if (!pm25 && !o3) return null;
+    const main = !o3 || (pm25 && pm25.aqi >= o3.aqi) ? 'pm25' : 'o3';
+    return { aqi: (main === 'pm25' ? pm25 : o3).aqi, main, pm25, o3 };
+}
+
+// Google Pollen: 1 km grid, 5 daily forecasts; tree, grass and weed indexes 0-5
+const POLLEN_KEY = process.env.GOOGLE_POLLEN_KEY || '';
+const pollenCache = new Map();   // ponytail: unbounded, fine for a handful of saved places
+
+function shapePollen(d) {
+    return (d.dailyInfo || []).map(day => {
+        const type = Object.fromEntries((day.pollenTypeInfo || []).map(t => [t.code.toLowerCase(), t.indexInfo?.value ?? null]));
+        const plants = (day.plantInfo || []).filter(p => p.indexInfo?.value > 0)
+            .sort((a, b) => b.indexInfo.value - a.indexInfo.value).map(p => p.displayName);
+        const { year, month, day: dd } = day.date;
+        return { date: `${year}-${String(month).padStart(2, '0')}-${String(dd).padStart(2, '0')}`,
+            tree: type.tree ?? null, grass: type.grass ?? null, weed: type.weed ?? null, plants: plants.slice(0, 3) };
+    });
+}
+
+function pollenAt(lat, lon) {
+    if (!POLLEN_KEY) return Promise.resolve(null);
+    const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+    const hit = pollenCache.get(key);
+    if (hit && (hit.pending || Date.now() - hit.at < 3 * HOUR)) return hit.promise;
+    const promise = getJson(`https://pollen.googleapis.com/v1/forecast:lookup?key=${POLLEN_KEY}`
+        + `&location.latitude=${lat.toFixed(4)}&location.longitude=${lon.toFixed(4)}&days=5&plantsDescription=false`, 15000)
+        .then(shapePollen);
+    const entry = { promise, pending: true };
+    pollenCache.set(key, entry);
+    promise.then(() => Object.assign(entry, { pending: false, at: Date.now() }), () => pollenCache.delete(key));
+    return promise;
+}
+
+app.get('/api/air', async (req, res) => {
+    const [lat, lon] = [Number(req.query.lat), Number(req.query.lon)];
+    if (req.query.lat === '' || req.query.lon === '' || !(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) {
+        return res.status(400).json({ error: 'Invalid lat/lon' });
+    }
+    if (rateLimited(req, res)) return;
+    // each half stands alone: one source down leaves the other card filled
+    const [air, pollen] = await Promise.all([
+        airnowSites().then(s => airAt(s, lat, lon)).catch(err => { console.warn('[AIR]', err.message); return null; }),
+        pollenAt(lat, lon).catch(err => { console.warn('[POLLEN]', err.message); return null; })
+    ]);
+    res.set('Cache-Control', 'public, max-age=600');
+    res.json({ air, pollen });
+});
+
 // ============ Weather Alerts (LibreWXR / NWS-CAP) ============
 // Cached per rounded location so all viewers of an area share one
 // upstream request every 2 minutes.
@@ -1654,4 +1752,4 @@ app.get('/api/og.png', async (req, res) => {
     }
 });
 
-module.exports = { app, shapeNotify, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey };
+module.exports = { app, shapeNotify, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey, parseAirnow, airAt, shapePollen };
