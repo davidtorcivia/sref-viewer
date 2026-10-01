@@ -1317,10 +1317,11 @@ def crop_path(src, date, cycle, tile):
 
 def build_crops(src, date, cycle, tiles):
     """Cut every tile's crop from one pass over the run's messages:
-    (messages, hours, rows, columns), NaN where a message does not exist."""
+    (messages, hours, rows, columns), NaN where the source schedule has no message.
+    Never publish a crop until every expected message was downloaded and decoded."""
     p = run_grid(src, date, cycle)
     if not p:
-        return
+        raise RuntimeError(f'Forecast grid unavailable: {src}{date}{cycle}')
     boxes = {t: b for t in tiles if (b := crop_box(p, t))}
     if not boxes:   # tiles off the grid: nothing to cut
         return
@@ -1335,7 +1336,7 @@ def build_crops(src, date, cycle, tiles):
             return
         path = fetch_msg(src, date, cycle, fh, msg)
         if path is None:
-            return
+            return msg, fh
         with open(path, 'rb') as fp:   # plain decode: bulk work stays out of the tile LRU
             g = ec.codes_new_from_message(fp.read())
         try:
@@ -1345,7 +1346,14 @@ def build_crops(src, date, cycle, tiles):
         for t, (j0, j1, i0, i1) in boxes.items():
             out[t][k, n] = arr[j0:j1, i0:i1]
 
-    list(_crop_pool.map(cut, [(k, n) for n in range(len(hours)) for k in range(len(msgs))]))
+    missing = [result for result in _crop_pool.map(
+        cut, [(k, n) for n in range(len(hours)) for k in range(len(msgs))]) if result is not None]
+    if missing:
+        # A 403/404 while an upstream run publishes is retryable, not proof that an
+        # expected field is intentionally absent. ensure_crops catches this, leaves
+        # the old complete run serving, and permits a later request/preload to retry.
+        fields = ', '.join(f'{msg}@{fh:03d}' for msg, fh in missing)
+        raise RuntimeError(f'Incomplete forecast crop {src}{date}{cycle}: {fields}')
     for t, (j0, j1, i0, i1) in boxes.items():
         path = crop_path(src, date, cycle, t)
         with open(path + '.tmp', 'wb') as fp:
