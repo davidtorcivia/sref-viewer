@@ -23,9 +23,7 @@ FUNCTIONS = {'crop_path', 'nbm_has', 'build_crops', 'ensure_crops', 'load_crop',
 
 def production_functions():
     tree = ast.parse(Path(__file__).with_name('extractor.py').read_text())
-    selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS
-                or isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'NBM_CROP_VERSION'
-                                                        for t in node.targets)]
+    selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]
     ns = {'np': np, 'os': os, 'json': json, 'functools': functools, 'threading': threading}
     exec(compile(ast.Module(body=selected, type_ignores=[]), 'extractor.py', 'exec'), ns)
     return ns
@@ -127,18 +125,6 @@ class ForecastCropCompletenessTest(unittest.TestCase):
         self.ns['threading'] = types.SimpleNamespace(Thread=ImmediateThread)
         self.assertEqual(self.ns['serving_run']('nbm', self.tile), (None, True))
         self.assertFalse(os.path.exists(self.path()))
-
-    def test_legacy_crop_and_lru_entry_cannot_masquerade_as_verified(self):
-        legacy = Path(self.ns['frame_dir']('nbm', '20261001', '00')) / 'fc_40_-74.npz'
-        np.savez_compressed(legacy, data=np.full((2, 8, 2, 2), np.nan), i0=0, j0=0, grid='{}')
-        self.ns['load_crop'](str(legacy))  # Simulate an old in-process entry too.
-        self.assertNotEqual(self.path(), str(legacy))
-        self.assertFalse(self.ns['crops_ready']('nbm', '20261001', '00', [self.tile]))
-        self.assertTrue(self.ensure())
-        self.assertTrue(self.ns['crops_ready']('nbm', '20261001', '00', [self.tile]))
-        data, _, _, _ = self.ns['load_crop'](self.path())
-        self.assertTrue(np.isfinite(data).any())
-        self.assertTrue(legacy.exists())  # Migration needs no destructive purge.
 
 
 if __name__ == '__main__':

@@ -1244,10 +1244,6 @@ _tiles_lock = threading.Lock()
 # windows (TMAX, TMIN, POP12) end at 00z and 12z only; amounts are 6 h.
 DAILY_MSGS = ('TCDC', 'WIND', 'GUST', 'APCP', 'ASNOW', 'FICEAC', 'TMAX', 'TMIN', 'POP12')
 DAILY_LAST = 264
-# v1 crops could be published after an expected upstream message was unavailable.
-# Use a new NBM crop identity so those disk and load_crop LRU entries are rebuilt.
-# Keep cached GRIB messages: a rebuild only downloads messages still missing.
-NBM_CROP_VERSION = 2
 
 
 def nbm_has(cycle, msg, fh):
@@ -1316,8 +1312,7 @@ def crop_box(p, tile):
 
 
 def crop_path(src, date, cycle, tile):
-    prefix = f'fc_v{NBM_CROP_VERSION}' if src == 'nbm' else 'fc'
-    return os.path.join(frame_dir(src, date, cycle), f'{prefix}_{tile[0]}_{tile[1]}.npz')
+    return os.path.join(frame_dir(src, date, cycle), f'fc_{tile[0]}_{tile[1]}.npz')
 
 
 def build_crops(src, date, cycle, tiles):
