@@ -5,7 +5,7 @@
  *             one sentence, and the 48-hour spiral (last 24 h observed inside,
  *             next 24 h forecast outside)
  *   readouts  eight values at the cursor time; a card slides its detail open below
- *   hours     48 hours: RRFS line, the ensemble spread as a band, cloud cover, wind
+ *   hours     48 hours: NBM-then-RRFS line, the ensemble spread as a band, cloud cover, wind
  *   days      the NBM days on one temperature axis, the chance of rain as 20 squares
  *   radar, ensemble plumes
  * One cursor time drives the hero number, the readouts, the chart and the
@@ -1085,7 +1085,7 @@ function hoursSection(place, f, ens0) {
     const sec = el('section', 'sg-hours');
     sec.setAttribute('aria-label', 'Next 48 hours');
     const wrap = el('div', 'sg-chart');
-    wrap.title = 'Line: the RRFS forecast. Band: where 8 in 10 REFS ensemble runs fall, the middle half darker. Columns: cloud cover. Arrows point the way the wind blows; longer is stronger.';
+    wrap.title = 'Line: the NBM blend for the first 36 hours, then the RRFS forecast. Band: where 8 in 10 REFS ensemble runs fall, the middle half darker. Columns: cloud cover. Arrows point the way the wind blows; longer is stronger.';
     const card = el('div', 'sg-card');
     card.hidden = true;
     wrap.append(card);
@@ -1585,7 +1585,7 @@ function placeFooter(place, f) {
     const foot = el('footer', 'sg-foot');
     const src = [];
     if (f.obs) src.push(`Observed ${timeOf(f.obs.time * 1000)}, NOAA RTMA`);
-    if (f.raw.hourly) src.push(`Hours: RRFS ${f.raw.hourly.run.slice(8)}Z`);
+    if (f.raw.hourly) src.push(`Hours: ${f.raw.hourly.blend_run ? `NBM ${f.raw.hourly.blend_run.slice(8)}Z, then ` : ''}RRFS ${f.raw.hourly.run.slice(8)}Z`);
     if (f.raw.station) src.push(`Ensemble: REFS at ${f.raw.station.id}`);
     if (f.raw.daily_run) src.push(`Days: NBM ${f.raw.daily_run.slice(8)}Z`);
     foot.append(el('span', null, src.join(' · ')));

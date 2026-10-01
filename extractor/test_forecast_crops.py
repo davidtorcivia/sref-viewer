@@ -18,7 +18,7 @@ import unittest
 import numpy as np
 
 
-FUNCTIONS = {'crop_path', 'nbm_has', 'build_crops', 'ensure_crops', 'load_crop', 'serving_run', 'crops_ready'}
+FUNCTIONS = {'blend_hourly', 'crop_path', 'nbm_has', 'build_crops', 'ensure_crops', 'load_crop', 'serving_run', 'crops_ready'}
 
 
 def production_functions():
@@ -125,6 +125,28 @@ class ForecastCropCompletenessTest(unittest.TestCase):
         self.ns['threading'] = types.SimpleNamespace(Thread=ImmediateThread)
         self.assertEqual(self.ns['serving_run']('nbm', self.tile), (None, True))
         self.assertFalse(os.path.exists(self.path()))
+
+
+class BlendHourlyTest(unittest.TestCase):
+    def test_nbm_hours_replace_rrfs_by_valid_time(self):
+        ns = production_functions()
+        # NBM 12z f001..f003 over an RRFS 13z run: f001 is 13z, the run's hour 0
+        series = np.full((5, 3), np.nan)
+        series[0] = [273.15, 274.15, np.nan]   # TMP K, last hour missing
+        series[2] = [50, 60, 70]               # TCDC
+        ns.update(load_crop=lambda p: None, crop_path=lambda *a: '', forecast_tile=lambda *a: (0, 0),
+                  crop_series=lambda c, lat, lon: series, frame_time=lambda s, d, c, fh: 12 * 3600 + fh * 3600,
+                  BLEND_MSGS=('TMP', 'DPT', 'TCDC', 'WIND', 'GUST'), CROPS={'nbmh': (None, range(1, 4), None)},
+                  K_TO_F=lambda k: (k - 273.15) * 9 / 5 + 32, BLEND_TAPER=2)
+        hourly = {'start': 13 * 3600, 'tmp': [60.0, 61.0, 62.0, 63.0], 'dpt': [50.0] * 4,
+                  'cloud': [0, 0, 0, 0], 'wind': [5.0] * 4, 'gust': [9.0] * 4, 'dir': [180] * 4, 'run': 'x'}
+        out = ns['blend_hourly'](hourly, '20261001', '12', 40, -74)
+        # past the last NBM hour the seam's difference fades (taper 2: half of it on the next hour)
+        self.assertEqual(out['tmp'], [32.0, 33.8, 62.0, 63.0])
+        self.assertEqual(out['cloud'], [50, 60, 70, 35])
+        self.assertEqual(out['dpt'], [50.0] * 4)
+        self.assertEqual(out['blend_until'], 15 * 3600)
+        self.assertEqual(hourly['tmp'], [60.0, 61.0, 62.0, 63.0])   # the RRFS series is left alone
 
 
 if __name__ == '__main__':

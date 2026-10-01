@@ -684,6 +684,11 @@ SOURCES = {
                        'WIND': '10 m above ground', 'GUST': '10 m above ground'},
             'names': {'POP12': 'APCP'},
             'step': nbm_step},
+    # The same NBM runs' hourly guidance for the first hours of the hourly forecast
+    'nbmh': {'url': NBM_URL,
+             'levels': {'TMP': '2 m above ground', 'DPT': '2 m above ground', 'TCDC': 'surface',
+                        'WIND': '10 m above ground', 'GUST': '10 m above ground'},
+             'step': lambda m, fh: f'{fh} hour fcst'},
 }
 K_TO_F = lambda k: (k - 273.15) * 9 / 5 + 32
 
@@ -987,11 +992,13 @@ def purge_fields():
     live = {('rrfs', d, c) for d, c in cycles if d} | {('rtma', d, c) for d, c in rtma}
     # The last run's forecast crops serve until the new run's are cut
     nbm, nbm_prev = forecast_runs('nbm')
-    live |= {(src, *run) for src, run in (('rrfs', forecast_runs('rrfs')[1]), ('nbm', nbm), ('nbm', nbm_prev))
+    nbmh, nbmh_prev = forecast_runs('nbmh')
+    live |= {(src, *run) for src, run in (('rrfs', forecast_runs('rrfs')[1]), ('nbm', nbm), ('nbm', nbm_prev),
+                                          ('nbmh', nbmh), ('nbmh', nbmh_prev))
              if run and run[0]}
     keep = {os.path.basename(frame_dir(*f)) for f in live}
     known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set()) \
-        | ({'nbm'} if nbm[0] else set())
+        | ({'nbm'} if nbm[0] else set()) | ({'nbmh'} if nbmh[0] else set())
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
         src = re.match('[a-z]*', old).group()   # dirs are <src><date><cycle>; anything else is an older cache format
         if old not in keep and (src not in SOURCES or src in known):
@@ -1234,7 +1241,7 @@ FORECAST_BATCH = 16                         # tiles cut per pass: bounds memory 
 NOW_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud')
 _crop_pool = ThreadPoolExecutor(max_workers=4)   # decodes run ~2.4x faster on 4 threads
 _crop_building = set()                           # (src, date, cycle, tile) being cut
-_forecast_run = {'rrfs': {'cur': None, 'prev': None}, 'nbm': {'cur': None, 'prev': None}}
+_forecast_run = {src: {'cur': None, 'prev': None} for src in ('rrfs', 'nbm', 'nbmh')}
 _forecast_run_lock = threading.Lock()
 _crop_lock = threading.Lock()
 _tiles_lock = threading.Lock()
@@ -1244,6 +1251,12 @@ _tiles_lock = threading.Lock()
 # windows (TMAX, TMIN, POP12) end at 00z and 12z only; amounts are 6 h.
 DAILY_MSGS = ('TCDC', 'WIND', 'GUST', 'APCP', 'ASNOW', 'FICEAC', 'TMAX', 'TMIN', 'POP12')
 DAILY_LAST = 264
+# NBM hourly guidance (calibrated to observations) leads the hourly forecast; RRFS carries on past it
+# and keeps precipitation, snow and radar throughout.
+# ponytail: 00/06/12/18z runs only (~270 MB each); every hourly NBM run if fresher first hours matter
+BLEND_MSGS = ('TMP', 'DPT', 'TCDC', 'WIND', 'GUST')   # direction stays RRFS's: interpolated degrees break at north
+BLEND_LAST = 36
+BLEND_TAPER = 6                             # hours over which RRFS takes over after the last NBM hour
 
 
 def nbm_has(cycle, msg, fh):
@@ -1256,7 +1269,8 @@ def nbm_has(cycle, msg, fh):
 
 # source -> messages, forecast hours, whether (cycle, msg, fh) exists; the first message at the first hour gives the grid
 CROPS = {'rrfs': (FORECAST_MSGS, range(FIELD_MODES[FORECAST_MODE] + 1), lambda c, m, fh: fh > 0 or m not in ACCUMULATED),
-         'nbm': (DAILY_MSGS, range(6, DAILY_LAST + 1, 6), nbm_has)}
+         'nbm': (DAILY_MSGS, range(6, DAILY_LAST + 1, 6), nbm_has),
+         'nbmh': (BLEND_MSGS, range(1, BLEND_LAST + 1), lambda c, m, fh: True)}
 
 
 def daily_cycle():
@@ -1271,11 +1285,23 @@ def daily_cycle():
     return newest_published('nbm', cands, FIELD_CYCLE_TTL_S)
 
 
+def blend_cycle():
+    """Newest NBM 00/06/12/18z run with its last blended hour published."""
+    now = time.time()
+    cands = []
+    for back in range(1, 25):
+        t = time.gmtime(now - back * 3600)
+        if t.tm_hour % 6 == 0:
+            date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
+            cands.append((date, cycle, NBM_URL.format(date=date, cycle=cycle, fh=f'{BLEND_LAST:03d}') + '.idx'))
+    return newest_published('nbmh', cands, FIELD_CYCLE_TTL_S)
+
+
 def forecast_runs(src):
     """(current, previous or None) runs of a crop source. When the run
     changes, the previous one stays until preload has cut the new run's
     crops, so saved places keep a forecast through the switch."""
-    cur = field_cycle(FORECAST_MODE) if src == 'rrfs' else daily_cycle()
+    cur = field_cycle(FORECAST_MODE) if src == 'rrfs' else daily_cycle() if src == 'nbm' else blend_cycle()
     with _forecast_run_lock:
         run = _forecast_run[src]
         if cur[0] and cur != run['cur']:
@@ -1493,6 +1519,41 @@ def daily_series(date, cycle, lat, lon, tz=DAILY_TZ):
     return None if s is None else daily_rows(frame_time('nbm', date, cycle, 0), CROPS['nbm'][1], dict(zip(DAILY_MSGS, s)), tz)
 
 
+def blend_hourly(hourly, date, cycle, lat, lon):
+    """The hourly series with NBM's temperature, dew point, sky and wind
+    over the hours its run covers; RRFS where NBM has no value."""
+    s = crop_series(load_crop(crop_path('nbmh', date, cycle, forecast_tile(lat, lon))), lat, lon)
+    if s is None:
+        return hourly
+    v = dict(zip(BLEND_MSGS, s))
+    t0 = frame_time('nbmh', date, cycle, 0)
+    put = {'tmp': K_TO_F(v['TMP']), 'dpt': K_TO_F(v['DPT']), 'cloud': v['TCDC'],
+           'wind': v['WIND'] * 2.23694, 'gust': v['GUST'] * 2.23694}
+    out = {k: list(x) if isinstance(x, list) else x for k, x in hourly.items()}
+    last = None
+    for n, fh in enumerate(CROPS['nbmh'][1]):
+        i = (t0 + fh * 3600 - hourly['start']) // 3600
+        if not 0 <= i < len(hourly['tmp']):
+            continue
+        for k, a in put.items():
+            if not np.isnan(a[n]):
+                out[k][i] = round(float(a[n]), 0 if k == 'cloud' else 1)
+                last = max(last or 0, int(i))
+    if last is not None:
+        # RRFS takes over gradually: the two models' difference at the seam fades over BLEND_TAPER hours
+        for k in put:
+            if out[k][last] is None or hourly[k][last] is None:
+                continue
+            gap = out[k][last] - hourly[k][last]
+            for j in range(1, BLEND_TAPER):
+                if last + j < len(out[k]) and out[k][last + j] is not None:
+                    v = out[k][last + j] + gap * (1 - j / BLEND_TAPER)
+                    out[k][last + j] = round(min(100, max(0, v)), 0) if k == 'cloud' else round(max(0, v), 1) if k in ('wind', 'gust') else round(v, 1)
+        out['blend_until'] = hourly['start'] + last * 3600
+        out['blend_run'] = date + cycle
+    return out
+
+
 def nearest_station(lat, lon):
     """REFS/SREF station key nearest a point, for the plume page link."""
     best, key = None, None
@@ -1577,14 +1638,18 @@ def forecast(lat, lon, tz=DAILY_TZ):
         now = {**vals, 'time': frame_time(*frame)} if vals else None
     tile = forecast_tile(lat, lon)
     (hrun, building), (drun, daily_building) = serving_run('rrfs', tile), serving_run('nbm', tile)
+    brun = serving_run('nbmh', tile)[0] if hrun else None
     # Tiles the model grids do not reach get observations only, and are not kept
     if hrun or building or drun or daily_building:
         note_tile(tile)
+    hourly = hrun and hourly_series(*hrun, lat, lon)
+    if hourly and brun:
+        hourly = blend_hourly(hourly, *brun, lat, lon)
     daily = drun and daily_series(*drun, lat, lon, tz)
     if daily:
         today = datetime.now(tz).strftime('%Y-%m-%d')
         daily = [d for d in daily if d['date'] >= today]
-    return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hrun and hourly_series(*hrun, lat, lon), 'building': building,
+    return {'lat': lat, 'lon': lon, 'now': now, 'hourly': hourly, 'building': building,
             'daily': daily or None, 'daily_run': ''.join(drun) if daily else None, 'daily_building': daily_building,
             'station': nearest_station(lat, lon)}
 
