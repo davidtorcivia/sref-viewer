@@ -261,6 +261,19 @@ assert lb['2026-09-29']['lo'] == round(X.K_TO_F(283)) and lb['2026-10-08']['lo']
 assert (d['wind'], d['gust'], d['cloud'], d['qpf']) == (round(5 * 2.23694), round(10 * 2.23694), 36, 0.4), d
 # Snow at f042 (12z-18z on the 29th) is the 29th in Los Angeles as well
 assert lb['2026-09-29']['snow'] == 11.8
+# Hawaii (HST, UTC-10): TMIN 00z-12z is 2pm-2am, so the 5am low (15z) only shows in the
+# 3-hourly temperatures; day PoP is the 6 h windows whose middle is 6am-6pm HST
+hh = list(X.CROPS['nbmhi'][1])
+hv = {'TMAX': lambda fh: 302, 'TMIN': lambda fh: 293, 'TMP': lambda fh: 290 if fh % 24 == 15 else 300,
+      'POP06': lambda fh: fh, 'APCP': lambda fh: 0, 'TCDC': lambda fh: 50, 'WIND': lambda fh: 3, 'GUST': lambda fh: 6}
+hs = {m: np.array([hv[m](fh) if X.nbm_hi_has('00', m, fh) else np.nan for fh in hh]) for m in X.CROPS['nbmhi'][0]}
+assert not X.nbm_hi_has('00', 'APCP', 3) and X.nbm_hi_has('00', 'TMP', 3) and not X.nbm_hi_has('00', 'TMP', 195)
+hb = {r['date']: r for r in X.daily_rows(X.frame_time('nbmhi', '20260928', '00', 0), hh, hs, X.place_zone('Pacific/Honolulu'))}
+d = hb['2026-09-29']
+assert (d['lo'], d['hi']) == (round(X.K_TO_F(290)), round(X.K_TO_F(302))), d
+# Sep 28 HST: day windows end f024 (8am-2pm) and f030 (2pm-8pm); night ones f012 and f018
+assert (hb['2026-09-28']['pop_day'], hb['2026-09-28']['pop_night']) == (30, 18), hb['2026-09-28']
+assert hb['2026-09-28']['snow'] is None and hb['2026-09-28']['ptype'] is None
 # Zone names: anything unusable falls back to New York
 assert str(X.place_zone('America/Denver')) == 'America/Denver'
 assert all(X.place_zone(n) is X.DAILY_TZ for n in ('', None, 'Nowhere/Land', '../etc/passwd', 'UTC', 'America/' + 'x' * 60))

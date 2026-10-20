@@ -70,7 +70,7 @@ import urllib.error
 import warnings
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -688,6 +688,8 @@ def nbm_step(msg, fh):
         return f'{fh - 12}-{fh} hour {msg[1:].lower()} fcst'
     if msg == 'POP12':
         return f'{fh - 12}-{fh} hour acc fcst:prob >0.254'
+    if msg == 'POP06':
+        return f'{fh - 6}-{fh} hour acc fcst:prob >0.254'
     if msg in ('APCP', 'ASNOW', 'FICEAC'):
         return f'{fh - 6}-{fh} hour acc fcst'
     return f'{fh} hour fcst'
@@ -717,7 +719,9 @@ SOURCES = {
              'step': lambda m, fh: f'{fh} hour fcst'},
 }
 # Hawaii sources: no underscore in the name, since purge_fields reads a cache dir's source as its leading letters
-SOURCES.update({'rrfshi': {**SOURCES['rrfs'], 'url': FIELD_URL_HI}, 'nbmhi': {**SOURCES['nbm'], 'url': NBM_URL_HI},
+SOURCES.update({'rrfshi': {**SOURCES['rrfs'], 'url': FIELD_URL_HI},
+                'nbmhi': {**SOURCES['nbm'], 'url': NBM_URL_HI, 'names': {'POP12': 'APCP', 'POP06': 'APCP'},
+                          'levels': {**SOURCES['nbm']['levels'], 'TMP': '2 m above ground', 'POP06': 'surface'}},
                 'nbmhhi': {**SOURCES['nbmh'], 'url': NBM_URL_HI}, 'rtmahi': {**SOURCES['rtma'], 'url': RTMA_URL_HI}})
 K_TO_F = lambda k: (k - 273.15) * 9 / 5 + 32
 
@@ -1323,9 +1327,21 @@ def nbm_has(cycle, msg, fh):
 CROPS = {'rrfs': (FORECAST_MSGS, range(FIELD_MODES[FORECAST_MODE] + 1), lambda c, m, fh: fh > 0 or m not in ACCUMULATED),
          'nbm': (DAILY_MSGS, range(6, DAILY_LAST + 1, 6), nbm_has),
          'nbmh': (BLEND_MSGS, range(1, BLEND_LAST + 1), lambda c, m, fh: True)}
-# NBM's Hawaii grid carries no snow or ice accumulation
+
+
+def nbm_hi_has(cycle, msg, fh):
+    """Hawaii daily crop: 2 m temperature every 3 hours (6 past 192), the rest every 6."""
+    if fh % 6:
+        return msg == 'TMP' and fh <= 192
+    return msg in ('TMP', 'POP06') or nbm_has(cycle, msg, fh)
+
+
+# NBM's Hawaii grid carries no snow or ice accumulation. Its 12 h max/min and PoP
+# windows end at 00z and 12z, 2pm and 2am there: lows and daytime PoP come from
+# 3-hourly temperatures and 6 h PoPs instead (see daily_rows)
 CROPS.update({'rrfshi': CROPS['rrfs'], 'nbmhhi': CROPS['nbmh'],
-              'nbmhi': (tuple(m for m in DAILY_MSGS if m not in ('ASNOW', 'FICEAC')), *CROPS['nbm'][1:])})
+              'nbmhi': (('TCDC', 'WIND', 'GUST', 'APCP', 'TMAX', 'TMIN', 'TMP', 'POP06'),
+                        range(3, DAILY_LAST + 1, 3), nbm_hi_has)})
 # domain -> (bounding box, crop source per role); a place takes the first domain whose box holds it
 DOMAINS = {'conus': (FIELD_BBOX, {'rrfs': 'rrfs', 'nbm': 'nbm', 'nbmh': 'nbmh'}),
            'hi': (HI_BBOX, {'rrfs': 'rrfshi', 'nbm': 'nbmhi', 'nbmh': 'nbmhhi'})}
@@ -1547,11 +1563,25 @@ def daily_rows(start, hours, v, tz=DAILY_TZ):
       wind/gust max of the 6-hourly 10 m speeds, mph; cloud their mean cover, %
       ptype     on days with 0.01 in or more: 'rain', 'snow' or 'ice' (freezing
                 rain), whichever has the largest liquid share, snow at 10:1
+    Where 2 m temperature (TMP) and 6 h PoP (POP06) samples are given (Hawaii,
+    whose 12 h windows end at 2pm and 2am), lo also takes the samples before
+    local noon and hi those from 10am to 6pm, and the PoPs are 6 h windows
+    whose middle is 6am-6pm local (day) or not (night, filed under the next morning).
     Days run from the first with a hi or lo to the last with a hi."""
     days = {}
     for msg, vals in v.items():
         for fh, x in zip(hours, vals):
             if np.isnan(x):
+                continue
+            if msg in ('TMP', 'POP06'):
+                at = datetime.fromtimestamp(start + (fh - (3 if msg == 'POP06' else 0)) * 3600, tz)
+                if msg == 'TMP':
+                    keys = ['TMIN'] * (at.hour < 12) + ['TMAX'] * (10 <= at.hour <= 18)
+                else:
+                    keys = ['pop_day' if 6 <= at.hour < 18 else 'pop_night']
+                    at += timedelta(hours=0 if keys[0] == 'pop_day' else 6)
+                for key in keys:
+                    days.setdefault(at.strftime('%Y-%m-%d'), {}).setdefault(key, []).append(float(x))
                 continue
             key = msg if msg != 'POP12' else 'pop_day' if time.gmtime(start + fh * 3600).tm_hour == 0 else 'pop_night'
             back = 0 if key in ('TMIN', 'pop_night') else DAILY_SPAN.get(msg, 0) / 2
@@ -1708,7 +1738,11 @@ def forecast(lat, lon, tz=DAILY_TZ):
         frame = hi[0] and ('rtmahi', *hi, 0)
     now = None
     if frame:
-        vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
+        try:
+            vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
+        except Exception as err:  # noqa: BLE001 - an analysis S3 could not serve leaves the forecast without a now
+            print(f'[FORECAST] now {frame}: {err}', flush=True)
+            vals = None
         now = {**vals, 'time': frame_time(*frame)} if vals else None
     tile = forecast_tile(lat, lon)
     (hrun, building), (drun, daily_building) = serving_run(src['rrfs'], tile), serving_run(src['nbm'], tile)
