@@ -418,7 +418,7 @@ except X.NotPublished:
 # raised until both sides fit 2048; the header bounds are the pixel grid's edges
 r0, r1, c0, c1, st = X.mrms_crop_box(-74.5, 40.3, -73.5, 41.1)
 assert st == 1 and (r0, r1, c0, c1) == (1384, 1472, 5544, 5656), (r0, r1, c0, c1)
-assert X.mrms_crop_bounds(r0, r1, c0, c1, st) == '-74.56,40.28,-73.44,41.16,1'
+assert X.mrms_crop_bounds(r0, r1, c0, c1, st) == '-74.56,40.28,-73.44,41.16,1,0.01'
 assert X.mrms_crop_box(-140, 10, -50, 60) == (0, 3520, 0, 7008, 4)        # all of CONUS: step 4, 1752 x 880
 r0, r1, c0, c1, st = X.mrms_crop_box(-100, 30, -90, 40, 3)
 assert st == 3 and all(v % 24 == 0 for v in (r0, r1, c0, c1)) and max(r1 - r0, c1 - c0) // st <= X.MRMS_CROP_MAX
@@ -435,12 +435,12 @@ cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).resh
 assert cp[25] == 2 and cpx.shape == (88, 112, 3) and np.argwhere(cpx[..., 0]).tolist() == [[ro[0] - cells[0], co[0] - cells[2]]]
 assert not cpx[..., 1:].any(), 'no PrecipFlag: no snow'
 # PrecipFlag snow rides in G where the scan has it (or the newest type within MRMS_TYPE_AGE before)
-X._mrms_snow[t] = X.mrms_strips(np.ones((X.MRMS_NY, X.MRMS_NX), np.uint8))
+X._mrms_snow['conus'][t] = X.mrms_strips(np.ones((X.MRMS_NY, X.MRMS_NX), np.uint8))
 X.mrms_crop.cache_clear()
 cp = X.mrms_crop(t, *cells)
 cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).reshape(cells[1] - cells[0], -1)[:, 1:].reshape(88, -1, 3)
 assert (cpx[..., 1] == 255).all() and X.mrms_snow_src(t + 240) == t and X.mrms_snow_src(t + 480) is None and X.mrms_has_snow(t)
-del X._mrms_snow[t]; X.mrms_crop.cache_clear()
+del X._mrms_snow['conus'][t]; X.mrms_crop.cache_clear()
 # Motion: a blob shifted 5 quarter-res px east and 3 south over the 10-minute span is
 # (5, 3) * 4 cells / 5 two-minute steps = (4, 2.4) cells per 2 minutes -> flow units x8
 yy, xx = np.mgrid[:X.MRMS_FLOW_NY * 2, :X.MRMS_NX // 4]
@@ -465,7 +465,7 @@ assert abs((int(frgb[fy_, fx_, 0]) - 128) / 8 - 4) < 0.7 and abs((int(frgb[fy_, 
 assert (X.mrms_flow_array(X.mrms_mean_flow(t)) == X.mrms_flow_array(X.mrms_flow_field(t))).all()
 # Data age: a repeated scan is a step older where nothing changed; new data resets it
 for d in (X._mrms, X._mrms_small, X._mrms_flow, X._mrms_age):
-    d.clear()
+    d['conus'].clear()
 u = 5000 * X.MRMS_STEP
 X.mrms_store(u, g, blob(400, 800))
 X.mrms_store(u + 120, g, blob(400, 800))
@@ -487,7 +487,7 @@ assert frgb[201 // cells[4], 401 // cells[4], 2] == 24 and frgb[5, 5, 2] == 0
 # A skipped scan (long overdue) restarts ages at zero after it instead of leaving
 # every later scan unknown: 12 scans, the data changes at 3 and 7, scan 5 missing
 for d in (X._mrms, X._mrms_small, X._mrms_flow, X._mrms_age):
-    d.clear()
+    d['conus'].clear()
 T0 = 1790640000                             # far in the past: the poller has given up on the gap
 q0 = np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8)
 q0[1000:1400, 3000:3400] = 150
@@ -500,7 +500,7 @@ for i, q in enumerate(seq):
         X.mrms_store(T0 + 120 * i, q, X.mrms_small(q))
 ages = [None if q is None else int(X.mrms_age(T0 + 120 * i)[1200 // 8, 3200 // 8]) * X.MRMS_AGE_UNIT for i, q in enumerate(seq)]
 assert ages == [0, 120, 240, 0, 120, None, 0, 0, 120, 240, 360, 360], ages
-assert T0 + 120 * 11 in X._mrms_age, 'ages past the gap are kept'
+assert T0 + 120 * 11 in X._mrms_age['conus'], 'ages past the gap are kept'
 # Palette texture: q -> the tile colors, clear for no echo / no coverage / under 10 dBZ
 assert X.MRMS_PALETTE_PNG[25] == 6
 
@@ -594,7 +594,7 @@ print('nexrad: ok')
 
 # ---- point nowcast: a band of 40 dBZ 30-45 cells west of the place, moving east a cell a minute
 import zlib
-X._mrms.clear(); X._nx_frames.clear(); X.nowcast_at.cache_clear()
+X._mrms['conus'].clear(); X._nx_frames.clear(); X.nowcast_at.cache_clear()
 lat, lon = 40.705, -74.005
 pr, pc = int((X.MRMS_NORTH - lat) / X.MRMS_RES), int((lon - X.MRMS_WEST) / X.MRMS_RES)
 def scan(shift):
@@ -604,7 +604,7 @@ def scan(shift):
 field = np.zeros((X.MRMS_FLOW_NY, X.MRMS_FLOW_NX, 2), np.int8)
 field[..., 0] = 2 * X.MRMS_FLOW_SCALE      # 2 cells east per 2 minutes
 real_mean = X.mrms_mean_flow
-X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
+X.mrms_mean_flow = lambda t, d='conus': zlib.compress(field.tobytes())
 t0 = 1790000040
 X.mrms_store(t0, scan(0))
 nc = X.nowcast_at(t0, 0, lat, lon)
@@ -623,7 +623,7 @@ r = s['radar']
 assert r['leads']['10'] == {'hit': 0, 'miss': 0, 'false': 0, 'dry': 1} and r['leads']['60']['dry'] == r['leads']['120']['dry'] == 1, s
 assert r['onset']['n'] == 1 and r['onset']['abs_err'] <= 2 and not X._nc_log and s['blend'] == r and not s['hrrr']['leads'], s
 # HRRR takes over past an hour: dry radar, the model raining (40 dBZ of rate) from +90 min
-X._mrms.clear(); X.nowcast_at.cache_clear()
+X._mrms['conus'].clear(); X.nowcast_at.cache_clear()
 t1 = t0 + 7200
 X.mrms_store(t1, np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8))
 hp = LAMBERT_P
@@ -632,7 +632,7 @@ wet_q = np.full((hp['Ny'], hp['Nx']), (40 + 32) * 2, np.uint8)
 no_snow = zlib.compress(np.zeros((hp['Ny'], hp['Nx']), np.uint8).tobytes())
 X._hrrr = (run, hp, {run + 60 * k: (zlib.compress((wet_q if run + 60 * k >= t1 + 5400 else wet_q * 0).tobytes()), no_snow)
                      for k in range(15, 8 * 60 + 1, 15)})
-X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
+X.mrms_mean_flow = lambda t, d='conus': zlib.compress(field.tobytes())
 nc = X.nowcast_at(t1, 0, lat, lon)
 X.mrms_mean_flow = real_mean
 assert nc['p'][30] == 0 and nc['p'][90] == 0.5 and nc['p'][120] == 1 and abs(nc['dbz'][120] - 40) < 0.5, (nc['p'][85:95], nc['dbz'][120])
@@ -643,7 +643,7 @@ assert abs(X.rate_dbz(X.dbz_rate(33.0)) - 33) < 1e-3 and X.rate_dbz(0) == -32
 X.nowcast_at.cache_clear(); X.hrrr_point_run.cache_clear()
 fzra = zlib.compress(np.full((hp['Ny'], hp['Nx']), 4, np.uint8).tobytes())
 X._hrrr = (run, hp, {v: (zq, fzra if v >= t1 + 5400 else zk) for v, (zq, zk) in X._hrrr[2].items()})
-X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
+X.mrms_mean_flow = lambda t, d='conus': zlib.compress(field.tobytes())
 nc = X.nowcast_at(t1, 0, lat, lon)
 assert nc['kind'][120] == 'freezing rain' and nc['rain']['kind'] == 'freezing rain' and 'snow' not in nc, nc['rain']
 assert nc['hrrr']['kind'][nc['hrrr']['times'].index(t1 + 5400)] == 'freezing rain'
@@ -673,7 +673,7 @@ assert X.hrrr_point(40.7, -74.0, hrun) == (None, []), 'New York reads HRRR, not 
 X._hrrr, X._hrrr_hi = X._hrrr_hi, (None, None, {}); X.hrrr_point_run.cache_clear()
 assert X.hrrr_point(21.3069, -157.8583, hrun) == (None, []), 'Honolulu reads the Hawaii run, not HRRR'
 # radar snow from PrecipFlag: the same 40 dBZ band as snow is heavy snow by the snow relation
-X._hrrr = (None, None, {}); X._mrms.clear(); X.nowcast_at.cache_clear()
+X._hrrr = (None, None, {}); X._mrms['conus'].clear(); X.nowcast_at.cache_clear()
 band = scan(0)
 X.mrms_store(t0, band, snow=(band > 0).astype(np.uint8))
 nc = X.nowcast_at(t0, 0, lat, lon)
@@ -710,5 +710,87 @@ w = X._nc_learn['weights']
 assert w[0] == 1 and w[10] == round(0.8 / (0.8 + 0.2), 3) and w[120] == round((5 / 45) / (5 / 45 + 0.5), 3), (w[10], w[120])
 assert w[60] == X.nc_default_w(60) and got['rgrow'] == 0.35 and X.nc_radius(10) == X.NC_R0 + 3.5, got
 assert X.nc_learn({})['rgrow'] == X.NC_RGROW and X._nc_learn['weights'] == [round(X.nc_default_w(m), 3) for m in range(121)], 'thin scores: the defaults'
-X._mrms.clear()
+X._mrms['conus'].clear()
 print('nowcast: ok')
+
+# ---- Hawaii: its own native 0.005° grid beside CONUS's, picked by box or point
+HI = X.MRMS_GRIDS['hi']
+# the page's radar-gl.js GRIDS clamps its crops to these same edges
+assert [round(v, 9) for v in (HI.west, HI.north - HI.ny * HI.res, HI.west + HI.nx * HI.res, HI.north, HI.res)] == [-164, 15, -151, 26, 0.005]
+assert X.mrms_domain(-160.5, 18.5, -154.5, 22.5) == 'hi' and X.mrms_domain(-75, 40, -73, 41) == 'conus'
+assert X.mrms_domain(-20, 10, -10, 20) is None and X.mrms_domain_at(21.3069, -157.8583) == 'hi' and X.mrms_domain_at(0, 0) is None
+assert X.mrms_key(X.calendar.timegm((2026, 9, 28, 16, 4, 0)), 'hi') == \
+    'HAWAII/SeamlessHSR_00.00/20260928/MRMS_SeamlessHSR_00.00_20260928-160400.grib2.gz'
+# a 40 dBZ cell over Honolulu at its own native cell, in the Hawaii ring only
+hr, hc = (int(v[0]) for v in X.mrms_cells(np.array([21.3069]), np.array([-157.8583]), 'hi'))
+assert (hr, hc) == (938, 1228), (hr, hc)
+qh = np.zeros((HI.ny, HI.nx), np.uint8)
+qh[hr, hc] = X.mrms_quantize(np.array([40.0]))[0]
+yh, xh = np.mgrid[:HI.flow_ny * 2, :HI.nx // 4]
+hblob = lambda cy, cx: (200 * np.exp(-((yh - cy) ** 2 + (xh - cx) ** 2) / (2 * 12.0 ** 2))).astype(np.uint8)
+th = 1790100000
+assert X.mrms_small(qh).shape == (HI.flow_ny * 2, HI.nx // 4)
+X.mrms_store(th - X.MRMS_FLOW_SPAN, qh, hblob(200, 300), None, 'hi')
+X.mrms_store(th, qh, hblob(203, 305), None, 'hi')
+assert X.mrms_times('hi') == [th - X.MRMS_FLOW_SPAN, th] and th not in X.mrms_times()
+# crop: the cell at its row/column, X-Crop names the grid's cell size (flow units are its cells)
+cells = X.mrms_crop_box(-158.5, 20.5, -157, 22, 1, 'hi')
+assert cells[4] == 1 and all(v % 8 == 0 for v in cells[:4])
+assert X.mrms_crop_bounds(*cells, 'hi') == '-158.52,20.48,-157.00,22.00,1,0.005', X.mrms_crop_bounds(*cells, 'hi')
+cp = X.mrms_crop(th, *cells, 'hi')
+hh = cells[1] - cells[0]
+cpx = np.frombuffer(_z.decompress(cp[cp.index(b'IDAT') + 4:-12]), np.uint8).reshape(hh, -1)[:, 1:].reshape(hh, -1, 3)
+assert cpx.shape[:2] == (hh, cells[3] - cells[2]) and np.argwhere(cpx[..., 0]).tolist() == [[hr - cells[0], hc - cells[2]]]
+# motion in Hawaii cells: (5, 3) quarter-res px per 10 minutes = (4, 2.4) cells per 2 minutes
+fh = X.mrms_flow_array(X.mrms_flow_field(th, 'hi'), 'hi')
+assert fh.shape == (HI.flow_ny, HI.flow_nx, 2)
+assert abs(fh[101, 151, 0] / 8 - 4) < 1 and abs(fh[101, 151, 1] / 8 - 2.4) < 0.7, fh[101, 151]   # km-sized smoothing reads a little low on a small blob
+fp = X.mrms_flow_crop(th, *cells, False, 'hi')
+frgb = np.frombuffer(_z.decompress(fp[fp.index(b'IDAT') + 4:-12]), np.uint8).reshape(hh // 8, -1)[:, 1:].reshape(hh // 8, -1, 3)
+assert frgb.shape[1] * 8 == cells[3] - cells[2]
+# tile: the pixel over the cell's center paints (Honolulu at z9); CONUS rings play no part
+clat, clon = 26 - (hr + 0.5) * 0.005, -164 + (hc + 0.5) * 0.005
+fx = (clon + 180) / 360 * 2 ** 9
+fy = (1 - np.log(np.tan(np.radians(clat)) + 1 / np.cos(np.radians(clat))) / np.pi) / 2 * 2 ** 9
+png = X.mrms_tile(th, 9, int(fx), int(fy))
+idat = png[png.index(b'IDAT') + 4:]
+px = np.frombuffer(_z.decompress(idat[:X.struct.unpack('>I', png[png.index(b'IDAT') - 4:png.index(b'IDAT')])[0]]),
+                   np.uint8).reshape(X.FIELD_TILE, X.FIELD_TILE + 1)[:, 1:]
+assert px[int((fy % 1) * X.FIELD_TILE), int((fx % 1) * X.FIELD_TILE)] in (6, 7, 8) and 0 < (px != 255).sum() < 30   # a 0.005° cell is ~4 px here
+# a scan CONUS has but Hawaii lacks: long overdue, Hawaii stays uncovered; recent, not published yet
+X.mrms_store(th + 120, np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8))
+assert X.mrms_tile(th + 120, 9, int(fx), int(fy)) != png
+recent = int(X.time.time()) // 120 * 120
+X.mrms_store(recent, np.zeros((X.MRMS_NY, X.MRMS_NX), np.uint8))
+try:
+    X.mrms_tile(recent, 9, int(fx), int(fy))
+    raise AssertionError('Hawaii may still come')
+except X.NotPublished:
+    pass
+X.mrms_tile(recent, 9, 150, 192)            # a CONUS tile is fine
+# NEXRAD: the Hawaii radars, on the lattice 2:1 over Hawaii's cells, blending over its MRMS
+assert X.nx_touch(-158.5, 20.5, -157, 22, 10 ** 7) and 'HMO' in X._nx_active and 'HKI' in X._nx_active
+r0, r1, c0, c1 = X.nx_box('HMO')
+ro_, co_, sub = X.nx_origin('hi')
+assert sub == 2 and ro_ <= r0 < r1 <= ro_ + HI.ny * sub and co_ <= c0 < c1 <= co_ + HI.nx * sub and co_ < 0
+blk = ((r0 + r1) // 2 // X.NX_BLOCK, (c0 + c1) // 2 // X.NX_BLOCK)
+assert X.nx_domain(*blk) == 'hi' and blk in X.nx_blocks('HMO')
+grid = np.full((r1 - r0, c1 - c0), (30 + 32) * 2, np.uint16)
+fill = X.nx_mrms_block(th, *blk, X.NX_SUB, 'hi')
+assert fill.shape == (X.NX_BLOCK + 2 * X.NX_SUB,) * 2
+zb, _ = X.nx_block(*blk, [('HMO', 60, grid, 0.5)], fh, fill, 'hi')
+bq, _, bcov = X.nx_block_arrays(zb)
+assert (bq == (30 + 32) * 2).mean() > 0.5 and bcov.max() == 255
+X._nx_frames[th] = {'blocks': {blk: zb}, 'sig': {}, 'snow': {blk: False}, 'rev': 7}
+ncells = X.nx_crop_box(-158.5, 20.5, -157, 22, 1, 'hi')
+assert ncells[2] < 0 and X.nx_crop_bounds(*ncells) == '-158.5000,20.5000,-157.0000,22.0000,1', X.nx_crop_bounds(*ncells)
+assert X.nx_crop_box(-150, 20.5, -149, 22, 1, 'hi') is None, 'off the Hawaii grid'
+# nowcast at Honolulu from Hawaii's radar alone (the composite over it is 30 dBZ)
+X._hrrr = (None, None, {}); X.nowcast_at.cache_clear()
+nc = X.nowcast_at(th, 7, 21.3069, -157.8583)
+assert len(nc['rate']) == X.NC_LEAD + 1 and nc['rate'][0] is not None and X.nc_wet(nc['rate'][0]), nc['rate'][:3]
+assert X.nc_observed(th, 21.3069, -157.8583)[0] == nc['rate'][0]
+del X._nx_frames[th]
+for d in (X._mrms, X._mrms_small, X._mrms_flow, X._mrms_age):
+    d['hi'].clear(); d['conus'].clear()
+print('hawaii: ok')
