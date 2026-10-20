@@ -101,6 +101,23 @@ assert.strictEqual(five.find(h => h.t === at('2026-09-28T18:00Z')).tmp, 53.6);
     assert.strictEqual(sky.find(h => h.t === at('2026-09-30T19:00Z')).cloud, 44, 'the 19:10 sensor report does not clear it');
     assert.strictEqual(sky.find(h => h.t === at('2026-09-30T19:00Z')).tmp, 86, 'temperature still from the nearest report');
 }
+// AWC METARs fill the report times NWS dropped or left without a temperature, never doubling one it has
+{
+    const { mergeMetars } = require('./server');
+    const awc = (iso, c, extra = {}) => ({ obsTime: at(iso) / 1000, temp: c, dewp: 20, wdir: 60, wspd: 13, wgst: 24,
+        precip: 0.005, rawOb: `METAR PHNL ${iso}`, clouds: [{ cover: 'BKN', base: 7500 }], ...extra });
+    const merged = mergeMetars([
+        ob('2026-10-20T06:53:00Z', null, { rawMessage: 'PHNL 200653Z' }),
+        ob('2026-10-20T05:53:00Z', 24.4, { rawMessage: 'PHNL 200553Z' })
+    ], [awc('2026-10-20T06:53Z', 24.4), awc('2026-10-20T05:53Z', 99), awc('2026-10-20T03:53Z', 26.7, { wdir: 'VRB', precip: 0.12 })]);
+    assert.strictEqual(merged.length, 4, 'the 05:53 METAR does not double the NWS report');
+    const h = bucketObservations(merged, at('2026-10-20T07:05Z'));
+    const hh = iso => h.find(x => x.t === at(iso));
+    assert.deepStrictEqual([hh('2026-10-20T06:00Z').tmp, hh('2026-10-20T05:00Z').tmp, hh('2026-10-20T03:00Z').tmp], [75.9, 75.9, 80.1]);
+    assert.deepStrictEqual([hh('2026-10-20T06:00Z').wind, hh('2026-10-20T06:00Z').gust, hh('2026-10-20T06:00Z').cloud], [15, 27.6, 75]);
+    assert.deepStrictEqual([hh('2026-10-20T06:00Z').precip, hh('2026-10-20T03:00Z').precip, hh('2026-10-20T03:00Z').dir], [0, 0.12, null]);
+    assert.deepStrictEqual(mergeMetars([ob('2026-10-20T05:53:00Z', 24.4)], undefined).length, 1);
+}
 
 // Place zones: NWS names pass, anything else is refused; longitude fallback bands
 assert.ok(validZone('America/Los_Angeles') && validZone('America/Indiana/Indianapolis'));
