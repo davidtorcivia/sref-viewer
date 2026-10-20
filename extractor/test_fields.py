@@ -175,6 +175,68 @@ assert purge_with(cold, [], (None, None)) == ['nbm2026092712', 'nbm2026092800', 
 os.makedirs(os.path.join(X.FIELD_DIR, 'rrfshi2026092700'))
 assert 'rrfshi2026092700' in purge_with(live, [('20260928', '1615')]), 'unknown Hawaii run kept'
 assert 'rrfshi2026092700' not in purge_with(live, [('20260928', '1615')], hi=('20260928', '12')), 'stale Hawaii run purged'
+# The map's Hawaii run (its CONUS cycle) stays even once the Hawaii forecast crops move to a newer run
+os.makedirs(os.path.join(X.FIELD_DIR, 'rrfshi2026092812'))
+assert 'rrfshi2026092812' in purge_with(live, [('20260928', '1615')], hi=('20260928', '18')), 'map Hawaii run kept'
+
+# Map over Hawaii: past the CONUS grid, an RRFS frame paints the same run's Hawaii
+# grid, an RTMA-RU frame the hourly Hawaii analysis out when it came out
+X.rtma_hi_frame = lambda: ('20260928', '16')
+assert X.hi_frame(('rrfs', '20260928', '12', 5)) == ('rrfshi', '20260928', '12', 5)
+assert [X.hi_frame(('rtma', '20260928', c, 0)) for c in ('1600', '1615', '1630', '1645', '1745')] == \
+    [('rtmahi', '20260928', h, 0) for h in ('15', '15', '16', '16', '16')], 'hourly step at :30, never past the newest'
+assert X.hi_frame(('rtma', '20260929', '0015', 0)) == ('rtmahi', '20260928', '16', 0)
+hi_up = True
+temps = {'rrfs': 280, 'rrfshi': 290, 'rtma': 280, ('rtmahi', '15'): 285, ('rtmahi', '16'): 295}
+
+
+def fake_arrays(name, frame, cached_only=False):
+    if frame[0].endswith('hi') and not hi_up:
+        raise X.NotPublished
+    k = temps.get(frame[0], temps.get(frame[::2]))
+    shape, grid = ((225, 321), mp) if frame[0].endswith('hi') else ((265, 450), p)
+    # wind: 1 m/s along the grid's x axis
+    vals = [np.full(shape, (1.0 if i == 0 else 0.0) if name == 'wind' else k, np.float32)
+            for i in range(len(X.FIELDS[name]['grib']))]
+    return vals, grid
+
+
+def png_px(png):
+    i = png.index(b'IDAT')
+    return np.frombuffer(X.zlib.decompress(png[i + 4:i + 4 + struct.unpack('>I', png[i - 4:i])[0]]), np.uint8) \
+        .reshape(X.FIELD_TILE, X.FIELD_TILE + 1)[:, 1:]
+
+
+real_arrays, X.field_arrays = X.field_arrays, fake_arrays
+tband = lambda k: int((X.K_TO_F(k) - X.FIELDS['tmp']['stops'][0][0]) // X.FIELDS['tmp']['band'])
+rrfs = ('rrfs', '20260928', '12', 5)
+hon, nyc = (7, 56), (37, 48)            # z7 tiles holding Honolulu and New York
+px = png_px(X.tile_png('tmp', rrfs, 7, *hon))
+assert (px != 255).sum() > 10000 and set(np.unique(px)) <= {tband(290), 255}, 'Honolulu paints from the Hawaii grid'
+assert set(np.unique(png_px(X.tile_png('tmp', ('rtma', '20260928', '1615', 0), 7, *hon)))) == {tband(285)}
+assert set(np.unique(png_px(X.tile_png('tmp', ('rtma', '20260928', '1645', 0), 7, *hon)))) == {tband(295)}
+with_hi_nyc = X.tile_png('tmp', rrfs, 7, *nyc)
+hi_up = False
+assert (png_px(X.tile_png('tmp', rrfs, 7, *hon)) == 255).all(), 'no Hawaii run: CONUS only, no failure'
+assert X.tile_png('tmp', rrfs, 7, *nyc) == with_hi_nyc and (png_px(with_hi_nyc) == tband(280)).all(), 'CONUS tile unchanged'
+assert X.point_values(rrfs, 21.31, -157.86, 'tmp') == {}
+hi_up = True
+assert X.point_values(rrfs, 21.31, -157.86, 'tmp')['tmp'] == round(X.K_TO_F(290), 2), 'Honolulu taps read the Hawaii grid'
+assert X.point_values(rrfs, 40.71, -74.0, 'tmp')['tmp'] == round(X.K_TO_F(280), 2)
+assert X.point_values(('rtmahi', '20260928', '15', 0), 21.31, -157.86, None)['tmp'] == round(X.K_TO_F(285), 2), \
+    "the overview's Hawaii now reads its own frame"
+glat, glon = X.grid_axes()
+cell = lambda lat, lon: (int(round((X.MAP_BBOX[3] - lat) / X.FIELD_GRID_STEP)), int(round((lon - X.MAP_BBOX[0]) / X.FIELD_GRID_STEP)))
+unpack = lambda b: np.cumsum(np.frombuffer(X.gzip.decompress(b), np.int8), dtype=np.int8).reshape(-1, len(glat), len(glon))
+X.field_grid.cache_clear()
+g = unpack(X.field_grid('tmp', rrfs))[0]
+assert g[cell(21.31, -157.86)] == round(X.K_TO_F(290)) and g[cell(40.71, -74.0)] == round(X.K_TO_F(280)), 'numbers over both'
+assert g[cell(30.0, -145.0)] == -128, 'open Pacific between the grids is empty'
+# Grid-relative winds turn per grid: Hawaii's Mercator winds stay due east
+u, v = unpack(X.field_grid('wind', rrfs))
+assert (u[cell(21.31, -157.86)], v[cell(21.31, -157.86)]) == (2, 0), 'Hawaii winds unrotated'
+X.field_grid.cache_clear()
+X.field_arrays = real_arrays
 
 # NBM .idx step text, as published: hours throughout, the probability descriptor after the step
 assert [X.nbm_step(m, 24) for m in X.DAILY_MSGS] == \

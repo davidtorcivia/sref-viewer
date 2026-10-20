@@ -628,9 +628,10 @@ def maybe_start_index_build():
 # demand through a small in-memory LRU. A frame is (source, date, cycle, fh):
 # RRFS cycles are 'HH', RTMA-RU analyses 'HHMM' with fh 0. Tiles are
 # rendered per request: every pixel bilinearly samples the raw messages on
-# the Lambert conformal grid, then the field's value() is applied and
-# banded into an indexed PNG (palette alpha included). A coarse lat/lon
-# grid of the same values feeds the page's map numbers and wind particles.
+# the Lambert conformal grid (Hawaii's Mercator grid past its edge, see
+# hi_frame), then the field's value() is applied and banded into an
+# indexed PNG (palette alpha included). A coarse lat/lon grid of the same
+# values feeds the page's map numbers and wind particles.
 # The page draws its legends from the same FIELDS stops.
 
 FIELD_URL = os.environ.get(
@@ -644,7 +645,7 @@ NBM_URL = os.environ.get(
     'NBM_URL',
     'https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.{date}/{cycle}/core/blend.t{cycle}z.core.f{fh}.co.grib2')
 # Hawaii: the same RRFS and NBM runs on their own 2.5 km Mercator grids, and the
-# hourly RTMA (no rapid update there). Only the overview's point forecast uses them.
+# hourly RTMA (no rapid update there). The map paints them where the CONUS grids end (hi_frame).
 FIELD_URL_HI = os.environ.get(
     'RRFS_FIELD_URL_HI',
     'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.2p5km.f{fh}.hi.grib2')
@@ -663,6 +664,8 @@ RTMA_TTL_S = 120
 # any overlay opens without waiting on S3 (~1GB per 6-hourly cycle); 0 = on demand
 FIELD_PRELOAD = os.environ.get('FIELD_PRELOAD', '1') == '1'
 FIELD_BBOX = (-134.0, 21.0, -61.0, 53.0)   # west, south, east, north: covers the CONUS grid
+MAP_BBOX = (HI_BBOX[0], HI_BBOX[1], *FIELD_BBOX[2:])   # the map's bounds and numbers grid: CONUS and Hawaii
+RTMA_HI_LAG_S = 1800                        # hourly Hawaii RTMA posts ~36 min after its hour, RTMA-RU ~17
 FIELD_TILE = 512
 FIELD_MAXZOOM = 9                           # ~0.25km/px at 40N; MapLibre overzooms past this
 FIELD_GRID_STEP = 0.1                       # degrees, numbers/particles grid
@@ -1007,6 +1010,21 @@ def rtma_hi_frame():
     return newest_published('rtmahi', cands, RTMA_TTL_S)
 
 
+def hi_frame(frame, newest=None):
+    """The Hawaii frame painted where a CONUS frame is off its grid: the same RRFS
+    run on the Hawaii grid, or for an RTMA-RU analysis the newest hourly Hawaii
+    analysis out when that one came out (clamped to newest, the newest published).
+    None if there is none."""
+    src, date, cycle, fh = frame
+    if src == 'rrfs':
+        return ('rrfshi', date, cycle, fh)
+    d, c = (newest or rtma_hi_frame()) if src == 'rtma' else (None, None)
+    if not d:
+        return None
+    t = time.gmtime(min((frame_time(*frame) - RTMA_HI_LAG_S) // 3600 * 3600, frame_time('rtmahi', d, c, 0)))
+    return ('rtmahi', time.strftime('%Y%m%d', t), time.strftime('%H', t), 0)
+
+
 def frame_time(src, date, cycle, fh):
     fmt = '%Y%m%d%H%M' if src == 'rtma' else '%Y%m%d%H'
     return calendar.timegm(time.strptime(date + cycle, fmt)) + fh * 3600
@@ -1052,7 +1070,8 @@ def purge_fields():
     runs = {src: forecast_runs(src) for src in CROPS}
     live |= {(src, *run) for src, (cur, prev) in runs.items() for run in (cur, prev) if run and run[0]}
     if rtmahi[0]:
-        live.add(('rtmahi', *rtmahi))
+        live |= {('rtmahi', *rtmahi)} | {hi_frame(('rtma', d, c, 0), rtmahi)[:3] for d, c in rtma}
+    live |= {('rrfshi', d, c) for d, c in cycles if d}   # the map's Hawaii runs (hi_frame)
     keep = {os.path.basename(frame_dir(*f)) for f in live}
     known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set()) \
         | ({'rtmahi'} if rtmahi[0] else set()) | {src for src, (cur, _) in runs.items() if src != 'rrfs' and cur[0]}
@@ -1154,26 +1173,49 @@ def field_arrays(name, frame, cached_only=False):
     return [a for a, _ in got], got[0][1]
 
 
+def with_hi(fn, frame, off, lat, lon):
+    """fn(frame) with the Hawaii frame's fn() filled in where off() of it is true,
+    if lat/lon reach Hawaii. A Hawaii frame that fails (not out yet) leaves the CONUS one."""
+    out = fn(frame)
+    w, s, e, n = HI_BBOX
+    hi = hi_frame(frame) if np.min(lon) <= e and np.max(lon) >= w and np.min(lat) <= n and np.max(lat) >= s else None
+    if hi:
+        try:
+            out = [np.where(off(a), b, a) for a, b in zip(out, fn(hi))]
+        except NotPublished:
+            pass
+        except Exception as err:  # noqa: BLE001 - CONUS alone still serves
+            print(f'[FIELD] {hi}: {err!r}', flush=True)
+    return out
+
+
 def tile_png(name, frame, z, x, y):
     t = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
     lon = ((x + t) / 2 ** z * 360 - 180)[None, :]
     lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + t) / 2 ** z))))[:, None]
-    parts = [paint(FIELDS[n], *field_arrays(n, frame), lat, lon) for n in FIELDS[name].get('layers', [name])]
+    parts = [(with_hi(lambda f: [paint(FIELDS[n], *field_arrays(n, f), lat, lon)[0]], frame, lambda a: a == 255, lat, lon)[0],
+              field_palette(FIELDS[n])) for n in FIELDS[name].get('layers', [name])]
     return indexed_png(*(composite(*parts) if len(parts) > 1 else parts[0]))
 
 
 def grid_axes():
-    w, s, e, n = FIELD_BBOX
+    w, s, e, n = MAP_BBOX
     return np.arange(n, s - 1e-9, -FIELD_GRID_STEP), np.arange(w, e + 1e-9, FIELD_GRID_STEP)
 
 
 @functools.lru_cache(maxsize=24)
 def field_grid(name, frame):
-    """int8 lat/lon grid (rows north to south), -128 off the grid: the field
+    """int8 lat/lon grid (rows north to south), -128 off the grids: the field
     value times its grid scale, or for 'uv' fields earth-relative u then v in
     0.5 m/s. Gusts have no direction of their own: their vectors take the 10 m
     wind's direction at the gust's speed. Sent as pack_grid bytes."""
     lat, lon = grid_axes()
+    q = with_hi(lambda f: grid_layers(name, f, lat, lon), frame, lambda a: a == -128, lat, lon)
+    return pack_grid(np.concatenate([a.ravel() for a in q]))
+
+
+def grid_layers(name, frame, lat, lon):
+    """field_grid's int8 layers from one frame's grid."""
     if FIELDS[name]['grid'].get('uv'):
         wind, p = field_arrays('wind', frame)
         (u, v), inside = sample(wind, p, lat[:, None], lon[None, :])
@@ -1188,8 +1230,7 @@ def field_grid(name, frame):
         arrays, p = field_arrays(name, frame)
         vals, inside = sample(arrays, p, lat[:, None], lon[None, :])
         out, scale = [FIELDS[name]['value'](*vals)], FIELDS[name]['grid']['scale']
-    q = [np.where(inside, np.clip(np.rint(a * scale), -127, 127), -128).astype(np.int8) for a in out]
-    return pack_grid(np.concatenate([a.ravel() for a in q]))
+    return [np.where(inside, np.clip(np.rint(a * scale), -127, 127), -128).astype(np.int8) for a in out]
 
 
 def pack_grid(flat):
@@ -1204,7 +1245,12 @@ POINT_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud', 'refc', 'qpf', 'snowtot')
 
 
 def point_values(frame, lat, lon, overlay, always=POINT_BASE):
-    """Every inspectable field's value at one point, for the popup."""
+    """Every inspectable field's value at one point, for the popup. A map
+    frame (CONUS) reads its Hawaii frame at points in Hawaii."""
+    if place_domain(lat, lon) == 'hi' and not frame[0].endswith('hi'):
+        frame = hi_frame(frame)
+        if not frame:
+            return {}
     out = {}
     for name in POINT_FIELDS:
         if not all(m in SOURCES[frame[0]]['levels'] for m in FIELDS[name]['grib']) \
@@ -1234,6 +1280,7 @@ def warm_field(name, frames):
     now = time.time()
     # Vector grids also need the 10 m wind (gust direction)
     msgs = field_msgs(name) + (field_msgs('wind') if FIELDS[name].get('grid', {}).get('uv') else [])
+    frames = [*frames, *filter(None, map(hi_frame, frames))]   # Hawaii's messages are small
     for frame in sorted(frames, key=lambda f: abs(frame_time(*f) - now)):
         for m in dict.fromkeys(msgs):
             if frame + (m,) not in _warming:
@@ -3664,8 +3711,8 @@ class Handler(BaseHTTPRequestHandler):
             lat, lon = grid_axes()
             return self.send_json(200, {
                 'frames': [{'src': f[0], 'date': f[1], 'cycle': f[2], 'fh': f[3], 'time': frame_time(*f)} for f in frames],
-                'bounds': FIELD_BBOX, 'tile': FIELD_TILE, 'maxzoom': FIELD_MAXZOOM,
-                'grid': {'west': FIELD_BBOX[0], 'north': FIELD_BBOX[3], 'step': FIELD_GRID_STEP,
+                'bounds': MAP_BBOX, 'tile': FIELD_TILE, 'maxzoom': FIELD_MAXZOOM,
+                'grid': {'west': MAP_BBOX[0], 'north': MAP_BBOX[3], 'step': FIELD_GRID_STEP,
                          'nx': len(lon), 'ny': len(lat),
                          'fields': {k: v['grid'] for k, v in FIELDS.items() if v.get('grid')}},
                 'fields': legends})
