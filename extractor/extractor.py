@@ -1565,7 +1565,7 @@ def daily_rows(start, hours, v, tz=DAILY_TZ):
                 rain), whichever has the largest liquid share, snow at 10:1
     Where 2 m temperature (TMP) and 6 h PoP (POP06) samples are given (Hawaii,
     whose 12 h windows end at 2pm and 2am), lo also takes the samples before
-    local noon and hi those from 10am to 6pm, and the PoPs are 6 h windows
+    local noon and hi those from 10am to 3pm, and the PoPs are 6 h windows
     whose middle is 6am-6pm local (day) or not (night, filed under the next morning).
     Days run from the first with a hi or lo to the last with a hi."""
     days = {}
@@ -1576,7 +1576,8 @@ def daily_rows(start, hours, v, tz=DAILY_TZ):
             if msg in ('TMP', 'POP06'):
                 at = datetime.fromtimestamp(start + (fh - (3 if msg == 'POP06' else 0)) * 3600, tz)
                 if msg == 'TMP':
-                    keys = ['TMIN'] * (at.hour < 12) + ['TMAX'] * (10 <= at.hour <= 18)
+                    # not past 3pm: a 00z run's lone 5pm sample would make a partial first day
+                    keys = ['TMIN'] * (at.hour < 12) + ['TMAX'] * (10 <= at.hour <= 15)
                 else:
                     keys = ['pop_day' if 6 <= at.hour < 18 else 'pop_night']
                     at += timedelta(hours=0 if keys[0] == 'pop_day' else 6)

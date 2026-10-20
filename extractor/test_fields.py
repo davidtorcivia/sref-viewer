@@ -274,6 +274,8 @@ assert (d['lo'], d['hi']) == (round(X.K_TO_F(290)), round(X.K_TO_F(302))), d
 # Sep 28 HST: day windows end f024 (8am-2pm) and f030 (2pm-8pm); night ones f012 and f018
 assert (hb['2026-09-28']['pop_day'], hb['2026-09-28']['pop_night']) == (30, 18), hb['2026-09-28']
 assert hb['2026-09-28']['snow'] is None and hb['2026-09-28']['ptype'] is None
+# The run starts 2pm on the 27th HST: its 5pm sample alone makes no row for the 27th
+assert min(hb) == '2026-09-28', sorted(hb)[:2]
 # Zone names: anything unusable falls back to New York
 assert str(X.place_zone('America/Denver')) == 'America/Denver'
 assert all(X.place_zone(n) is X.DAILY_TZ for n in ('', None, 'Nowhere/Land', '../etc/passwd', 'UTC', 'America/' + 'x' * 60))
