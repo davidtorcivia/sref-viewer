@@ -628,9 +628,10 @@ def maybe_start_index_build():
 # demand through a small in-memory LRU. A frame is (source, date, cycle, fh):
 # RRFS cycles are 'HH', RTMA-RU analyses 'HHMM' with fh 0. Tiles are
 # rendered per request: every pixel bilinearly samples the raw messages on
-# the Lambert conformal grid, then the field's value() is applied and
-# banded into an indexed PNG (palette alpha included). A coarse lat/lon
-# grid of the same values feeds the page's map numbers and wind particles.
+# the Lambert conformal grid (Hawaii's Mercator grid past its edge, see
+# hi_frame), then the field's value() is applied and banded into an
+# indexed PNG (palette alpha included). A coarse lat/lon grid of the same
+# values feeds the page's map numbers and wind particles.
 # The page draws its legends from the same FIELDS stops.
 
 FIELD_URL = os.environ.get(
@@ -644,7 +645,7 @@ NBM_URL = os.environ.get(
     'NBM_URL',
     'https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.{date}/{cycle}/core/blend.t{cycle}z.core.f{fh}.co.grib2')
 # Hawaii: the same RRFS and NBM runs on their own 2.5 km Mercator grids, and the
-# hourly RTMA (no rapid update there). Only the overview's point forecast uses them.
+# hourly RTMA (no rapid update there). The map paints them where the CONUS grids end (hi_frame).
 FIELD_URL_HI = os.environ.get(
     'RRFS_FIELD_URL_HI',
     'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.2p5km.f{fh}.hi.grib2')
@@ -663,6 +664,8 @@ RTMA_TTL_S = 120
 # any overlay opens without waiting on S3 (~1GB per 6-hourly cycle); 0 = on demand
 FIELD_PRELOAD = os.environ.get('FIELD_PRELOAD', '1') == '1'
 FIELD_BBOX = (-134.0, 21.0, -61.0, 53.0)   # west, south, east, north: covers the CONUS grid
+MAP_BBOX = (HI_BBOX[0], HI_BBOX[1], *FIELD_BBOX[2:])   # the map's bounds and numbers grid: CONUS and Hawaii
+RTMA_HI_LAG_S = 1800                        # hourly Hawaii RTMA posts ~36 min after its hour, RTMA-RU ~17
 FIELD_TILE = 512
 FIELD_MAXZOOM = 9                           # ~0.25km/px at 40N; MapLibre overzooms past this
 FIELD_GRID_STEP = 0.1                       # degrees, numbers/particles grid
@@ -1007,6 +1010,20 @@ def rtma_hi_frame():
     return newest_published('rtmahi', cands, RTMA_TTL_S)
 
 
+def hi_frame(frame):
+    """The Hawaii frame painted where a CONUS frame is off its grid: the same RRFS
+    run on the Hawaii grid, or for an RTMA-RU analysis the hourly Hawaii analysis
+    usually out when that one came out. Fixed per frame (tiles are cached for a day),
+    so one that is not out yet makes a Partial answer, not an older hour. None for others."""
+    src, date, cycle, fh = frame
+    if src == 'rrfs':
+        return ('rrfshi', date, cycle, fh)
+    if src != 'rtma':
+        return None
+    t = time.gmtime((frame_time(*frame) - RTMA_HI_LAG_S) // 3600 * 3600)
+    return ('rtmahi', time.strftime('%Y%m%d', t), time.strftime('%H', t), 0)
+
+
 def frame_time(src, date, cycle, fh):
     fmt = '%Y%m%d%H%M' if src == 'rtma' else '%Y%m%d%H'
     return calendar.timegm(time.strptime(date + cycle, fmt)) + fh * 3600
@@ -1052,7 +1069,8 @@ def purge_fields():
     runs = {src: forecast_runs(src) for src in CROPS}
     live |= {(src, *run) for src, (cur, prev) in runs.items() for run in (cur, prev) if run and run[0]}
     if rtmahi[0]:
-        live.add(('rtmahi', *rtmahi))
+        live |= {('rtmahi', *rtmahi)} | {hi_frame(('rtma', d, c, 0))[:3] for d, c in rtma}
+    live |= {('rrfshi', d, c) for d, c in cycles if d}   # the map's Hawaii runs (hi_frame)
     keep = {os.path.basename(frame_dir(*f)) for f in live}
     known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set()) \
         | ({'rtmahi'} if rtmahi[0] else set()) | {src for src, (cur, _) in runs.items() if src != 'rrfs' and cur[0]}
@@ -1140,6 +1158,13 @@ class NotPublished(Exception):
     pass
 
 
+class Partial(Exception):
+    """An answer missing its Hawaii part (not out yet, or S3 failed): served, never cached."""
+    def __init__(self, body):
+        super().__init__('partial')
+        self.body = body
+
+
 def field_arrays(name, frame, cached_only=False):
     """Decoded messages of one field for a frame, fetching unless cached_only."""
     if cached_only:
@@ -1154,26 +1179,62 @@ def field_arrays(name, frame, cached_only=False):
     return [a for a, _ in got], got[0][1]
 
 
+def with_hi(fn, frame, off, lat, lon):
+    """fn(frame) with the Hawaii frame's fn() filled in where off() of it is true,
+    if lat/lon reach Hawaii. A Hawaii frame that fails raises Partial with the CONUS one."""
+    out = fn(frame)
+    w, s, e, n = HI_BBOX
+    hi = hi_frame(frame) if np.min(lon) <= e and np.max(lon) >= w and np.min(lat) <= n and np.max(lat) >= s else None
+    if hi:
+        try:
+            return [np.where(off(a), b, a) for a, b in zip(out, fn(hi))]
+        except NotPublished:
+            pass
+        except Exception as err:  # noqa: BLE001 - CONUS alone still serves, uncached
+            print(f'[FIELD] {hi}: {err!r}', flush=True)
+        raise Partial(out)
+    return out
+
+
 def tile_png(name, frame, z, x, y):
     t = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
     lon = ((x + t) / 2 ** z * 360 - 180)[None, :]
     lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + t) / 2 ** z))))[:, None]
-    parts = [paint(FIELDS[n], *field_arrays(n, frame), lat, lon) for n in FIELDS[name].get('layers', [name])]
-    return indexed_png(*(composite(*parts) if len(parts) > 1 else parts[0]))
+    parts, partial = [], False
+    for n in FIELDS[name].get('layers', [name]):
+        try:
+            px = with_hi(lambda f: [paint(FIELDS[n], *field_arrays(n, f), lat, lon)[0]], frame, lambda a: a == 255, lat, lon)
+        except Partial as p:
+            px, partial = p.body, True
+        parts.append((px[0], field_palette(FIELDS[n])))
+    png = indexed_png(*(composite(*parts) if len(parts) > 1 else parts[0]))
+    if partial:
+        raise Partial(png)
+    return png
 
 
 def grid_axes():
-    w, s, e, n = FIELD_BBOX
+    w, s, e, n = MAP_BBOX
     return np.arange(n, s - 1e-9, -FIELD_GRID_STEP), np.arange(w, e + 1e-9, FIELD_GRID_STEP)
 
 
-@functools.lru_cache(maxsize=24)
+@functools.lru_cache(maxsize=24)   # a Partial raises through, so it is not kept
 def field_grid(name, frame):
-    """int8 lat/lon grid (rows north to south), -128 off the grid: the field
+    """int8 lat/lon grid (rows north to south), -128 off the grids: the field
     value times its grid scale, or for 'uv' fields earth-relative u then v in
     0.5 m/s. Gusts have no direction of their own: their vectors take the 10 m
     wind's direction at the gust's speed. Sent as pack_grid bytes."""
     lat, lon = grid_axes()
+    pack = lambda q: pack_grid(np.concatenate([a.ravel() for a in q]))
+    try:
+        q = with_hi(lambda f: grid_layers(name, f, lat, lon), frame, lambda a: a == -128, lat, lon)
+    except Partial as p:
+        raise Partial(pack(p.body))
+    return pack(q)
+
+
+def grid_layers(name, frame, lat, lon):
+    """field_grid's int8 layers from one frame's grid."""
     if FIELDS[name]['grid'].get('uv'):
         wind, p = field_arrays('wind', frame)
         (u, v), inside = sample(wind, p, lat[:, None], lon[None, :])
@@ -1188,8 +1249,7 @@ def field_grid(name, frame):
         arrays, p = field_arrays(name, frame)
         vals, inside = sample(arrays, p, lat[:, None], lon[None, :])
         out, scale = [FIELDS[name]['value'](*vals)], FIELDS[name]['grid']['scale']
-    q = [np.where(inside, np.clip(np.rint(a * scale), -127, 127), -128).astype(np.int8) for a in out]
-    return pack_grid(np.concatenate([a.ravel() for a in q]))
+    return [np.where(inside, np.clip(np.rint(a * scale), -127, 127), -128).astype(np.int8) for a in out]
 
 
 def pack_grid(flat):
@@ -1204,7 +1264,12 @@ POINT_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud', 'refc', 'qpf', 'snowtot')
 
 
 def point_values(frame, lat, lon, overlay, always=POINT_BASE):
-    """Every inspectable field's value at one point, for the popup."""
+    """Every inspectable field's value at one point, for the popup. A map
+    frame (CONUS) reads its Hawaii frame at points in Hawaii."""
+    if place_domain(lat, lon) == 'hi' and not frame[0].endswith('hi'):
+        frame = hi_frame(frame)
+        if not frame:
+            return {}
     out = {}
     for name in POINT_FIELDS:
         if not all(m in SOURCES[frame[0]]['levels'] for m in FIELDS[name]['grib']) \
@@ -1234,6 +1299,7 @@ def warm_field(name, frames):
     now = time.time()
     # Vector grids also need the 10 m wind (gust direction)
     msgs = field_msgs(name) + (field_msgs('wind') if FIELDS[name].get('grid', {}).get('uv') else [])
+    frames = [*frames, *filter(None, map(hi_frame, frames))]   # Hawaii's messages are small
     for frame in sorted(frames, key=lambda f: abs(frame_time(*f) - now)):
         for m in dict.fromkeys(msgs):
             if frame + (m,) not in _warming:
@@ -3237,7 +3303,12 @@ def nc_summary(t, rows):
 # Each hourly run's first HRRR_HOURS hours live in RAM as rate dBZ (Marshall-Palmer)
 # quantized like MRMS plus a kind code per cell, zlib per step, a few MB a run.
 # Column-max REFC would exaggerate the surface rate.
-HRRR_URL = os.environ.get('HRRR_URL', 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{date}/conus/hrrr.t{cycle}z.wrfsubhf{fh}.grib2')
+HRRR_URL = os.environ.get('HRRR_URL', 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{date}/conus/hrrr.t{cycle}z.wrfsubhf{fh:02d}.grib2')
+# HRRR has no Hawaii domain: there the RRFS's 15-minute output on its Mercator grid stands in.
+# Hourly cycles f001-f018, out ~2h20m after the cycle; whole hours read '1 hour fcst', not '60 min fcst'.
+HRRR_URL_HI = os.environ.get(
+    'RRFS_SUBH_URL_HI',
+    'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.2p5km.subh.f{fh:03d}.hi.grib2')
 HRRR_STEP = 900
 HRRR_HOURS = 8                              # a run up to 2 hours old still reaches 6 hours ahead
 HRRR_AHEAD = 6 * 3600                       # served past the scan
@@ -3245,17 +3316,22 @@ HRRR_POLL = 300
 HRRR_MIN_MMH = 0.05                         # below this nothing (~-4 dBZ)
 HRRR_FLAGS = (('CSNOW', 1), ('CICEP', 3), ('CFRZR', 4))   # flag -> kind; the higher code wins where several are set
 _hrrr = (None, None, {})                    # (run epoch, grid params, {valid epoch: (zlib q, zlib kind)}), swapped whole
+_hrrr_hi = (None, None, {})                 # the same of the Hawaii RRFS run
+# domain -> (label, URL, hours kept, .idx step text of a minute); Hawaii's run is older when out, so keeps 10 hours
+HRRR_MODELS = {'conus': ('HRRR', HRRR_URL, HRRR_HOURS, lambda m: f'{m} min fcst'),
+               'hi': ('RRFS HI', HRRR_URL_HI, 10, lambda m: f'{m // 60} hour fcst' if m % 60 == 0 else f'{m} min fcst')}
 
 
-def hrrr_fetch(date, cycle):
-    """(params, {valid: (zlib q, zlib kind)}) of a run's first HRRR_HOURS hours."""
+def hrrr_fetch(date, cycle, dom='conus'):
+    """(params, {valid: (zlib q, zlib kind)}) of a run's first hours kept."""
+    _, url_t, hours, step = HRRR_MODELS[dom]
     run = calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H'))
     steps, p = {}, None
-    for fh in range(1, HRRR_HOURS + 1):
-        url = HRRR_URL.format(date=date, cycle=cycle, fh=f'{fh:02d}')
+    for fh in range(1, hours + 1):
+        url = url_t.format(date=date, cycle=cycle, fh=fh)
         for k in range(1, 5):
             minute = (fh - 1) * 60 + 15 * k
-            msgs = fetch_idx_fields(url, [('PRATE', 'surface')] + [(f, 'surface') for f, _ in HRRR_FLAGS], f'{minute} min fcst')
+            msgs = fetch_idx_fields(url, [('PRATE', 'surface')] + [(f, 'surface') for f, _ in HRRR_FLAGS], step(minute))
             if msgs is None:
                 raise NotPublished
             vals = []
@@ -3275,9 +3351,10 @@ def hrrr_fetch(date, cycle):
     return p, steps
 
 
-def hrrr_poller():
-    """Keep the newest HRRR run whose last needed hour is out."""
-    global _hrrr
+def hrrr_poller(dom='conus'):
+    """Keep the domain's newest run whose last needed hour is out."""
+    global _hrrr, _hrrr_hi
+    label, url_t, hours, _ = HRRR_MODELS[dom]
     while True:
         try:
             now = time.time()
@@ -3285,18 +3362,25 @@ def hrrr_poller():
             for back in range(1, 6):
                 t = time.gmtime(now - back * 3600)
                 date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-                cands.append((date, cycle, HRRR_URL.format(date=date, cycle=cycle, fh=f'{HRRR_HOURS:02d}') + '.idx'))
-            date, cycle = newest_published('hrrr', cands, HRRR_POLL - 30)
+                cands.append((date, cycle, url_t.format(date=date, cycle=cycle, fh=hours) + '.idx'))
+            date, cycle = newest_published(f'hrrr-{dom}', cands, HRRR_POLL - 30)
             run = date and calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H'))
-            if run and run != _hrrr[0]:
+            if run and run != hrrr_ring(dom)[0]:
                 t0 = time.time()
-                p, steps = hrrr_fetch(date, cycle)
-                _hrrr = (run, p, steps)
-                print(f'[HRRR] {date} {cycle}Z: {len(steps)} steps in {time.time() - t0:.0f}s, '
+                p, steps = hrrr_fetch(date, cycle, dom)
+                if dom == 'hi':
+                    _hrrr_hi = (run, p, steps)
+                else:
+                    _hrrr = (run, p, steps)
+                print(f'[{label}] {date} {cycle}Z: {len(steps)} steps in {time.time() - t0:.0f}s, '
                       f'{sum(len(a) + len(b) for a, b in steps.values()) // 1024}KB', flush=True)
         except Exception as err:  # noqa: BLE001 - radar-only minutes meanwhile
-            print(f'[HRRR] {err}', flush=True)
+            print(f'[{label}] {err}', flush=True)
         time.sleep(HRRR_POLL)
+
+
+def hrrr_ring(dom):
+    return _hrrr_hi if dom == 'hi' else _hrrr
 
 
 def hrrr_read(q, kind, p, lat, lon, radius_km):
@@ -3321,13 +3405,15 @@ NC_CELL_KM = 1.0                            # ponytail: an MRMS cell as ~1 km (1
 
 def hrrr_point(lat, lon, t):
     """(run, [(valid, rate, p, kind)]) of the kept HRRR run at lat/lon from the step before
-    scan t to HRRR_AHEAD past it, the neighborhood widening with the lead from t like the radar's."""
-    return hrrr_point_run(lat, lon, t, _hrrr[0])
+    scan t to HRRR_AHEAD past it, the neighborhood widening with the lead from t like the radar's.
+    Hawaii reads the RRFS run instead."""
+    dom = ens_dom(lat, lon)
+    return hrrr_point_run(lat, lon, t, dom, hrrr_ring(dom)[0])
 
 
 @functools.lru_cache(maxsize=256)
-def hrrr_point_run(lat, lon, t, key):
-    run, p, steps = _hrrr                   # key: the run, so a new one is not answered from the cache
+def hrrr_point_run(lat, lon, t, dom, key):
+    run, p, steps = hrrr_ring(dom)          # key: the run, so a new one is not answered from the cache
     if run is None:
         return None, []
     out = []
@@ -3644,8 +3730,8 @@ class Handler(BaseHTTPRequestHandler):
             lat, lon = grid_axes()
             return self.send_json(200, {
                 'frames': [{'src': f[0], 'date': f[1], 'cycle': f[2], 'fh': f[3], 'time': frame_time(*f)} for f in frames],
-                'bounds': FIELD_BBOX, 'tile': FIELD_TILE, 'maxzoom': FIELD_MAXZOOM,
-                'grid': {'west': FIELD_BBOX[0], 'north': FIELD_BBOX[3], 'step': FIELD_GRID_STEP,
+                'bounds': MAP_BBOX, 'tile': FIELD_TILE, 'maxzoom': FIELD_MAXZOOM,
+                'grid': {'west': MAP_BBOX[0], 'north': MAP_BBOX[3], 'step': FIELD_GRID_STEP,
                          'nx': len(lon), 'ny': len(lat),
                          'fields': {k: v['grid'] for k, v in FIELDS.items() if v.get('grid')}},
                 'fields': legends})
@@ -3678,12 +3764,18 @@ class Handler(BaseHTTPRequestHandler):
                     body, ctype = tile_png(name, frame, int(z), int(x), int(y)), 'image/png'
                 else:
                     body, ctype = field_grid(name, frame), 'application/octet-stream'
+            except Partial as p:
+                body, ctype, partial = p.body, 'image/png' if kind == 'png' else 'application/octet-stream', True
             except NotPublished:
                 return self.send_json(404, {'error': 'Not published'})
             except Exception as err:  # noqa: BLE001 - report any failure upstream
                 print(f'[FIELD] {name} {frame}: {err}', flush=True)
                 return self.send_json(502, {'error': str(err)})
+            else:
+                partial = False
             self.send_response(200)
+            if partial:
+                self.send_header('Cache-Control', 'no-store')   # the backend's day-long cache skips it
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -3790,6 +3882,7 @@ if __name__ == '__main__':
     threading.Thread(target=mrms_poller, daemon=True).start()
     threading.Thread(target=nx_poller, daemon=True).start()
     threading.Thread(target=hrrr_poller, daemon=True).start()
+    threading.Thread(target=hrrr_poller, args=('hi',), daemon=True).start()
     print(f'[NOWCAST] {nc_load(time.time())} forecasts awaiting scoring taken back; '
           f'learned {nc_learn(read_json(NC_SCORE_FILE) or {})}', flush=True)
 

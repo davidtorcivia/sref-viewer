@@ -7,7 +7,7 @@ import {
     isMobile, setWindUnit, getWindUnit, convertWind, formatValue, cycleEpoch
 } from './config.js?v=__V__';
 import { fetchModelData, hasSnowForecast, getEnsembleStats } from './api.js?v=__V__';
-import { createChart, toggleCore, destroyAllCharts, exportChartPng } from './charts.js?v=__V__';
+import { createChart, toggleCore, destroyAllCharts, exportChartPng, setStationZone, zone, urlZone } from './charts.js?v=__V__';
 import { applySiteSettings } from './site.js?v=__V__';
 
 // ============ State ============
@@ -208,12 +208,14 @@ function renderNextRun() {
     // Rounded to 5 min: the lag is an estimate, not a schedule
     const readyAt = new Date(Math.round((cycle + model.readyLagHours * 3600000) / 300000) * 300000);
     elements.nextRun.textContent = `Next ${next.run}Z ~${readyAt.toLocaleTimeString('en-US', {
-        hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+        hour: 'numeric', minute: '2-digit', timeZone: zone, timeZoneName: 'short'
     })}`;
 }
 
 function shareUrl(pinRun = true) {
     const p = new URLSearchParams({ model: state.model, station: state.station });
+    const tz = urlZone(state.station);
+    if (tz) p.set('tz', tz);
     if (pinRun) {
         p.set('run', state.run);
         p.set('date', state.date);
@@ -259,10 +261,10 @@ function handleCustomStation() {
 
 // ============ Header ============
 function updateTimeDisplay() {
-    const fmt = (timeZone, hour12) => new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone, hour12 });
+    const fmt = (timeZone, hour12, timeZoneName) => new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone, hour12, timeZoneName });
     elements.timeDisplay.textContent = isMobile()
-        ? fmt('America/New_York', true)
-        : `${fmt('America/New_York', true)} ET / ${fmt('UTC', false)}Z`;
+        ? fmt(zone, true)
+        : `${fmt(zone, true, 'short')} / ${fmt('UTC', false)}Z`;
 }
 
 function renderTitle() {
@@ -454,6 +456,8 @@ async function loadAllCharts() {
     const load = state.load = new AbortController();
     const { signal } = load;
     const { model, station, run, date } = state;
+    setStationZone(station);
+    updateTimeDisplay();
     const label = MODELS[model].label;
     const fetchParam = param => fetchModelData(MODELS[model].apiBase, station, run, param, date, signal);
 
@@ -486,8 +490,8 @@ async function loadAllCharts() {
             : `No ${label} data for ${station} ${run}Z ${date}. The run may not be published yet.`);
         renderNextRun();
         elements.lastUpdate.textContent = `Updated ${new Date().toLocaleTimeString('en-US', {
-            hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
-        })} ET`;
+            hour: 'numeric', minute: '2-digit', timeZone: zone, timeZoneName: 'short'
+        })}`;
         updateWeatherSummary(ok);
         if (!ok) return $('ptypeStrip')?.remove();
 
@@ -742,7 +746,7 @@ async function loadPtypeStrip(request, signal) {
     }
 
     // Onset and type changes, ignoring blips shorter than 2h
-    const fmtTime = x => new Date(x).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', timeZone: 'America/New_York' });
+    const fmtTime = x => new Date(x).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', timeZone: zone });
     const events = [];
     let prevType = null;
     for (const seg of segments) {

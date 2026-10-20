@@ -1007,8 +1007,10 @@ async function proxyField(req, res, kind, extra, immutable) {
             { signal: AbortSignal.timeout(60000) });
         if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).end();
         res.set('Content-Type', up.headers.get('content-type'));
-        // A frame's data never changes; a point's answer grows as more fields get cached
-        res.set('Cache-Control', immutable ? 'public, max-age=86400, immutable' : 'no-store');
+        // A frame's data never changes; a point's answer grows as more fields get cached, and a
+        // tile still missing its Hawaii part (the extractor says no-store) fills in later
+        const partial = /no-store/.test(up.headers.get('cache-control') || '');
+        res.set('Cache-Control', immutable && !partial ? 'public, max-age=86400, immutable' : 'no-store');
         res.send(Buffer.from(await up.arrayBuffer()));
     } catch {
         res.status(502).end();
@@ -1339,12 +1341,53 @@ async function nearestStation(lat, lon) {
     return station;
 }
 
+// One Aviation Weather Center METAR as an NWS observation feature (NWS units: C, km/h, degrees, mm, m)
+function metarFeature(m) {
+    const kmh = kt => (typeof kt === 'number' ? kt * 1.852 : null);
+    return { properties: {
+        timestamp: new Date(m.obsTime * 1000).toISOString(), rawMessage: m.rawOb || '', textDescription: null,
+        temperature: { value: m.temp ?? null }, dewpoint: { value: m.dewp ?? null },
+        windSpeed: { value: kmh(m.wspd) }, windGust: { value: kmh(m.wgst) },
+        windDirection: { value: typeof m.wdir === 'number' ? m.wdir : null },   // 'VRB' has none
+        // a trace (P0000, 0.005 in) is not measurable rain
+        precipitationLastHour: { value: typeof m.precip === 'number' ? (m.precip < 0.01 ? 0 : m.precip * 25.4) : null },
+        // a clear sky (and CAVOK, or vertical visibility as OVX) has no layers, only the top-level cover
+        cloudLayers: m.clouds?.length
+            ? m.clouds.map(c => ({ amount: c.cover, base: { value: c.base == null ? null : c.base * 0.3048 } }))
+            : m.cover ? [{ amount: { CAVOK: 'CLR', OVX: 'VV' }[m.cover] || m.cover, base: { value: null } }] : []
+    } };
+}
+
+// The NWS feed drops reports (PHNL: 8 of 24 hours missing, others with a null temperature the METAR
+// text has); the AWC's METARs fill each report time NWS has no temperature for. Where NWS has the
+// report, its empty fields are filled in place, so its own text (Snow, Fog) stays
+function mergeMetars(features, metars) {
+    const byMinute = new Map(features.filter(f => Number.isFinite(Date.parse(f.properties?.timestamp)))
+        .map(f => [Math.floor(Date.parse(f.properties.timestamp) / MINUTE), f]));
+    const added = [];
+    for (const m of metars || []) {
+        if (!m.obsTime || m.temp == null) continue;
+        const nws = byMinute.get(Math.floor(m.obsTime / 60));
+        if (nws?.properties.temperature?.value != null) continue;
+        const p = metarFeature(m).properties;
+        if (!nws) { added.push({ properties: p }); continue; }
+        for (const [k, v] of Object.entries(p)) {
+            const cur = nws.properties[k];
+            const empty = cur == null || cur === '' || (Array.isArray(cur) ? !cur.length : typeof cur === 'object' && cur.value == null);
+            if (empty) nws.properties[k] = v;
+        }
+    }
+    return features.concat(added);
+}
+
 function stationObservations(id) {
     const hit = obsCache.get(id);
     if (hit && (hit.pending || Date.now() - hit.at < 10 * MINUTE)) return hit.promise;
     const start = new Date(Date.now() - 26 * HOUR).toISOString().replace(/\.\d+Z$/, 'Z');
-    const promise = getJson(`https://api.weather.gov/stations/${id}/observations?start=${start}&limit=500`, 15000)
-        .then(d => d.features || []);
+    const metars = getJson(`https://aviationweather.gov/api/data/metar?ids=${id}&hours=26&format=json`, 10000)
+        .catch(err => { console.warn(`AWC METARs ${id}: ${err.message}`); return []; });
+    const promise = Promise.all([getJson(`https://api.weather.gov/stations/${id}/observations?start=${start}&limit=500`, 15000), metars])
+        .then(([d, m]) => mergeMetars(d.features || [], Array.isArray(m) ? m : []));
     const entry = { promise, pending: true };
     obsCache.set(id, entry);
     promise.then(() => Object.assign(entry, { pending: false, at: Date.now() }), () => obsCache.delete(id));
@@ -1755,4 +1798,4 @@ app.get('/api/og.png', async (req, res) => {
     }
 });
 
-module.exports = { app, shapeNotify, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, zoneByLongitude, validZone, photonResult, searchKey, parseAirnow, airAt, shapePollen };
+module.exports = { app, shapeNotify, oklchHex, ogSvg, shapeRadarFrames, mrmsCropQuery, shapePlume, shapePtype, latestReadyRun, snowInches, shapeMemberSeries, shapeEnsembleMean, processSref, pickSettings, takeToken, bucketObservations, mergeMetars, zoneByLongitude, validZone, photonResult, searchKey, parseAirnow, airAt, shapePollen };
