@@ -1010,18 +1010,17 @@ def rtma_hi_frame():
     return newest_published('rtmahi', cands, RTMA_TTL_S)
 
 
-def hi_frame(frame, newest=None):
+def hi_frame(frame):
     """The Hawaii frame painted where a CONUS frame is off its grid: the same RRFS
-    run on the Hawaii grid, or for an RTMA-RU analysis the newest hourly Hawaii
-    analysis out when that one came out (clamped to newest, the newest published).
-    None if there is none."""
+    run on the Hawaii grid, or for an RTMA-RU analysis the hourly Hawaii analysis
+    usually out when that one came out. Fixed per frame (tiles are cached for a day),
+    so one that is not out yet makes a Partial answer, not an older hour. None for others."""
     src, date, cycle, fh = frame
     if src == 'rrfs':
         return ('rrfshi', date, cycle, fh)
-    d, c = (newest or rtma_hi_frame()) if src == 'rtma' else (None, None)
-    if not d:
+    if src != 'rtma':
         return None
-    t = time.gmtime(min((frame_time(*frame) - RTMA_HI_LAG_S) // 3600 * 3600, frame_time('rtmahi', d, c, 0)))
+    t = time.gmtime((frame_time(*frame) - RTMA_HI_LAG_S) // 3600 * 3600)
     return ('rtmahi', time.strftime('%Y%m%d', t), time.strftime('%H', t), 0)
 
 
@@ -1070,7 +1069,7 @@ def purge_fields():
     runs = {src: forecast_runs(src) for src in CROPS}
     live |= {(src, *run) for src, (cur, prev) in runs.items() for run in (cur, prev) if run and run[0]}
     if rtmahi[0]:
-        live |= {('rtmahi', *rtmahi)} | {hi_frame(('rtma', d, c, 0), rtmahi)[:3] for d, c in rtma}
+        live |= {('rtmahi', *rtmahi)} | {hi_frame(('rtma', d, c, 0))[:3] for d, c in rtma}
     live |= {('rrfshi', d, c) for d, c in cycles if d}   # the map's Hawaii runs (hi_frame)
     keep = {os.path.basename(frame_dir(*f)) for f in live}
     known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set()) \
@@ -1159,6 +1158,13 @@ class NotPublished(Exception):
     pass
 
 
+class Partial(Exception):
+    """An answer missing its Hawaii part (not out yet, or S3 failed): served, never cached."""
+    def __init__(self, body):
+        super().__init__('partial')
+        self.body = body
+
+
 def field_arrays(name, frame, cached_only=False):
     """Decoded messages of one field for a frame, fetching unless cached_only."""
     if cached_only:
@@ -1175,17 +1181,18 @@ def field_arrays(name, frame, cached_only=False):
 
 def with_hi(fn, frame, off, lat, lon):
     """fn(frame) with the Hawaii frame's fn() filled in where off() of it is true,
-    if lat/lon reach Hawaii. A Hawaii frame that fails (not out yet) leaves the CONUS one."""
+    if lat/lon reach Hawaii. A Hawaii frame that fails raises Partial with the CONUS one."""
     out = fn(frame)
     w, s, e, n = HI_BBOX
     hi = hi_frame(frame) if np.min(lon) <= e and np.max(lon) >= w and np.min(lat) <= n and np.max(lat) >= s else None
     if hi:
         try:
-            out = [np.where(off(a), b, a) for a, b in zip(out, fn(hi))]
+            return [np.where(off(a), b, a) for a, b in zip(out, fn(hi))]
         except NotPublished:
             pass
-        except Exception as err:  # noqa: BLE001 - CONUS alone still serves
+        except Exception as err:  # noqa: BLE001 - CONUS alone still serves, uncached
             print(f'[FIELD] {hi}: {err!r}', flush=True)
+        raise Partial(out)
     return out
 
 
@@ -1193,9 +1200,17 @@ def tile_png(name, frame, z, x, y):
     t = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
     lon = ((x + t) / 2 ** z * 360 - 180)[None, :]
     lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + t) / 2 ** z))))[:, None]
-    parts = [(with_hi(lambda f: [paint(FIELDS[n], *field_arrays(n, f), lat, lon)[0]], frame, lambda a: a == 255, lat, lon)[0],
-              field_palette(FIELDS[n])) for n in FIELDS[name].get('layers', [name])]
-    return indexed_png(*(composite(*parts) if len(parts) > 1 else parts[0]))
+    parts, partial = [], False
+    for n in FIELDS[name].get('layers', [name]):
+        try:
+            px = with_hi(lambda f: [paint(FIELDS[n], *field_arrays(n, f), lat, lon)[0]], frame, lambda a: a == 255, lat, lon)
+        except Partial as p:
+            px, partial = p.body, True
+        parts.append((px[0], field_palette(FIELDS[n])))
+    png = indexed_png(*(composite(*parts) if len(parts) > 1 else parts[0]))
+    if partial:
+        raise Partial(png)
+    return png
 
 
 def grid_axes():
@@ -1203,15 +1218,19 @@ def grid_axes():
     return np.arange(n, s - 1e-9, -FIELD_GRID_STEP), np.arange(w, e + 1e-9, FIELD_GRID_STEP)
 
 
-@functools.lru_cache(maxsize=24)
+@functools.lru_cache(maxsize=24)   # a Partial raises through, so it is not kept
 def field_grid(name, frame):
     """int8 lat/lon grid (rows north to south), -128 off the grids: the field
     value times its grid scale, or for 'uv' fields earth-relative u then v in
     0.5 m/s. Gusts have no direction of their own: their vectors take the 10 m
     wind's direction at the gust's speed. Sent as pack_grid bytes."""
     lat, lon = grid_axes()
-    q = with_hi(lambda f: grid_layers(name, f, lat, lon), frame, lambda a: a == -128, lat, lon)
-    return pack_grid(np.concatenate([a.ravel() for a in q]))
+    pack = lambda q: pack_grid(np.concatenate([a.ravel() for a in q]))
+    try:
+        q = with_hi(lambda f: grid_layers(name, f, lat, lon), frame, lambda a: a == -128, lat, lon)
+    except Partial as p:
+        raise Partial(pack(p.body))
+    return pack(q)
 
 
 def grid_layers(name, frame, lat, lon):
@@ -3745,12 +3764,18 @@ class Handler(BaseHTTPRequestHandler):
                     body, ctype = tile_png(name, frame, int(z), int(x), int(y)), 'image/png'
                 else:
                     body, ctype = field_grid(name, frame), 'application/octet-stream'
+            except Partial as p:
+                body, ctype, partial = p.body, 'image/png' if kind == 'png' else 'application/octet-stream', True
             except NotPublished:
                 return self.send_json(404, {'error': 'Not published'})
             except Exception as err:  # noqa: BLE001 - report any failure upstream
                 print(f'[FIELD] {name} {frame}: {err}', flush=True)
                 return self.send_json(502, {'error': str(err)})
+            else:
+                partial = False
             self.send_response(200)
+            if partial:
+                self.send_header('Cache-Control', 'no-store')   # the backend's day-long cache skips it
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()

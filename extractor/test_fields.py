@@ -184,8 +184,8 @@ assert 'rrfshi2026092812' in purge_with(live, [('20260928', '1615')], hi=('20260
 X.rtma_hi_frame = lambda: ('20260928', '16')
 assert X.hi_frame(('rrfs', '20260928', '12', 5)) == ('rrfshi', '20260928', '12', 5)
 assert [X.hi_frame(('rtma', '20260928', c, 0)) for c in ('1600', '1615', '1630', '1645', '1745')] == \
-    [('rtmahi', '20260928', h, 0) for h in ('15', '15', '16', '16', '16')], 'hourly step at :30, never past the newest'
-assert X.hi_frame(('rtma', '20260929', '0015', 0)) == ('rtmahi', '20260928', '16', 0)
+    [('rtmahi', '20260928', h, 0) for h in ('15', '15', '16', '16', '17')], 'hourly step at :30, fixed per frame'
+assert X.hi_frame(('rtma', '20260929', '0015', 0)) == ('rtmahi', '20260928', '23', 0)
 hi_up = True
 temps = {'rrfs': 280, 'rrfshi': 290, 'rtma': 280, ('rtmahi', '15'): 285, ('rtmahi', '16'): 295}
 
@@ -217,8 +217,19 @@ assert set(np.unique(png_px(X.tile_png('tmp', ('rtma', '20260928', '1615', 0), 7
 assert set(np.unique(png_px(X.tile_png('tmp', ('rtma', '20260928', '1645', 0), 7, *hon)))) == {tband(295)}
 with_hi_nyc = X.tile_png('tmp', rrfs, 7, *nyc)
 hi_up = False
-assert (png_px(X.tile_png('tmp', rrfs, 7, *hon)) == 255).all(), 'no Hawaii run: CONUS only, no failure'
+try:
+    X.tile_png('tmp', rrfs, 7, *hon)
+    raise AssertionError('a tile missing its Hawaii part must come back Partial')
+except X.Partial as part:
+    assert (png_px(part.body) == 255).all(), 'no Hawaii run: CONUS only, served uncached'
 assert X.tile_png('tmp', rrfs, 7, *nyc) == with_hi_nyc and (png_px(with_hi_nyc) == tband(280)).all(), 'CONUS tile unchanged'
+X.field_grid.cache_clear()
+try:
+    X.field_grid('tmp', rrfs)
+    raise AssertionError('a grid missing its Hawaii part must come back Partial')
+except X.Partial:
+    pass
+assert X.field_grid.cache_info().currsize == 0, 'a partial grid is not cached'
 assert X.point_values(rrfs, 21.31, -157.86, 'tmp') == {}
 hi_up = True
 assert X.point_values(rrfs, 21.31, -157.86, 'tmp')['tmp'] == round(X.K_TO_F(290), 2), 'Honolulu taps read the Hawaii grid'

@@ -1007,8 +1007,10 @@ async function proxyField(req, res, kind, extra, immutable) {
             { signal: AbortSignal.timeout(60000) });
         if (!up.ok) return res.status(up.status >= 500 ? 502 : up.status).end();
         res.set('Content-Type', up.headers.get('content-type'));
-        // A frame's data never changes; a point's answer grows as more fields get cached
-        res.set('Cache-Control', immutable ? 'public, max-age=86400, immutable' : 'no-store');
+        // A frame's data never changes; a point's answer grows as more fields get cached, and a
+        // tile still missing its Hawaii part (the extractor says no-store) fills in later
+        const partial = /no-store/.test(up.headers.get('cache-control') || '');
+        res.set('Cache-Control', immutable && !partial ? 'public, max-age=86400, immutable' : 'no-store');
         res.send(Buffer.from(await up.arrayBuffer()));
     } catch {
         res.status(502).end();
