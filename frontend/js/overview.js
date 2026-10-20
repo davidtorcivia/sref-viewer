@@ -1390,7 +1390,7 @@ function plumePanel(f) {
     const legend = el('div', 'plume-legend');
     const foot = el('div', 'panel-foot');
     const more = el('a', 'text-link', `Full plumes for ${st.id}`);
-    more.href = `/plumes?station=${encodeURIComponent(st.id)}&model=refs`;
+    more.href = `/plumes?station=${encodeURIComponent(st.id)}&model=refs${zone ? `&tz=${encodeURIComponent(zone)}` : ''}`;
     foot.append(el('span', null, `REFS ensemble at ${st.id}, ${st.km} km away`), more);
     sec.append(head, trend, readout, chart, legend, foot);
 

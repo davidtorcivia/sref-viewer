@@ -402,8 +402,18 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
 }
 
 // ============ Scrub readout ============
+// Times read in the station's zone: the overview's place zone (?tz=), Hawaii for Hawaii's PH stations, else Eastern
+const TZ_PARAM = (() => {
+    const z = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('tz');
+    try { return z && /^[A-Za-z_]+\/[A-Za-z_\/+-]{1,40}$/.test(z) ? (new Intl.DateTimeFormat('en-US', { timeZone: z }), z) : null; } catch { return null; }
+})();
+export let zone = 'America/New_York';
+export function setStationZone(station) {
+    zone = TZ_PARAM || (/^PH/i.test(station || '') ? 'Pacific/Honolulu' : 'America/New_York');
+    return zone;
+}
 const fmtTime = x => new Date(x).toLocaleString('en-US', {
-    weekday: 'short', hour: 'numeric', timeZone: 'America/New_York'
+    weekday: 'short', hour: 'numeric', timeZone: zone
 });
 
 const STEP = 30 * 60000;  // scrub resolution
@@ -457,7 +467,7 @@ const MAP_LAYER = { 'Total-SNO': 'snow', '3hrly-SNO': 'snow', 'Total-QPF': 'prec
 const HOLD_MS = 3000;   // readout stays on the scrubbed time after a touch, so its map link can be tapped
 
 const fmtReadoutTime = x => new Date(x).toLocaleString('en-US', {
-    weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+    weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: zone
 });
 
 function renderReadout(chart) {

@@ -27,7 +27,10 @@ global.Chart = class extends Chart {
 };
 
 (async () => {
-    const { createChart, toggleCore, destroyAllCharts } = await import('./js/charts.js');
+    const { createChart, toggleCore, destroyAllCharts, setStationZone } = await import('./js/charts.js');
+    // Plume times: Hawaii's PH stations read Hawaii time, the rest Eastern (no ?tz= here)
+    assert.deepEqual(['PHNL', 'phto', 'JFK', 'KATL', ''].map(setStationZone),
+        ['Pacific/Honolulu', 'Pacific/Honolulu', 'America/New_York', 'America/New_York', 'America/New_York']);
     for (const mode of ['spaghetti', 'bands', 'both']) {
         window.innerWidth = mode === 'bands' ? 390 : 1200;
         window.matchMedia = () => ({ matches: mode === 'bands' });
