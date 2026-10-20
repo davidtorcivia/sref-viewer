@@ -2096,7 +2096,7 @@ def mrms_flow_array(field, d='conus'):
     return np.frombuffer(zlib.decompress(field), np.int8).reshape(MRMS_GRIDS[d].flow_ny, MRMS_GRIDS[d].flow_nx, 2)
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=8)   # 4 per grid
 def mrms_mean_flow(t, d='conus'):
     """Nowcast motion at scan t: the mean field over the last MRMS_FLOW_MEAN seconds."""
     fields = [f for s in mrms_times(d) if t - MRMS_FLOW_MEAN < s <= t and (f := mrms_flow_field(s, d)) is not None]
@@ -3871,8 +3871,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if url.path == '/mrms':
             frames = mrms_times()[-MRMS_FRAMES:]
-            src = frames and mrms_snow_src(frames[-1])
-            snow = src is not None and bool(src) and mrms_has_snow(src)
+            # the legend's Snow row: snow in any grid's newest type (Mauna Kea's summit too)
+            snow = bool(frames) and any((s := mrms_snow_src(frames[-1], d)) and mrms_has_snow(s, d) for d in MRMS_GRIDS)
             return self.send_json(200, {'frames': frames, 'snow': snow})
         if url.path == '/mrms/palette.png':
             return self.send_png(MRMS_PALETTE_PNG)
