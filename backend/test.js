@@ -105,8 +105,8 @@ assert.strictEqual(five.find(h => h.t === at('2026-09-28T18:00Z')).tmp, 53.6);
 // Place zones: NWS names pass, anything else is refused; longitude fallback bands
 assert.ok(validZone('America/Los_Angeles') && validZone('America/Indiana/Indianapolis'));
 assert.ok(!validZone('Nowhere/Land') && !validZone('UTC') && !validZone('../x') && !validZone(null));
-assert.deepStrictEqual([-74, -90, -105, -118].map(zoneByLongitude),
-    ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles']);
+assert.deepStrictEqual([-74, -90, -105, -118, -157.86].map(zoneByLongitude),
+    ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Pacific/Honolulu']);
 // Photon features become results named like the Nominatim ones
 {
     const { photonResult, searchKey } = require('./server');

@@ -1103,10 +1103,10 @@ const validZone = z => {
     if (typeof z !== 'string' || z.length > 48 || !TZ_NAME.test(z)) return false;
     try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return true; } catch { return false; }
 };
-// ponytail: lower-48 longitude bands, an approximation (Arizona, the Indiana
-// and Dakota splits, Alaska and Hawaii come out wrong); NWS answers cover those
+// ponytail: lower-48 longitude bands plus Hawaii, an approximation (Arizona, the
+// Indiana and Dakota splits come out wrong); NWS answers cover those
 const zoneByLongitude = lon => lon > -87.5 ? 'America/New_York' : lon > -101 ? 'America/Chicago'
-    : lon > -114.5 ? 'America/Denver' : 'America/Los_Angeles';
+    : lon > -114.5 ? 'America/Denver' : lon > -140 ? 'America/Los_Angeles' : 'Pacific/Honolulu';
 async function placeZone(lat, lon, waitMs = 1500) {
     let timer;
     const late = new Promise(r => { timer = setTimeout(r, waitMs, null); });
@@ -1164,6 +1164,8 @@ function photonResult(f) {
 
 // Forward search goes to Photon (komoot): built for type-ahead, no one-a-second
 // queue. A few requests at a time; Nominatim is the fallback when it fails.
+// Both are boxed to the forecast area: the lower 48 and Hawaii (Alaska stays out).
+const SEARCH_LIMIT = 6;
 const PHOTON_MAX_ACTIVE = 4;
 let photonActive = 0;
 const photonWaiting = [];
@@ -1171,7 +1173,8 @@ async function photon(q) {
     if (photonActive >= PHOTON_MAX_ACTIVE) await new Promise(r => photonWaiting.push(r));   // slot handed over
     else photonActive++;
     try {
-        return await getJson('https://photon.komoot.io/api/?limit=6&lang=en&bbox=-125,24,-66,50'
+        // the box also takes in Mexico, whose results the US filter drops: ask for extra
+        return await getJson(`https://photon.komoot.io/api/?limit=${SEARCH_LIMIT * 2}&lang=en&bbox=-161,18,-66,50`
             + `&osm_tag=!highway:bus_stop&q=${encodeURIComponent(q)}`, 2500);
     } finally {
         const next = photonWaiting.shift();
@@ -1186,13 +1189,13 @@ async function forwardSearch(q) {
         results = (data.features || []).filter(f => f.properties?.countrycode === 'US' && f.geometry).map(photonResult);
     } catch (err) {
         console.warn(`Photon search failed (${err.message}); using Nominatim`);
-        // Bounded to the forecast area (the lower 48): the models cover nothing else
-        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=6`
-            + `&viewbox=-134,53,-61,21&bounded=1&q=${encodeURIComponent(q)}`);
+        // Bounded to the forecast area (the lower 48 and Hawaii): the models cover nothing else
+        const rows = await nominatim(`search?format=jsonv2&addressdetails=1&countrycodes=us&limit=${SEARCH_LIMIT}`
+            + `&viewbox=-161,53,-61,18&bounded=1&q=${encodeURIComponent(q)}`);
         results = rows.map(nominatimResult);
     }
     const seen = new Set();
-    return results.filter(r => !seen.has(r.name + '|' + r.detail) && seen.add(r.name + '|' + r.detail));
+    return results.filter(r => !seen.has(r.name + '|' + r.detail) && seen.add(r.name + '|' + r.detail)).slice(0, SEARCH_LIMIT);
 }
 
 // Forward answers cached a day by normalized query; concurrent identical queries share one lookup
