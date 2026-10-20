@@ -402,16 +402,24 @@ export function createChart(param, data, overlayData = [], viewMode = 'spaghetti
 }
 
 // ============ Scrub readout ============
-// Times read in the station's zone: the overview's place zone (?tz=), Hawaii for Hawaii's PH stations, else Eastern
-const TZ_PARAM = (() => {
-    const z = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('tz');
-    try { return z && /^[A-Za-z_]+\/[A-Za-z_\/+-]{1,40}$/.test(z) ? (new Intl.DateTimeFormat('en-US', { timeZone: z }), z) : null; } catch { return null; }
+// Times read in the station's zone: the overview's place zone (?tz=) for the station it came with,
+// Hawaii for Hawaii's PH stations, else Eastern
+const URL_TZ = (() => {
+    const q = typeof location === 'undefined' ? null : new URLSearchParams(location.search);
+    const z = q?.get('tz');
+    try {
+        return z && /^[A-Za-z_]+\/[A-Za-z_\/+-]{1,40}$/.test(z)
+            ? (new Intl.DateTimeFormat('en-US', { timeZone: z }), { zone: z, station: (q.get('station') || '').toUpperCase() }) : null;
+    } catch { return null; }
 })();
 export let zone = 'America/New_York';
 export function setStationZone(station) {
-    zone = TZ_PARAM || (/^PH/i.test(station || '') ? 'Pacific/Honolulu' : 'America/New_York');
+    zone = URL_TZ && URL_TZ.station === (station || '').toUpperCase() ? URL_TZ.zone
+        : /^PH/i.test(station || '') ? 'Pacific/Honolulu' : 'America/New_York';
     return zone;
 }
+// The URL's zone, for share links of the station it came with
+export const urlZone = station => (URL_TZ && URL_TZ.station === (station || '').toUpperCase() ? URL_TZ.zone : null);
 const fmtTime = x => new Date(x).toLocaleString('en-US', {
     weekday: 'short', hour: 'numeric', timeZone: zone
 });

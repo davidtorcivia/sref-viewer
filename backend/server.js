@@ -1349,17 +1349,33 @@ function metarFeature(m) {
         windDirection: { value: typeof m.wdir === 'number' ? m.wdir : null },   // 'VRB' has none
         // a trace (P0000, 0.005 in) is not measurable rain
         precipitationLastHour: { value: typeof m.precip === 'number' ? (m.precip < 0.01 ? 0 : m.precip * 25.4) : null },
-        cloudLayers: (m.clouds || []).map(c => ({ amount: c.cover, base: { value: c.base == null ? null : c.base * 0.3048 } }))
+        // a clear sky (and CAVOK, or vertical visibility as OVX) has no layers, only the top-level cover
+        cloudLayers: m.clouds?.length
+            ? m.clouds.map(c => ({ amount: c.cover, base: { value: c.base == null ? null : c.base * 0.3048 } }))
+            : m.cover ? [{ amount: { CAVOK: 'CLR', OVX: 'VV' }[m.cover] || m.cover, base: { value: null } }] : []
     } };
 }
 
 // The NWS feed drops reports (PHNL: 8 of 24 hours missing, others with a null temperature the METAR
-// text has); the AWC's METARs fill each report time NWS has no temperature for
+// text has); the AWC's METARs fill each report time NWS has no temperature for. Where NWS has the
+// report, its empty fields are filled in place, so its own text (Snow, Fog) stays
 function mergeMetars(features, metars) {
-    const ok = new Set(features.filter(f => f.properties?.temperature?.value != null)
-        .map(f => Math.floor(Date.parse(f.properties.timestamp) / MINUTE)));
-    return features.concat((metars || []).filter(m => m.obsTime && m.temp != null && !ok.has(Math.floor(m.obsTime / 60)))
-        .map(metarFeature));
+    const byMinute = new Map(features.filter(f => Number.isFinite(Date.parse(f.properties?.timestamp)))
+        .map(f => [Math.floor(Date.parse(f.properties.timestamp) / MINUTE), f]));
+    const added = [];
+    for (const m of metars || []) {
+        if (!m.obsTime || m.temp == null) continue;
+        const nws = byMinute.get(Math.floor(m.obsTime / 60));
+        if (nws?.properties.temperature?.value != null) continue;
+        const p = metarFeature(m).properties;
+        if (!nws) { added.push({ properties: p }); continue; }
+        for (const [k, v] of Object.entries(p)) {
+            const cur = nws.properties[k];
+            const empty = cur == null || cur === '' || (Array.isArray(cur) ? !cur.length : typeof cur === 'object' && cur.value == null);
+            if (empty) nws.properties[k] = v;
+        }
+    }
+    return features.concat(added);
 }
 
 function stationObservations(id) {

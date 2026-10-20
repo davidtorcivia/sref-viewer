@@ -7,7 +7,7 @@ import {
     isMobile, setWindUnit, getWindUnit, convertWind, formatValue, cycleEpoch
 } from './config.js?v=__V__';
 import { fetchModelData, hasSnowForecast, getEnsembleStats } from './api.js?v=__V__';
-import { createChart, toggleCore, destroyAllCharts, exportChartPng, setStationZone, zone } from './charts.js?v=__V__';
+import { createChart, toggleCore, destroyAllCharts, exportChartPng, setStationZone, zone, urlZone } from './charts.js?v=__V__';
 import { applySiteSettings } from './site.js?v=__V__';
 
 // ============ State ============
@@ -214,7 +214,7 @@ function renderNextRun() {
 
 function shareUrl(pinRun = true) {
     const p = new URLSearchParams({ model: state.model, station: state.station });
-    const tz = new URLSearchParams(location.search).get('tz');
+    const tz = urlZone(state.station);
     if (tz) p.set('tz', tz);
     if (pinRun) {
         p.set('run', state.run);

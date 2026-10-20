@@ -31,6 +31,12 @@ global.Chart = class extends Chart {
     // Plume times: Hawaii's PH stations read Hawaii time, the rest Eastern (no ?tz= here)
     assert.deepEqual(['PHNL', 'phto', 'JFK', 'KATL', ''].map(setStationZone),
         ['Pacific/Honolulu', 'Pacific/Honolulu', 'America/New_York', 'America/New_York', 'America/New_York']);
+    // A ?tz= belongs to the station it came with
+    global.location = { search: '?station=phnl&tz=Pacific/Honolulu' };
+    const z = await import('./js/charts.js?tz');
+    assert.deepEqual(['PHNL', 'KNYC'].map(z.setStationZone), ['Pacific/Honolulu', 'America/New_York']);
+    assert.deepEqual(['PHNL', 'KNYC'].map(z.urlZone), ['Pacific/Honolulu', null]);
+    delete global.location;
     for (const mode of ['spaghetti', 'bands', 'both']) {
         window.innerWidth = mode === 'bands' ? 390 : 1200;
         window.matchMedia = () => ({ matches: mode === 'bands' });
