@@ -3237,7 +3237,12 @@ def nc_summary(t, rows):
 # Each hourly run's first HRRR_HOURS hours live in RAM as rate dBZ (Marshall-Palmer)
 # quantized like MRMS plus a kind code per cell, zlib per step, a few MB a run.
 # Column-max REFC would exaggerate the surface rate.
-HRRR_URL = os.environ.get('HRRR_URL', 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{date}/conus/hrrr.t{cycle}z.wrfsubhf{fh}.grib2')
+HRRR_URL = os.environ.get('HRRR_URL', 'https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{date}/conus/hrrr.t{cycle}z.wrfsubhf{fh:02d}.grib2')
+# HRRR has no Hawaii domain: there the RRFS's 15-minute output on its Mercator grid stands in.
+# Hourly cycles f001-f018, out ~2h20m after the cycle; whole hours read '1 hour fcst', not '60 min fcst'.
+HRRR_URL_HI = os.environ.get(
+    'RRFS_SUBH_URL_HI',
+    'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.2p5km.subh.f{fh:03d}.hi.grib2')
 HRRR_STEP = 900
 HRRR_HOURS = 8                              # a run up to 2 hours old still reaches 6 hours ahead
 HRRR_AHEAD = 6 * 3600                       # served past the scan
@@ -3245,17 +3250,22 @@ HRRR_POLL = 300
 HRRR_MIN_MMH = 0.05                         # below this nothing (~-4 dBZ)
 HRRR_FLAGS = (('CSNOW', 1), ('CICEP', 3), ('CFRZR', 4))   # flag -> kind; the higher code wins where several are set
 _hrrr = (None, None, {})                    # (run epoch, grid params, {valid epoch: (zlib q, zlib kind)}), swapped whole
+_hrrr_hi = (None, None, {})                 # the same of the Hawaii RRFS run
+# domain -> (label, URL, hours kept, .idx step text of a minute); Hawaii's run is older when out, so keeps 10 hours
+HRRR_MODELS = {'conus': ('HRRR', HRRR_URL, HRRR_HOURS, lambda m: f'{m} min fcst'),
+               'hi': ('RRFS HI', HRRR_URL_HI, 10, lambda m: f'{m // 60} hour fcst' if m % 60 == 0 else f'{m} min fcst')}
 
 
-def hrrr_fetch(date, cycle):
-    """(params, {valid: (zlib q, zlib kind)}) of a run's first HRRR_HOURS hours."""
+def hrrr_fetch(date, cycle, dom='conus'):
+    """(params, {valid: (zlib q, zlib kind)}) of a run's first hours kept."""
+    _, url_t, hours, step = HRRR_MODELS[dom]
     run = calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H'))
     steps, p = {}, None
-    for fh in range(1, HRRR_HOURS + 1):
-        url = HRRR_URL.format(date=date, cycle=cycle, fh=f'{fh:02d}')
+    for fh in range(1, hours + 1):
+        url = url_t.format(date=date, cycle=cycle, fh=fh)
         for k in range(1, 5):
             minute = (fh - 1) * 60 + 15 * k
-            msgs = fetch_idx_fields(url, [('PRATE', 'surface')] + [(f, 'surface') for f, _ in HRRR_FLAGS], f'{minute} min fcst')
+            msgs = fetch_idx_fields(url, [('PRATE', 'surface')] + [(f, 'surface') for f, _ in HRRR_FLAGS], step(minute))
             if msgs is None:
                 raise NotPublished
             vals = []
@@ -3275,9 +3285,10 @@ def hrrr_fetch(date, cycle):
     return p, steps
 
 
-def hrrr_poller():
-    """Keep the newest HRRR run whose last needed hour is out."""
-    global _hrrr
+def hrrr_poller(dom='conus'):
+    """Keep the domain's newest run whose last needed hour is out."""
+    global _hrrr, _hrrr_hi
+    label, url_t, hours, _ = HRRR_MODELS[dom]
     while True:
         try:
             now = time.time()
@@ -3285,18 +3296,25 @@ def hrrr_poller():
             for back in range(1, 6):
                 t = time.gmtime(now - back * 3600)
                 date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-                cands.append((date, cycle, HRRR_URL.format(date=date, cycle=cycle, fh=f'{HRRR_HOURS:02d}') + '.idx'))
-            date, cycle = newest_published('hrrr', cands, HRRR_POLL - 30)
+                cands.append((date, cycle, url_t.format(date=date, cycle=cycle, fh=hours) + '.idx'))
+            date, cycle = newest_published(f'hrrr-{dom}', cands, HRRR_POLL - 30)
             run = date and calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H'))
-            if run and run != _hrrr[0]:
+            if run and run != hrrr_ring(dom)[0]:
                 t0 = time.time()
-                p, steps = hrrr_fetch(date, cycle)
-                _hrrr = (run, p, steps)
-                print(f'[HRRR] {date} {cycle}Z: {len(steps)} steps in {time.time() - t0:.0f}s, '
+                p, steps = hrrr_fetch(date, cycle, dom)
+                if dom == 'hi':
+                    _hrrr_hi = (run, p, steps)
+                else:
+                    _hrrr = (run, p, steps)
+                print(f'[{label}] {date} {cycle}Z: {len(steps)} steps in {time.time() - t0:.0f}s, '
                       f'{sum(len(a) + len(b) for a, b in steps.values()) // 1024}KB', flush=True)
         except Exception as err:  # noqa: BLE001 - radar-only minutes meanwhile
-            print(f'[HRRR] {err}', flush=True)
+            print(f'[{label}] {err}', flush=True)
         time.sleep(HRRR_POLL)
+
+
+def hrrr_ring(dom):
+    return _hrrr_hi if dom == 'hi' else _hrrr
 
 
 def hrrr_read(q, kind, p, lat, lon, radius_km):
@@ -3321,13 +3339,15 @@ NC_CELL_KM = 1.0                            # ponytail: an MRMS cell as ~1 km (1
 
 def hrrr_point(lat, lon, t):
     """(run, [(valid, rate, p, kind)]) of the kept HRRR run at lat/lon from the step before
-    scan t to HRRR_AHEAD past it, the neighborhood widening with the lead from t like the radar's."""
-    return hrrr_point_run(lat, lon, t, _hrrr[0])
+    scan t to HRRR_AHEAD past it, the neighborhood widening with the lead from t like the radar's.
+    Hawaii reads the RRFS run instead."""
+    dom = ens_dom(lat, lon)
+    return hrrr_point_run(lat, lon, t, dom, hrrr_ring(dom)[0])
 
 
 @functools.lru_cache(maxsize=256)
-def hrrr_point_run(lat, lon, t, key):
-    run, p, steps = _hrrr                   # key: the run, so a new one is not answered from the cache
+def hrrr_point_run(lat, lon, t, dom, key):
+    run, p, steps = hrrr_ring(dom)          # key: the run, so a new one is not answered from the cache
     if run is None:
         return None, []
     out = []
@@ -3790,6 +3810,7 @@ if __name__ == '__main__':
     threading.Thread(target=mrms_poller, daemon=True).start()
     threading.Thread(target=nx_poller, daemon=True).start()
     threading.Thread(target=hrrr_poller, daemon=True).start()
+    threading.Thread(target=hrrr_poller, args=('hi',), daemon=True).start()
     print(f'[NOWCAST] {nc_load(time.time())} forecasts awaiting scoring taken back; '
           f'learned {nc_learn(read_json(NC_SCORE_FILE) or {})}', flush=True)
 

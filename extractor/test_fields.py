@@ -47,6 +47,7 @@ for k, v in (('Ni', 321), ('Nj', 225), ('LaDInDegrees', 20.0), ('shapeOfTheEarth
     ec.codes_set(m, k, v)
 ec.codes_set_values(m, np.full(321 * 225, 273.15))
 mp = X.grid_params(m)
+MERCATOR_MSG = ec.codes_get_message(m)       # the Hawaii model test's grid
 assert mp['gridType'] == 'mercator'
 mlats, mlons = ec.codes_get_array(m, 'latitudes'), ec.codes_get_array(m, 'longitudes')
 fi, fj = X.grid_ij(mp, mlats, np.where(mlons > 180, mlons - 360, mlons))
@@ -573,6 +574,31 @@ X.mrms_mean_flow = lambda t: zlib.compress(field.tobytes())
 nc = X.nowcast_at(t1, 0, lat, lon)
 assert nc['kind'][120] == 'freezing rain' and nc['rain']['kind'] == 'freezing rain' and 'snow' not in nc, nc['rain']
 assert nc['hrrr']['kind'][nc['hrrr']['times'].index(t1 + 5400)] == 'freezing rain'
+# Hawaii's model: the RRFS 15-minute files on the Mercator grid, whole hours read 'N hour fcst'
+asked = []
+hm = ec.codes_new_from_message(MERCATOR_MSG)
+ec.codes_set_values(hm, np.full(321 * 225, 2 / 3600))      # 2 mm/h of PRATE (mm/s); the flags read it too, > 0.5 is off
+hmsg = ec.codes_get_message(hm)
+ec.codes_release(hm)
+real_fetch = X.fetch_idx_fields
+X.fetch_idx_fields = lambda url, wanted, step: asked.append((url, step)) or [hmsg] * len(wanted)
+hi = dict(X.HRRR_MODELS)
+X.HRRR_MODELS['hi'] = hi['hi'][:2] + (2,) + hi['hi'][3:]
+hrun = calendar.timegm((2026, 10, 20, 5, 0, 0))
+hip, hsteps = X.hrrr_fetch('20261020', '05', 'hi')
+X.fetch_idx_fields, X.HRRR_MODELS = real_fetch, hi
+assert [s for _, s in asked] == ['15 min fcst', '30 min fcst', '45 min fcst', '1 hour fcst',
+                                 '75 min fcst', '90 min fcst', '105 min fcst', '2 hour fcst'], asked
+assert asked[0][0].endswith('rrfs.20261020/05/rrfs.t05z.2dfld.2p5km.subh.f001.hi.grib2') and asked[4][0].endswith('subh.f002.hi.grib2')
+assert sorted(hsteps) == [hrun + 900 * k for k in range(1, 9)] and hip['gridType'] == 'mercator'
+X.hrrr_point_run.cache_clear()
+X._hrrr, X._hrrr_hi = (None, None, {}), (hrun, hip, hsteps)
+hrun_, hpts = X.hrrr_point(21.3069, -157.8583, hrun)
+assert hrun_ == hrun and [v for v, *_ in hpts] == [hrun + 900 * k for k in range(1, 9)], hpts
+assert all(abs(r - 2) < 0.1 and pw == 1 and kd == 0 for _, r, pw, kd in hpts), hpts
+assert X.hrrr_point(40.7, -74.0, hrun) == (None, []), 'New York reads HRRR, not the Hawaii run'
+X._hrrr, X._hrrr_hi = X._hrrr_hi, (None, None, {}); X.hrrr_point_run.cache_clear()
+assert X.hrrr_point(21.3069, -157.8583, hrun) == (None, []), 'Honolulu reads the Hawaii run, not HRRR'
 # radar snow from PrecipFlag: the same 40 dBZ band as snow is heavy snow by the snow relation
 X._hrrr = (None, None, {}); X._mrms.clear(); X.nowcast_at.cache_clear()
 band = scan(0)
