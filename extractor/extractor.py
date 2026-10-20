@@ -69,6 +69,7 @@ import urllib.request
 import urllib.error
 import warnings
 import zlib
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1830,8 +1831,8 @@ def forecast(lat, lon, tz=DAILY_TZ):
 
 
 # ============ MRMS radar (observed reflectivity, 2-minute scans) ============
-# SeamlessHSR (hybrid scan reflectivity mosaicked over CONUS) from the public
-# noaa-mrms-pds bucket: a ~1.2MB gzipped GRIB2 every 2 minutes, published
+# SeamlessHSR (hybrid scan reflectivity mosaicked over CONUS, and over Hawaii) from the public
+# noaa-mrms-pds bucket: a ~1.2MB (Hawaii ~45KB) gzipped GRIB2 every 2 minutes, published
 # ~60s after the scan. The last MRMS_FRAMES scans live in RAM only, never on
 # disk: uint8 in 0.5 dBZ steps (0 no echo, 255 no coverage), zlib-compressed
 # in row strips so a tile inflates only the rows it spans. MRMS carries no
@@ -1850,7 +1851,7 @@ MRMS_CROP_MAX = 2048                        # crop texture side cap (pixels)
 # Motion: Farneback between each scan and the one MRMS_FLOW_SPAN before it (2-minute
 # pairs move under a pixel), on quarter-res images, kept at 1/MRMS_FLOW_RES res.
 # Flow units (radar-gl.js reads the same): int8 v, v / MRMS_FLOW_SCALE
-# = 0.01° grid cells moved per 2 minutes, x toward east, y toward south; served
+# = grid cells (of the scan's grid: X-Crop's cell) moved per 2 minutes, x toward east, y toward south; served
 # as bytes v + 128 (R = x, G = y). Forward motion: a scan's echo at p came from p - v.
 # B = data age in MRMS_AGE_UNIT seconds: each radar updates every 4-10 minutes, so
 # the mosaic repeats unchanged data for some 2-minute scans; the page moves each
@@ -1861,6 +1862,14 @@ MRMS_FLOW_RES = 8
 MRMS_FLOW_SCALE = 8
 MRMS_FLOW_MEAN = 1800                       # nowcast motion: mean of the fields over the last 30 minutes
 MRMS_FLOW_NY, MRMS_FLOW_NX = 438, 875       # rows padded 3500 -> 3504 so 1/8 cells line up exactly
+# One grid per domain, each at its own native resolution: CONUS (the MRMS_* constants above)
+# and Hawaii (0.005°, 2600 x 2200, same scan times). Hawaii's file says its first center is
+# 25.998N 163.998W: its edges are taken as 26N 164W, 0.0005° (~50 m) off, so its cells nest
+# 2:1 in the NEXRAD lattice (NX_RES, anchored at CONUS's corner) as CONUS's nest 4:1.
+# Flow and age fields are 1/MRMS_FLOW_RES of each grid, flow units cells of that grid.
+MrmsGrid = namedtuple('MrmsGrid', 'north west res ny nx flow_ny flow_nx prefix lat0')
+MRMS_GRIDS = {'conus': MrmsGrid(MRMS_NORTH, MRMS_WEST, MRMS_RES, MRMS_NY, MRMS_NX, MRMS_FLOW_NY, MRMS_FLOW_NX, 'CONUS', 54.995),
+              'hi': MrmsGrid(26.0, -164.0, 0.005, 2200, 2600, 275, 325, 'HAWAII', 25.998)}
 MRMS_AGE_UNIT = 10
 MRMS_AGE_MAX = 36                           # 6 minutes: a radar in precipitation mode updates at least this often,
                                             # so data unchanged for longer is steady, not stale
@@ -1886,11 +1895,12 @@ MRMS_PALETTE_PNG = raw_png(np.stack([np.where((MRMS_LUT == 255)[:, None], 0, MRM
 # Flow image: dBZ 5..64 as 20..256, weak echo and no coverage as nothing to track
 _d = np.arange(256) / 2 - 32
 MRMS_FLOW_LUT = np.where((_d >= 5) & (np.arange(256) < 255), np.clip(_d, 0, 63.75) * 4, 0).astype(np.uint8)
-_mrms = {}                                  # scan epoch -> [zlib strip]
-_mrms_small = {}                            # scan epoch -> zlib quarter-res flow image
-_mrms_flow = {}                             # scan epoch -> zlib int8 motion field (MRMS_FLOW_NY, MRMS_FLOW_NX, 2)
-_mrms_age = {}                              # scan epoch -> zlib uint8 (MRMS_FLOW_NY, MRMS_FLOW_NX) data age
-_mrms_snow = {}                             # scan epoch -> [zlib strip] uint8 1 where PrecipFlag says snow
+# Rings per domain (MRMS_GRIDS key), each {scan epoch: ...}:
+_mrms = {d: {} for d in MRMS_GRIDS}         # [zlib strip]
+_mrms_small = {d: {} for d in MRMS_GRIDS}   # zlib quarter-res flow image
+_mrms_flow = {d: {} for d in MRMS_GRIDS}    # zlib int8 motion field (flow_ny, flow_nx, 2)
+_mrms_age = {d: {} for d in MRMS_GRIDS}     # zlib uint8 (flow_ny, flow_nx) data age
+_mrms_snow = {d: {} for d in MRMS_GRIDS}    # [zlib strip] uint8 1 where PrecipFlag says snow
 MRMS_TYPE_PRODUCT = 'PrecipFlag_00.00'      # surface precip type, same grid and scans: 3 = snow
 MRMS_TYPE_AGE = 360                         # a scan without its type reads the newest one this recent
 _mrms_flow_lock = threading.RLock()         # one Farneback at a time (ages are computed under it too)
@@ -1898,9 +1908,9 @@ _mrms_lock = threading.Lock()
 _mrms_decode_lock = threading.Lock()        # one ~200MB float64 decode at a time
 
 
-def mrms_key(t):
+def mrms_key(t, d='conus'):
     s = time.strftime('%Y%m%d-%H%M%S', time.gmtime(t))
-    return f'CONUS/{MRMS_PRODUCT}/{s[:8]}/MRMS_{MRMS_PRODUCT}_{s}.grib2.gz'
+    return f'{MRMS_GRIDS[d].prefix}/{MRMS_PRODUCT}/{s[:8]}/MRMS_{MRMS_PRODUCT}_{s}.grib2.gz'
 
 
 def mrms_quantize(v):
@@ -1916,104 +1926,125 @@ def mrms_quantize(v):
     return q
 
 
-def mrms_cells(lat, lon):
+def mrms_cells(lat, lon, d='conus'):
     """Nearest grid row/column of each lat/lon (may fall off the grid)."""
-    return (np.floor((MRMS_NORTH - lat) / MRMS_RES).astype(np.int64),
-            np.floor((lon - MRMS_WEST) / MRMS_RES).astype(np.int64))
+    g = MRMS_GRIDS[d]
+    return (np.floor((g.north - lat) / g.res).astype(np.int64),
+            np.floor((lon - g.west) / g.res).astype(np.int64))
 
 
-def mrms_times():
+def mrms_domain(w, s, e, n):
+    """The grid (MRMS_GRIDS key) a lat/lon box overlaps most, or None off every grid."""
+    area = {d: max(0, min(e, g.west + g.nx * g.res) - max(w, g.west)) * max(0, min(n, g.north) - max(s, g.north - g.ny * g.res))
+            for d, g in MRMS_GRIDS.items()}
+    d = max(area, key=area.get)
+    return d if area[d] > 0 else None
+
+
+def mrms_domain_at(lat, lon):
+    """The grid a point is on, or None."""
+    return next((d for d, g in MRMS_GRIDS.items()
+                 if g.north - g.ny * g.res < lat < g.north and g.west < lon < g.west + g.nx * g.res), None)
+
+
+def mrms_times(d='conus'):
     with _mrms_lock:
-        return sorted(_mrms)
+        return sorted(_mrms[d])
 
 
 def mrms_small(q):
-    """Quarter-res uint8 image of a scan for motion tracking (rows padded to 3504)."""
-    img = np.zeros((MRMS_FLOW_NY * MRMS_FLOW_RES, MRMS_NX), np.uint8)
-    img[:MRMS_NY] = MRMS_FLOW_LUT[q]
-    return cv2.resize(img, (MRMS_NX // 4, MRMS_FLOW_NY * 2), interpolation=cv2.INTER_AREA)
+    """Quarter-res uint8 image of a scan for motion tracking (rows padded to whole flow texels)."""
+    ny = -(-q.shape[0] // MRMS_FLOW_RES) * MRMS_FLOW_RES
+    img = np.zeros((ny, q.shape[1]), np.uint8)
+    img[:q.shape[0]] = MRMS_FLOW_LUT[q]
+    return cv2.resize(img, (q.shape[1] // 4, ny // 4), interpolation=cv2.INTER_AREA)
 
 
 def mrms_strips(a):
-    return [zlib.compress(a[r:r + MRMS_STRIP].tobytes(), 6) for r in range(0, MRMS_NY, MRMS_STRIP)]
+    return [zlib.compress(a[r:r + MRMS_STRIP].tobytes(), 6) for r in range(0, len(a), MRMS_STRIP)]
 
 
-def mrms_store(t, q, small=None, snow=None):
+def mrms_store(t, q, small=None, snow=None, d='conus'):
     strips = mrms_strips(q)
     with _mrms_lock:
-        _mrms[t] = strips
+        ring = _mrms[d]
+        ring[t] = strips
         if snow is not None:
-            _mrms_snow[t] = mrms_strips(snow)
+            _mrms_snow[d][t] = mrms_strips(snow)
         if small is not None:
-            _mrms_small[t] = zlib.compress(small.tobytes(), 6)
-        for old in sorted(_mrms)[:-(MRMS_FRAMES + MRMS_GRACE)]:
-            del _mrms[old]
-        for d in (_mrms_small, _mrms_flow, _mrms_age, _mrms_snow):
-            for old in [k for k in d if k not in _mrms]:
-                del d[old]
+            _mrms_small[d][t] = zlib.compress(small.tobytes(), 6)
+        for old in sorted(ring)[:-(MRMS_FRAMES + MRMS_GRACE)]:
+            del ring[old]
+        for rd in (_mrms_small[d], _mrms_flow[d], _mrms_age[d], _mrms_snow[d]):
+            for old in [k for k in rd if k not in ring]:
+                del rd[old]
 
 
-def mrms_small_image(z):
-    return np.frombuffer(zlib.decompress(z), np.uint8).reshape(MRMS_FLOW_NY * 2, MRMS_NX // 4)
+def mrms_small_image(z, d='conus'):
+    g = MRMS_GRIDS[d]
+    return np.frombuffer(zlib.decompress(z), np.uint8).reshape(g.flow_ny * 2, g.nx // 4)
 
 
 def mrms_age_step(prev_age, a, b):
     """Data age after scan b (a: the scan before): zero where the 1/8 cell changed, else one step older."""
-    diff = cv2.resize(cv2.absdiff(a, b), (MRMS_FLOW_NX, MRMS_FLOW_NY), interpolation=cv2.INTER_AREA)
+    diff = cv2.resize(cv2.absdiff(a, b), prev_age.shape[::-1], interpolation=cv2.INTER_AREA)
     older = np.minimum(prev_age.astype(np.int16) + MRMS_STEP // MRMS_AGE_UNIT, MRMS_AGE_MAX).astype(np.uint8)
     return np.where(diff >= MRMS_CHANGED, 0, older).astype(np.uint8)
 
 
-def mrms_age(t):
-    """uint8 (MRMS_FLOW_NY, MRMS_FLOW_NX) age of scan t's data in MRMS_AGE_UNIT s. Walks
+def mrms_age(t, d='conus'):
+    """uint8 (flow_ny, flow_nx) age of scan t's data in MRMS_AGE_UNIT s. Walks
     forward from the last scan with a known age; unknown (the ring start, or past a
     scan the poller has given up on) is 0."""
+    shape = (MRMS_GRIDS[d].flow_ny, MRMS_GRIDS[d].flow_nx)
+    ring, ages, smalls = _mrms[d], _mrms_age[d], _mrms_small[d]
     with _mrms_lock:
-        done = _mrms_age.get(t)
+        done = ages.get(t)
     if done is not None:                    # no waiting on a Farneback in progress
-        return np.frombuffer(zlib.decompress(done), np.uint8).reshape(MRMS_FLOW_NY, MRMS_FLOW_NX)
+        return np.frombuffer(zlib.decompress(done), np.uint8).reshape(shape)
     with _mrms_flow_lock:
         with _mrms_lock:
             chain = [t]
-            while chain[-1] not in _mrms_age and chain[-1] - MRMS_STEP in _mrms_small:
+            while chain[-1] not in ages and chain[-1] - MRMS_STEP in smalls:
                 chain.append(chain[-1] - MRMS_STEP)
-            base, oldest = _mrms_age.get(chain[-1]), min(_mrms) if _mrms else t
+            base, oldest = ages.get(chain[-1]), min(ring) if ring else t
         age = None
         if base is not None:
-            age = np.frombuffer(zlib.decompress(base), np.uint8).reshape(MRMS_FLOW_NY, MRMS_FLOW_NX)
+            age = np.frombuffer(zlib.decompress(base), np.uint8).reshape(shape)
             if chain.pop() == t:
                 return age
         for s in reversed(chain):
             with _mrms_lock:
-                a, b = _mrms_small.get(s - MRMS_STEP), _mrms_small.get(s)
+                a, b = smalls.get(s - MRMS_STEP), smalls.get(s)
             if age is not None and a is not None and b is not None:
-                age = mrms_age_step(age, mrms_small_image(a), mrms_small_image(b))
+                age = mrms_age_step(age, mrms_small_image(a, d), mrms_small_image(b, d))
             elif s - MRMS_STEP >= oldest and not mrms_gap(s - MRMS_STEP, time.time()):
                 age = None                  # a gap mid-ring may still fill (backfill lands newest first)
                 continue
             else:
-                age = np.zeros((MRMS_FLOW_NY, MRMS_FLOW_NX), np.uint8)
+                age = np.zeros(shape, np.uint8)
             with _mrms_lock:
-                if s in _mrms:
-                    _mrms_age[s] = zlib.compress(age.tobytes(), 6)
-        return age if age is not None else np.zeros((MRMS_FLOW_NY, MRMS_FLOW_NX), np.uint8)
+                if s in ring:
+                    ages[s] = zlib.compress(age.tobytes(), 6)
+        return age if age is not None else np.zeros(shape, np.uint8)
 
 
 def mrms_age_view(age, b):
     """Age as served: change is only seen where there is echo, so blocks
     without echo take the age of the echo around them (radar update timing is
     regional), and none far from any echo."""
-    echo = cv2.resize((b > 0).astype(np.float32), (MRMS_FLOW_NX, MRMS_FLOW_NY), interpolation=cv2.INTER_AREA) > 0
+    echo = cv2.resize((b > 0).astype(np.float32), age.shape[::-1], interpolation=cv2.INTER_AREA) > 0
     w = echo.astype(np.float32)
     k = cv2.GaussianBlur(w, (0, 0), 4)
     near = cv2.GaussianBlur(age * w, (0, 0), 4) / np.maximum(k, 1e-6)
     return np.where(echo, age, np.where(k > 0.02, np.rint(near), 0)).astype(np.uint8)
 
 
-def mrms_motion(a, b, span=None):
+def mrms_motion(a, b, span=None, k=1):
     """Motion from quarter-res image a to b (MRMS_FLOW_SPAN later): int8
     (h/2, w/2, 2) in flow units. span: seconds between the two images' data
-    per 1/8 cell, when not MRMS_FLOW_SPAN. Farneback is noise where there is no echo, so
+    per 1/8 cell, when not MRMS_FLOW_SPAN. k: the grid's cells per 0.01° (the
+    smoothing is sized in km). Farneback is noise where there is no echo, so
     the field is a normalized convolution weighted by echo: smooth inside
     storms and carried into the gaps around them, so an echo can move into
     empty cells; zero far from any echo."""
@@ -2027,85 +2058,93 @@ def mrms_motion(a, b, span=None):
     def smooth(sigma):
         k = cv2.GaussianBlur(wt, (0, 0), sigma)
         return cv2.GaussianBlur(fl * wt[..., None], (0, 0), sigma) / np.maximum(k, 1e-6)[..., None], k
-    fine, kf = smooth(3)                    # ~25 km
-    coarse, kc = smooth(20)                 # ~160 km: the flow a storm carries into clear air
+    fine, kf = smooth(3 * k)                # ~25 km
+    coarse, kc = smooth(20 * k)             # ~160 km: the flow a storm carries into clear air
     near = np.clip(kf / 0.1, 0, 1)[..., None]
     v = fine * near + coarse * np.clip(kc / 0.02, 0, 1)[..., None] * (1 - near)
     # quarter px per span -> cells per 2 minutes -> flow units
     return np.clip(np.rint(v * 4 * MRMS_STEP / MRMS_FLOW_SPAN * MRMS_FLOW_SCALE), -127, 127).astype(np.int8)
 
 
-def mrms_flow_field(t):
+def mrms_flow_field(t, d='conus'):
     """Motion field of scan t (zlib int8); None while the scan MRMS_FLOW_SPAN before it is missing."""
+    flows = _mrms_flow[d]
     with _mrms_lock:
-        done, a, b = _mrms_flow.get(t), _mrms_small.get(t - MRMS_FLOW_SPAN), _mrms_small.get(t)
+        done, a, b = flows.get(t), _mrms_small[d].get(t - MRMS_FLOW_SPAN), _mrms_small[d].get(t)
     if done is not None or a is None or b is None:
         return done
     with _mrms_flow_lock:
-        if t in _mrms_flow:
-            return _mrms_flow[t]
+        if t in flows:
+            return flows[t]
         t0 = time.time()
         # the images' data are MRMS_FLOW_SPAN apart less what each had aged
-        span = MRMS_FLOW_SPAN + MRMS_AGE_UNIT * (mrms_age(t - MRMS_FLOW_SPAN).astype(np.float32) - mrms_age(t))
-        field = zlib.compress(mrms_motion(mrms_small_image(a), mrms_small_image(b), np.maximum(span, 240)).tobytes(), 6)
+        span = MRMS_FLOW_SPAN + MRMS_AGE_UNIT * (mrms_age(t - MRMS_FLOW_SPAN, d).astype(np.float32) - mrms_age(t, d))
+        field = zlib.compress(mrms_motion(mrms_small_image(a, d), mrms_small_image(b, d), np.maximum(span, 240),
+                                          MRMS_RES / MRMS_GRIDS[d].res).tobytes(), 6)
         with _mrms_lock:
-            if t in _mrms:
-                _mrms_flow[t] = field
-        print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} flow {time.time() - t0:.2f}s {len(field) // 1024}KB', flush=True)
+            if t in _mrms[d]:
+                flows[t] = field
+        print(f'{mrms_tag(d)} {time.strftime("%H:%MZ", time.gmtime(t))} flow {time.time() - t0:.2f}s {len(field) // 1024}KB', flush=True)
         return field
 
 
-def mrms_flow_array(field):
-    return np.frombuffer(zlib.decompress(field), np.int8).reshape(MRMS_FLOW_NY, MRMS_FLOW_NX, 2)
+def mrms_tag(d):
+    return '[MRMS]' if d == 'conus' else f'[MRMS {d}]'
 
 
-@functools.lru_cache(maxsize=4)
-def mrms_mean_flow(t):
+def mrms_flow_array(field, d='conus'):
+    return np.frombuffer(zlib.decompress(field), np.int8).reshape(MRMS_GRIDS[d].flow_ny, MRMS_GRIDS[d].flow_nx, 2)
+
+
+@functools.lru_cache(maxsize=8)   # 4 per grid
+def mrms_mean_flow(t, d='conus'):
     """Nowcast motion at scan t: the mean field over the last MRMS_FLOW_MEAN seconds."""
-    fields = [f for s in mrms_times() if t - MRMS_FLOW_MEAN < s <= t and (f := mrms_flow_field(s)) is not None]
+    fields = [f for s in mrms_times(d) if t - MRMS_FLOW_MEAN < s <= t and (f := mrms_flow_field(s, d)) is not None]
     if not fields:
         raise NotPublished
-    return zlib.compress(np.rint(np.mean([mrms_flow_array(f) for f in fields], 0, dtype=np.float32)).astype(np.int8).tobytes(), 6)
+    return zlib.compress(np.rint(np.mean([mrms_flow_array(f, d) for f in fields], 0, dtype=np.float32)).astype(np.int8).tobytes(), 6)
 
 
-def mrms_fetch(t):
-    """Scan t into the ring; False while S3 does not have it."""
-    if t in _mrms:
+def mrms_fetch(t, d='conus'):
+    """Scan t into domain d's ring; False while S3 does not have it."""
+    if t in _mrms[d]:
         return True
+    g = MRMS_GRIDS[d]
     t0 = time.time()
     try:
-        gz = http_get(f'{MRMS_URL}/{mrms_key(t)}')
+        gz = http_get(f'{MRMS_URL}/{mrms_key(t, d)}')
     except urllib.error.HTTPError as err:
         if err.code in (403, 404):
             return False
         raise
     with _mrms_decode_lock:
         t1 = time.time()
-        g = ec.codes_new_from_message(gzip.decompress(gz))
+        m = ec.codes_new_from_message(gzip.decompress(gz))
         try:
-            if (ec.codes_get(g, 'Ni'), ec.codes_get(g, 'Nj')) != (MRMS_NX, MRMS_NY) \
-                    or abs(ec.codes_get(g, 'latitudeOfFirstGridPointInDegrees') - 54.995) > 1e-3:
-                raise RuntimeError(f'MRMS grid changed: {mrms_key(t)}')
-            ec.codes_set(g, 'missingValue', -9999.0)
-            q = mrms_quantize(ec.codes_get_values(g).reshape(MRMS_NY, MRMS_NX))
+            if (ec.codes_get(m, 'Ni'), ec.codes_get(m, 'Nj')) != (g.nx, g.ny) \
+                    or abs(ec.codes_get(m, 'latitudeOfFirstGridPointInDegrees') - g.lat0) > 1e-3:
+                raise RuntimeError(f'MRMS grid changed: {mrms_key(t, d)}')
+            ec.codes_set(m, 'missingValue', -9999.0)
+            q = mrms_quantize(ec.codes_get_values(m).reshape(g.ny, g.nx))
         finally:
-            ec.codes_release(g)
+            ec.codes_release(m)
     try:
-        snow = mrms_snow_fetch(t)
+        snow = mrms_snow_fetch(t, d)
     except Exception as err:  # noqa: BLE001 - the scan's echo still counts, as rain
-        print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} type: {err}', flush=True)
+        print(f'{mrms_tag(d)} {time.strftime("%H:%MZ", time.gmtime(t))} type: {err}', flush=True)
         snow = None
     t2 = time.time()
-    mrms_store(t, q, mrms_small(q), snow)
-    print(f'[MRMS] {time.strftime("%H:%MZ", time.gmtime(t))} +{t2 - t:.0f}s: fetch {t1 - t0:.2f}s '
+    mrms_store(t, q, mrms_small(q), snow, d)
+    print(f'{mrms_tag(d)} {time.strftime("%H:%MZ", time.gmtime(t))} +{t2 - t:.0f}s: fetch {t1 - t0:.2f}s '
           f'decode {t2 - t1:.2f}s pack {time.time() - t2:.2f}s', flush=True)
     return True
 
 
-def mrms_snow_fetch(t):
-    """uint8 (MRMS_NY, MRMS_NX) snow mask of scan t from PrecipFlag; None when it is not up
+def mrms_snow_fetch(t, d='conus'):
+    """uint8 (ny, nx) snow mask of scan t from PrecipFlag; None when it is not up
     (that scan's echo then reads as rain where NEXRAD does not say otherwise)."""
-    key = mrms_key(t).replace(MRMS_PRODUCT, MRMS_TYPE_PRODUCT)
+    g = MRMS_GRIDS[d]
+    key = mrms_key(t, d).replace(MRMS_PRODUCT, MRMS_TYPE_PRODUCT)
     try:
         gz = http_get(f'{MRMS_URL}/{key}')
     except urllib.error.HTTPError as err:
@@ -2113,62 +2152,62 @@ def mrms_snow_fetch(t):
             return None
         raise
     with _mrms_decode_lock:
-        g = ec.codes_new_from_message(gzip.decompress(gz))
+        m = ec.codes_new_from_message(gzip.decompress(gz))
         try:
-            if (ec.codes_get(g, 'Ni'), ec.codes_get(g, 'Nj')) != (MRMS_NX, MRMS_NY):
+            if (ec.codes_get(m, 'Ni'), ec.codes_get(m, 'Nj')) != (g.nx, g.ny):
                 raise RuntimeError(f'MRMS grid changed: {key}')
-            return (ec.codes_get_values(g).reshape(MRMS_NY, MRMS_NX) == 3).astype(np.uint8)
+            return (ec.codes_get_values(m).reshape(g.ny, g.nx) == 3).astype(np.uint8)
         finally:
-            ec.codes_release(g)
+            ec.codes_release(m)
 
 
-def mrms_snow_src(T):
+def mrms_snow_src(T, d='conus'):
     """The scan whose PrecipFlag stands for scan T: its own, else the newest within
     MRMS_TYPE_AGE before it (the type changes slowly and lands after the reflectivity)."""
     with _mrms_lock:
-        return max((s for s in _mrms_snow if T - MRMS_TYPE_AGE <= s <= T), default=None)
+        return max((s for s in _mrms_snow[d] if T - MRMS_TYPE_AGE <= s <= T), default=None)
 
 
-def mrms_snow_near(T):
+def mrms_snow_near(T, d='conus'):
     """Snow mask strips for scan T (mrms_snow_src), or None."""
-    src = mrms_snow_src(T)
+    src = mrms_snow_src(T, d)
     with _mrms_lock:
-        return _mrms_snow.get(src)
+        return _mrms_snow[d].get(src)
 
 
 @functools.lru_cache(maxsize=8)
-def mrms_has_snow(src):
+def mrms_has_snow(src, d='conus'):
     """Whether scan src's snow mask has any snow: the legend's Snow row."""
     with _mrms_lock:
-        strips = _mrms_snow.get(src)
+        strips = _mrms_snow[d].get(src)
     return bool(strips) and any(1 in zlib.decompress(z) for z in strips)
 
 
-def mrms_snow_fill(now):
+def mrms_snow_fill(now, d='conus'):
     """PrecipFlag lands 5-30 s after the reflectivity: fetch it for the recent scans still without."""
     with _mrms_lock:
-        missing = [t for t in sorted(_mrms)[-5:] if t not in _mrms_snow]
+        missing = [t for t in sorted(_mrms[d])[-5:] if t not in _mrms_snow[d]]
     for t in missing:
-        snow = mrms_snow_fetch(t)
+        snow = mrms_snow_fetch(t, d)
         if snow is not None:
             strips = mrms_strips(snow)
             with _mrms_lock:
-                if t in _mrms:
-                    _mrms_snow[t] = strips
+                if t in _mrms[d]:
+                    _mrms_snow[d][t] = strips
 
 
-def mrms_backfill():
+def mrms_backfill(d='conus'):
     """Fetch every scan S3 lists newer than the ring's newest, up to MRMS_FRAMES back."""
-    times = mrms_times()
+    times = mrms_times(d)
     since = max(times[-1] if times else 0, time.time() - MRMS_FRAMES * MRMS_STEP)
     listed = []
-    for day in sorted({time.strftime('%Y%m%d', time.gmtime(d)) for d in (since, time.time())}):
-        xml = http_get(f'{MRMS_URL}/?list-type=2&prefix=CONUS/{MRMS_PRODUCT}/{day}/'
-                       f'&start-after={mrms_key(since)}').decode()
+    for day in sorted({time.strftime('%Y%m%d', time.gmtime(x)) for x in (since, time.time())}):
+        xml = http_get(f'{MRMS_URL}/?list-type=2&prefix={MRMS_GRIDS[d].prefix}/{MRMS_PRODUCT}/{day}/'
+                       f'&start-after={mrms_key(since, d)}').decode()
         listed += [calendar.timegm(time.strptime(s, '%Y%m%d-%H%M%S')) for s in MRMS_KEY_RE.findall(xml)]
     # Newest first: after a restart the ring's newest frame is current within seconds
     with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(mrms_fetch, sorted((t for t in set(listed) if t > since), reverse=True)[:MRMS_FRAMES]))
+        list(pool.map(lambda t: mrms_fetch(t, d), sorted((t for t in set(listed) if t > since), reverse=True)[:MRMS_FRAMES]))
 
 
 def mrms_gap(want, now):
@@ -2182,47 +2221,51 @@ def mrms_next(want, newest):
     return int(max(want, newest or 0)) + MRMS_STEP
 
 
-def mrms_backfill_safe():
+def mrms_backfill_safe(d='conus'):
     try:
-        mrms_backfill()
+        mrms_backfill(d)
     except Exception as err:  # noqa: BLE001 - keep polling through S3 trouble
-        print(f'[MRMS] backfill: {err}', flush=True)
-    times = mrms_times()
+        print(f'{mrms_tag(d)} backfill: {err}', flush=True)
+    times = mrms_times(d)
     try:
         for t in times:                     # backfill lands newest first: pairs complete at the end
-            mrms_flow_field(t)
+            mrms_flow_field(t, d)
     except Exception as err:  # noqa: BLE001
-        print(f'[MRMS] flow: {err}', flush=True)
+        print(f'{mrms_tag(d)} flow: {err}', flush=True)
     return times[-1] if times else None
 
 
-def mrms_poller():
+def mrms_poller(d='conus'):
     """Each scan MRMS_LAG after its time, retrying every 10s. A scan still
     missing once overdue (mrms_gap) is a gap: catch up from the listing and
-    move past it, so one skipped scan never holds back the newer ones."""
-    newest = mrms_backfill_safe()
+    move past it, so one skipped scan never holds back the newer ones.
+    One poller per domain: Hawaii's trouble never holds back CONUS."""
+    newest = mrms_backfill_safe(d)
     want = mrms_next(newest or time.time() // MRMS_STEP * MRMS_STEP - MRMS_STEP, None)
     while True:
         # a stall (host suspend, clock jump) older than the ring: jump to the present in one catch-up
         if time.time() - want > MRMS_FRAMES * MRMS_STEP:
-            want = mrms_next(time.time() // MRMS_STEP * MRMS_STEP - MRMS_FRAMES * MRMS_STEP, mrms_backfill_safe())
+            want = mrms_next(time.time() // MRMS_STEP * MRMS_STEP - MRMS_FRAMES * MRMS_STEP, mrms_backfill_safe(d))
         wait = want + MRMS_LAG - time.time()
         if wait > 0:
             time.sleep(wait)
         try:
-            ok = mrms_fetch(want)
+            ok = mrms_fetch(want, d)
         except Exception as err:  # noqa: BLE001
-            print(f'[MRMS] {mrms_key(want)}: {err}', flush=True)
+            print(f'{mrms_tag(d)} {mrms_key(want, d)}: {err}', flush=True)
             ok = False
         if ok:
             try:
-                mrms_flow_field(want)
+                mrms_flow_field(want, d)
             except Exception as err:  # noqa: BLE001 - the page falls back to a plain cross-fade
-                print(f'[MRMS] flow {want}: {err}', flush=True)
+                print(f'{mrms_tag(d)} flow {want}: {err}', flush=True)
             try:
-                mrms_snow_fill(time.time())
+                mrms_snow_fill(time.time(), d)
             except Exception as err:  # noqa: BLE001
-                print(f'[MRMS] type fill: {err}', flush=True)
+                print(f'{mrms_tag(d)} type fill: {err}', flush=True)
+            if d != 'conus':                # the scorer's places (NC_PLACES) are all on CONUS
+                want += MRMS_STEP
+                continue
             try:
                 nc_train(want)
             except NotPublished:
@@ -2235,17 +2278,17 @@ def mrms_poller():
                 print(f'[NOWCAST] score: {err}', flush=True)
             want += MRMS_STEP
         elif mrms_gap(want, time.time()):
-            print(f'[MRMS] {mrms_key(want)}: missing, skipping', flush=True)
-            want = mrms_next(want, mrms_backfill_safe())
+            print(f'{mrms_tag(d)} {mrms_key(want, d)}: missing, skipping', flush=True)
+            want = mrms_next(want, mrms_backfill_safe(d))
         else:
             time.sleep(10)
 
 
-def mrms_rows(strips, r0, r1):
+def mrms_rows(strips, r0, r1, nx=MRMS_NX):
     """Grid rows r0..r1 (inclusive) inflated from their strips; also the first row's offset."""
     s0, s1 = r0 // MRMS_STRIP, r1 // MRMS_STRIP
     return np.frombuffer(b''.join(zlib.decompress(strips[k]) for k in range(s0, s1 + 1)),
-                         np.uint8).reshape(-1, MRMS_NX), s0 * MRMS_STRIP
+                         np.uint8).reshape(-1, nx), s0 * MRMS_STRIP
 
 
 def mrms_dbz(block, fr, fc):
@@ -2285,29 +2328,38 @@ def mrms_bilinear(block, fr, fc):
 def mrms_tile(t, z, x, y, nx=None):
     """Web-mercator tile of scan t, smooth: bilinear in dBZ between cell centers.
     nx: the NEXRAD frame's rev, drawn over MRMS where it has coverage (the rev only
-    keys the cache). A scan that left the ring still serves its cached tiles until they age out of the LRU."""
+    keys the cache). A scan that left the ring still serves its cached tiles until they age out of the LRU.
+    Paints every grid the tile overlaps; one whose ring lacks the scan while it may still
+    come (Hawaii lands apart from CONUS) makes the tile not published yet."""
     with _mrms_lock:
-        strips = _mrms.get(t)
-    if strips is None:
+        rings = {d: _mrms[d].get(t) for d in MRMS_GRIDS}
+    if all(v is None for v in rings.values()):
         raise NotPublished
     s = (np.arange(FIELD_TILE) + 0.5) / FIELD_TILE
     lat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + s) / 2 ** z))))
     lon = (x + s) / 2 ** z * 360 - 180
-    fr, fc = (MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES
-    ri, ci = np.flatnonzero((fr >= 0) & (fr < MRMS_NY)), np.flatnonzero((fc >= 0) & (fc < MRMS_NX))
     px = np.full((FIELD_TILE, FIELD_TILE), 255, np.uint8)
-    if len(ri) and len(ci):
+    for d, g in MRMS_GRIDS.items():
+        fr, fc = (g.north - lat) / g.res, (lon - g.west) / g.res
+        ri, ci = np.flatnonzero((fr >= 0) & (fr < g.ny)), np.flatnonzero((fc >= 0) & (fc < g.nx))
+        if not (len(ri) and len(ci)):
+            continue
+        strips = rings[d]
+        if strips is None:
+            if not mrms_gap(t, time.time()):
+                raise NotPublished
+            continue                        # skipped there: that grid stays uncovered
         rc = fr[ri] - 0.5                   # cell centers sit at +0.5
-        block, base = mrms_rows(strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, MRMS_NY - 1))
+        block, base = mrms_rows(strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, g.ny - 1), g.nx)
         dbz, den = mrms_dbz(block, rc - base, fc[ci] - 0.5)
         snow = None
-        snow_strips = mrms_snow_near(t)
+        snow_strips = mrms_snow_near(t, d)
         if snow_strips is not None:         # PrecipFlag at the nearest cell; NEXRAD's class wins where it covers
-            sblock, sbase = mrms_rows(snow_strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, MRMS_NY - 1))
+            sblock, sbase = mrms_rows(snow_strips, max(int(np.floor(rc.min())), 0), min(int(np.floor(rc.max())) + 1, g.ny - 1), g.nx)
             snow = sblock[np.ix_(np.clip(np.rint(rc).astype(np.int64) - sbase, 0, len(sblock) - 1),
-                                 np.clip(np.floor(fc[ci]).astype(np.int64), 0, MRMS_NX - 1))] > 0
+                                 np.clip(np.floor(fc[ci]).astype(np.int64), 0, g.nx - 1))] > 0
         if nx is not None and z >= NX_TILE_MINZOOM:   # zoomed out, a tile spans too many NX cells
-            got = nx_tile_sample(t, fr[ri] * NX_SUB - 0.5, fc[ci] * NX_SUB - 0.5)
+            got = nx_tile_sample(t, (MRMS_NORTH - lat[ri]) / NX_RES - 0.5, (lon[ci] - MRMS_WEST) / NX_RES - 0.5)
             if got is not None:
                 ndbz, nden, cov, nsnow = got
                 snow = np.where(nden >= 0.5, nsnow, snow if snow is not None else False)
@@ -2320,20 +2372,21 @@ def mrms_tile(t, z, x, y, nx=None):
     return indexed_png(px, TILE_PALETTE)
 
 
-def mrms_crop_box(w, s, e, n, step=1):
+def mrms_crop_box(w, s, e, n, step=1, d='conus'):
     """Grid cell ranges (r0, r1, c0, c1) and step of a lat/lon box crop, or None
     off the grid. Snapped outward to whole flow texels (MRMS_FLOW_RES * step
     cells) so the flow crop of the same box lines up exactly, clamped to the
     grid rounded out the same way (the page masks the no-coverage padding),
     and the step raised until both sides fit MRMS_CROP_MAX pixels."""
+    g = MRMS_GRIDS[d]
     step = max(1, int(step))
     while True:
         u = MRMS_FLOW_RES * step
         out = lambda v, lo, hi: min(max(v, lo), hi) * u
-        r0 = out(math.floor((MRMS_NORTH - n) / MRMS_RES / u + 1e-6), 0, math.ceil(MRMS_NY / u))
-        r1 = out(math.ceil((MRMS_NORTH - s) / MRMS_RES / u - 1e-6), 0, math.ceil(MRMS_NY / u))
-        c0 = out(math.floor((w - MRMS_WEST) / MRMS_RES / u + 1e-6), 0, math.ceil(MRMS_NX / u))
-        c1 = out(math.ceil((e - MRMS_WEST) / MRMS_RES / u - 1e-6), 0, math.ceil(MRMS_NX / u))
+        r0 = out(math.floor((g.north - n) / g.res / u + 1e-6), 0, math.ceil(g.ny / u))
+        r1 = out(math.ceil((g.north - s) / g.res / u - 1e-6), 0, math.ceil(g.ny / u))
+        c0 = out(math.floor((w - g.west) / g.res / u + 1e-6), 0, math.ceil(g.nx / u))
+        c1 = out(math.ceil((e - g.west) / g.res / u - 1e-6), 0, math.ceil(g.nx / u))
         if r1 <= r0 or c1 <= c0:
             return None
         if max(r1 - r0, c1 - c0) <= MRMS_CROP_MAX * step:
@@ -2341,10 +2394,12 @@ def mrms_crop_box(w, s, e, n, step=1):
         step += 1
 
 
-def mrms_crop_bounds(r0, r1, c0, c1, step):
-    """X-Crop header: west,south,east,north (outer cell edges, degrees),step."""
-    return (f'{MRMS_WEST + c0 * MRMS_RES:.2f},{MRMS_NORTH - r1 * MRMS_RES:.2f},'
-            f'{MRMS_WEST + c1 * MRMS_RES:.2f},{MRMS_NORTH - r0 * MRMS_RES:.2f},{step}')
+def mrms_crop_bounds(r0, r1, c0, c1, step, d='conus'):
+    """X-Crop header: west,south,east,north (outer cell edges, degrees),step,cell (the
+    grid's degrees: flow units are its cells; edges are whole flow texels, 0.04° or more)."""
+    g = MRMS_GRIDS[d]
+    return (f'{g.west + c0 * g.res:.2f},{g.north - r1 * g.res:.2f},'
+            f'{g.west + c1 * g.res:.2f},{g.north - r0 * g.res:.2f},{step},{g.res:g}')
 
 
 def mrms_crop_query(q):
@@ -2360,50 +2415,52 @@ def mrms_crop_query(q):
 
 
 @functools.lru_cache(maxsize=180)           # a view's loop; ~2-400KB each
-def mrms_crop(t, r0, r1, c0, c1, step):
+def mrms_crop(t, r0, r1, c0, c1, step, d='conus'):
     """RGB PNG, a cell every step, rows north to south: R raw scan values (q: 0 no echo,
     255 no coverage; padding past the grid is no coverage), G 255 where PrecipFlag says
     snow (mrms_snow_near), B 0. ponytail: cached with the type it had; a scan cached before
     its own type landed keeps the one before (at most MRMS_TYPE_AGE old)."""
+    g = MRMS_GRIDS[d]
     with _mrms_lock:
-        strips = _mrms.get(t)
+        strips = _mrms[d].get(t)
     if strips is None:
         raise NotPublished
-    snow_strips = mrms_snow_near(t)
+    snow_strips = mrms_snow_near(t, d)
     rows, cols = np.arange(r0 + step // 2, r1, step), np.arange(c0 + step // 2, c1, step)
-    ri, ci = np.flatnonzero(rows < MRMS_NY), np.flatnonzero(cols < MRMS_NX)
+    ri, ci = np.flatnonzero(rows < g.ny), np.flatnonzero(cols < g.nx)
     px = np.full((len(rows), len(cols)), 255, np.uint8)
     snow = np.zeros_like(px)
     if len(ri) and len(ci):
-        block, base = mrms_rows(strips, rows[ri[0]], rows[ri[-1]])
+        block, base = mrms_rows(strips, rows[ri[0]], rows[ri[-1]], g.nx)
         px[np.ix_(ri, ci)] = block[np.ix_(rows[ri] - base, cols[ci])]
         if snow_strips is not None:
-            block, base = mrms_rows(snow_strips, rows[ri[0]], rows[ri[-1]])
+            block, base = mrms_rows(snow_strips, rows[ri[0]], rows[ri[-1]], g.nx)
             snow[np.ix_(ri, ci)] = block[np.ix_(rows[ri] - base, cols[ci])] * np.uint8(255)
     return raw_png(np.dstack([px, snow, np.zeros_like(px)]))
 
 
 @functools.lru_cache(maxsize=180)
-def mrms_flow_crop(t, r0, r1, c0, c1, step, mean):
+def mrms_flow_crop(t, r0, r1, c0, c1, step, mean, d='conus'):
     """RGB PNG of scan t's motion (mean: the nowcast's) over the crop box, one
     texel per MRMS_FLOW_RES x MRMS_FLOW_RES crop pixels: R x, G y as flow units + 128,
     B scan t's data age."""
+    g = MRMS_GRIDS[d]
     if mean:
-        field = mrms_mean_flow(t)
+        field = mrms_mean_flow(t, d)
     else:
         # The oldest scans have no partner 10 minutes back: the nearest scan's motion stands in
-        near = sorted((abs(s - t), s) for s in mrms_times() if abs(s - t) <= MRMS_FLOW_SPAN)
-        field = next((f for _, s in near if (f := mrms_flow_field(s)) is not None), None)
+        near = sorted((abs(s - t), s) for s in mrms_times(d) if abs(s - t) <= MRMS_FLOW_SPAN)
+        field = next((f for _, s in near if (f := mrms_flow_field(s, d)) is not None), None)
     if field is None:
         raise NotPublished
-    f = mrms_flow_array(field)
+    f = mrms_flow_array(field, d)
     u = MRMS_FLOW_RES
-    rows = np.minimum(np.arange(r0 // u + step // 2, r1 // u, step), MRMS_FLOW_NY - 1)
-    cols = np.minimum(np.arange(c0 // u + step // 2, c1 // u, step), MRMS_FLOW_NX - 1)
+    rows = np.minimum(np.arange(r0 // u + step // 2, r1 // u, step), g.flow_ny - 1)
+    cols = np.minimum(np.arange(c0 // u + step // 2, c1 // u, step), g.flow_nx - 1)
     v = f[np.ix_(rows, cols)].astype(np.int16) + 128
     with _mrms_lock:
-        small = _mrms_small.get(t)
-    age = mrms_age_view(mrms_age(t), mrms_small_image(small)) if small else np.zeros((MRMS_FLOW_NY, MRMS_FLOW_NX), np.uint8)
+        small = _mrms_small[d].get(t)
+    age = mrms_age_view(mrms_age(t, d), mrms_small_image(small, d)) if small else np.zeros((g.flow_ny, g.flow_nx), np.uint8)
     return raw_png(np.dstack([v, age[np.ix_(rows, cols)]]).astype(np.uint8))
 
 
@@ -2413,14 +2470,15 @@ def mrms_flow_crop(t, r0, r1, c0, c1, step, mean):
 # hydrometeor class (1° x 250 m) under the same key suffix, ~80 s after the
 # scan, a scan every 4-6 minutes. RAM only, like MRMS. Each scan is cleaned on
 # its polar grid (low CC or classed biological/clutter is not precipitation),
-# then mapped onto a 0.0025° lat/lon lattice nested 4:1 in MRMS's (same
-# origin), where overlapping radars blend by beam height. A frame every
+# then mapped onto a 0.0025° lat/lon lattice nested 4:1 in MRMS CONUS's (same
+# origin; Hawaii's 0.005° grid nests 2:1, at negative columns), where overlapping
+# radars blend by beam height. A frame every
 # MRMS_STEP (the MRMS scan times) moves each radar's nearest scan to the frame
 # time along the MRMS motion, so a frame is one moment rather than radars
 # caught 0-5 minutes apart. The NYC radars are always on; others follow the
 # views pages ask crops for, up to NX_CAP, and drop after NX_IDLE.
 NX_URL = os.environ.get('NEXRAD_URL', 'https://unidata-nexrad-level3.s3.amazonaws.com')
-# CONUS WSR-88Ds: id:lat:lon:height (feet above sea level), from the products' own headers
+# CONUS and Hawaii WSR-88Ds: id:lat:lon:height (feet above sea level), from the products' own headers
 NX_SITES = {s: (float(la), float(lo), float(h) * 0.3048) for s, la, lo, h in (e.split(':') for e in '''
     ABR:45.456:-98.413:1383 ABX:35.150:-106.824:5951 AKQ:36.984:-77.008:254 AMA:35.233:-101.709:3703 AMX:25.611:-80.413:111 APX:44.906:-84.720:1561
     ARX:43.823:-91.191:1357 ATX:48.195:-122.496:642 BBX:39.496:-121.632:221 BGM:42.200:-75.985:1703 BHX:40.499:-124.292:2516 BIS:46.771:-100.760:1755
@@ -2446,6 +2504,7 @@ NX_SITES = {s: (float(la), float(lo), float(h) * 0.3048) for s, la, lo, h in (e.
     SJT:31.371:-100.492:2004 SOX:33.818:-117.636:3105 SRX:35.290:-94.362:737 TBW:27.705:-82.402:122 TFX:47.460:-111.385:3804 TLH:30.398:-84.329:176
     TLX:35.333:-97.278:1277 TWX:38.997:-96.232:1415 TYX:43.756:-75.680:1960 UDX:44.125:-102.830:3194 UEX:40.321:-98.442:2057 VAX:30.890:-83.002:330
     VBX:34.839:-120.398:1354 VNX:36.741:-98.128:1258 VTX:34.412:-119.179:2807 VWX:38.260:-87.724:625 YUX:32.495:-114.656:239
+    HKI:21.894:-159.552:340 HKM:20.125:-155.778:3965 HMO:21.133:-157.180:1444 HWA:19.095:-155.569:1461
 '''.split())}
 NX_DEFAULT = ('OKX', 'DIX', 'ENX', 'BGM', 'BOX', 'DOX')   # within ~275 km of NYC: never idle out
 NX_CAP = 12                                 # active radars at most (CPU/RAM bound)
@@ -2751,25 +2810,37 @@ def nx_nearest(times, T):
     return best if best is not None and abs(best - T) <= NX_MAX_AGE else None
 
 
-def nx_flow_at(T):
+def nx_flow_at(T, d='conus'):
     """(scan time, int8 field) of the MRMS motion nearest T within MRMS_FLOW_SPAN, or (None, None)."""
-    for _, s in sorted((abs(s - T), s) for s in mrms_times() if abs(s - T) <= MRMS_FLOW_SPAN):
+    for _, s in sorted((abs(s - T), s) for s in mrms_times(d) if abs(s - T) <= MRMS_FLOW_SPAN):
         with _mrms_lock:
-            f = _mrms_flow.get(s)
+            f = _mrms_flow[d].get(s)
         if f is not None:
-            return s, mrms_flow_array(f)
+            return s, mrms_flow_array(f, d)
     return None, None
 
 
-def nx_block_flow(f, br, bc, pad=0):
+def nx_origin(d):
+    """Grid d on the NX lattice: the NX row and column of its corner, and NX cells per grid cell."""
+    g = MRMS_GRIDS[d]
+    return round((MRMS_NORTH - g.north) / NX_RES), round((g.west - MRMS_WEST) / NX_RES), round(g.res / NX_RES)
+
+
+def nx_domain(br, bc):
+    """The MRMS grid under a block (its center), or None."""
+    return mrms_domain_at(MRMS_NORTH - (br + 0.5) * NX_BLOCK * NX_RES, MRMS_WEST + (bc + 0.5) * NX_BLOCK * NX_RES)
+
+
+def nx_block_flow(f, br, bc, pad=0, d='conus'):
     """Motion at each cell of a block (and pad cells around it) in NX cells per second
-    (x east, y south), bilinear in the MRMS field."""
-    u = NX_SUB * MRMS_FLOW_RES              # NX cells per flow texel
-    y = ((br * NX_BLOCK + np.arange(-pad, NX_BLOCK + pad) + 0.5) / u - 0.5).astype(np.float32)
-    x = ((bc * NX_BLOCK + np.arange(-pad, NX_BLOCK + pad) + 0.5) / u - 0.5).astype(np.float32)
+    (x east, y south), bilinear in grid d's MRMS field."""
+    r_off, c_off, sub = nx_origin(d)
+    u = sub * MRMS_FLOW_RES                 # NX cells per flow texel
+    y = ((br * NX_BLOCK - r_off + np.arange(-pad, NX_BLOCK + pad) + 0.5) / u - 0.5).astype(np.float32)
+    x = ((bc * NX_BLOCK - c_off + np.arange(-pad, NX_BLOCK + pad) + 0.5) / u - 0.5).astype(np.float32)
     mx, my = np.meshgrid(x, y)
     v = cv2.remap(f.astype(np.float32), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    return v * np.float32(NX_SUB / MRMS_FLOW_SCALE / MRMS_STEP)
+    return v * np.float32(sub / MRMS_FLOW_SCALE / MRMS_STEP)
 
 
 _nx_beam_table = np.arange(0, NX_RANGE + 20e3, 500.0)
@@ -2788,28 +2859,31 @@ def nx_weight(site, elev, br, bc, pad=0):
     return (np.exp(-height / NX_BEAM_H) * ramp).astype(np.float32), ramp
 
 
-def nx_mrms_block(T, br, bc, pad):
-    """MRMS scan T under a block (and pad NX cells around it) in dBZ, bilinear, no echo
+def nx_mrms_block(T, br, bc, pad, d='conus'):
+    """Grid d's MRMS scan T under a block (and pad NX cells around it) in dBZ, bilinear, no echo
     and no coverage as -32; None if the ring does not have it."""
+    g = MRMS_GRIDS[d]
     with _mrms_lock:
-        strips = _mrms.get(T)
+        strips = _mrms[d].get(T)
     if strips is None:
         return None
-    n, m = NX_BLOCK // NX_SUB, pad // NX_SUB + 1
-    r0, c0 = br * n - m, bc * n - m
-    rows, base = mrms_rows(strips, max(r0, 0), min(r0 + n + 2 * m, MRMS_NY) - 1)
+    r_off, c_off, sub = nx_origin(d)
+    n, m = NX_BLOCK // sub, pad // sub + 1
+    r0, c0 = (br * NX_BLOCK - r_off) // sub - m, (bc * NX_BLOCK - c_off) // sub - m
     cells = np.full((n + 2 * m, n + 2 * m), 0, np.uint8)
     rr, cc = np.arange(r0, r0 + n + 2 * m), np.arange(c0, c0 + n + 2 * m)
-    ri, ci = np.flatnonzero((rr >= 0) & (rr < MRMS_NY)), np.flatnonzero((cc >= 0) & (cc < MRMS_NX))
-    cells[np.ix_(ri, ci)] = rows[np.ix_(rr[ri] - base, cc[ci])]
-    d = np.where((cells == 0) | (cells == 255), -32, cells * np.float32(0.5) - 32).astype(np.float32)
-    # NX cell centers in MRMS cell units, relative to the first fetched cell's center
-    at = ((np.arange(-pad, NX_BLOCK + pad) + 0.5) / NX_SUB - 0.5 + m).astype(np.float32)
+    ri, ci = np.flatnonzero((rr >= 0) & (rr < g.ny)), np.flatnonzero((cc >= 0) & (cc < g.nx))
+    if len(ri) and len(ci):
+        rows, base = mrms_rows(strips, rr[ri[0]], rr[ri[-1]], g.nx)
+        cells[np.ix_(ri, ci)] = rows[np.ix_(rr[ri] - base, cc[ci])]
+    dbz = np.where((cells == 0) | (cells == 255), -32, cells * np.float32(0.5) - 32).astype(np.float32)
+    # NX cell centers in grid cell units, relative to the first fetched cell's center
+    at = ((np.arange(-pad, NX_BLOCK + pad) + 0.5) / sub - 0.5 + m).astype(np.float32)
     mx, my = np.meshgrid(at, at)
-    return cv2.remap(d, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return cv2.remap(dbz, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
-def nx_block(br, bc, parts, f, fill=None):
+def nx_block(br, bc, parts, f, fill=None, d='conus'):
     """One composite block: parts [(site, seconds from scan to frame, site grid, elevation)],
     f the MRMS motion (or None), fill the MRMS scan of the frame's time (nx_mrms_block) for
     cells in range no radar here has (a blocked beam, clutter in rain). zlib of q
@@ -2822,7 +2896,7 @@ def nx_block(br, bc, parts, f, fill=None):
     den, best = np.zeros_like(num), np.zeros_like(num)
     cls = np.zeros((size, size), np.uint8)
     cov = np.zeros((n, n), np.float32)
-    motion = nx_block_flow(f, br, bc, p) if f is not None else None
+    motion = nx_block_flow(f, br, bc, p, d) if f is not None else None
     reach = ()                              # max range ramp: > 0 in some present radar's range
     for site, dt, grid, elev in parts:
         r0, _, c0, _ = nx_box(site)
@@ -2885,14 +2959,17 @@ def nx_update(now):
         for blk in nx_blocks(s):
             cover.setdefault(blk, []).append(s)
     grids, built, t0 = {}, 0, time.time()
+    doms = {blk: nx_domain(*blk) for blk in cover}   # the MRMS grid each block blends over (motion, fill)
     for T in times:
-        ft, f = nx_flow_at(T)
+        flows = {d: nx_flow_at(T, d) for d in MRMS_GRIDS}
         use = {s: nx_nearest(v, T) for s, v in scans.items()}
         with _nx_lock:
             frame = _nx_frames.get(T) or {'blocks': {}, 'sig': {}, 'snow': {}, 'rev': 0}
         with _mrms_lock:
-            has_mrms = T in _mrms
-        sigs = {blk: (tuple((s, use[s]) for s in sorted(sites) if use[s] is not None), ft, has_mrms) for blk, sites in cover.items()}
+            has_mrms = {d: T in _mrms[d] for d in MRMS_GRIDS}
+        sigs = {blk: (tuple((s, use[s]) for s in sorted(sites) if use[s] is not None),
+                      flows[doms[blk]][0] if doms[blk] else None, bool(doms[blk]) and has_mrms[doms[blk]])
+                for blk, sites in cover.items()}
         sigs = {blk: sig for blk, sig in sigs.items() if sig[0]}
         if sigs == frame['sig']:
             continue
@@ -2910,8 +2987,9 @@ def nx_update(now):
                     grids[(s, st)] = nx_site_grid(s, st)
                 g, elev = grids[(s, st)]
                 parts.append((s, T - st, g, elev))
-            blocks[blk], snow[blk] = nx_block(*blk, parts, f if ft is not None else None,
-                                              nx_mrms_block(T, *blk, NX_SUB) if has_mrms else None)
+            d = doms[blk]
+            blocks[blk], snow[blk] = nx_block(*blk, parts, flows[d][1] if d else None,
+                                              nx_mrms_block(T, *blk, NX_SUB, d) if sig[2] else None, d or 'conus')
             built += 1
         with _nx_lock:
             _nx_rev[0] += 1
@@ -3007,16 +3085,18 @@ def nx_touch(w, s, e, n, now):
     return added
 
 
-def nx_crop_box(w, s, e, n, step=1):
+def nx_crop_box(w, s, e, n, step=1, d='conus'):
     """NX cell ranges (r0, r1, c0, c1) and step of a lat/lon box, snapped outward to
-    the step, the step raised until both sides fit NX_CROP_MAX; None off the grid."""
+    the step, the step raised until both sides fit NX_CROP_MAX; None off grid d."""
+    g = MRMS_GRIDS[d]
+    r_off, c_off, sub = nx_origin(d)
     step = max(1, int(step))
     while True:
-        out = lambda v, lo, hi: min(max(v, lo), hi) * step
-        r0 = out(math.floor((MRMS_NORTH - n) / NX_RES / step + 1e-6), 0, MRMS_NY * NX_SUB // step)
-        r1 = out(math.ceil((MRMS_NORTH - s) / NX_RES / step - 1e-6), 0, MRMS_NY * NX_SUB // step)
-        c0 = out(math.floor((w - MRMS_WEST) / NX_RES / step + 1e-6), 0, MRMS_NX * NX_SUB // step)
-        c1 = out(math.ceil((e - MRMS_WEST) / NX_RES / step - 1e-6), 0, MRMS_NX * NX_SUB // step)
+        out = lambda v, lo, hi: min(max(v, lo // step), -(-hi // step)) * step
+        r0 = out(math.floor((MRMS_NORTH - n) / NX_RES / step + 1e-6), r_off, r_off + g.ny * sub)
+        r1 = out(math.ceil((MRMS_NORTH - s) / NX_RES / step - 1e-6), r_off, r_off + g.ny * sub)
+        c0 = out(math.floor((w - MRMS_WEST) / NX_RES / step + 1e-6), c_off, c_off + g.nx * sub)
+        c1 = out(math.ceil((e - MRMS_WEST) / NX_RES / step - 1e-6), c_off, c_off + g.nx * sub)
         if r1 <= r0 or c1 <= c0:
             return None
         if max(r1 - r0, c1 - c0) <= NX_CROP_MAX * step:
@@ -3062,7 +3142,7 @@ def nx_tile_sample(T, fr, fc):
     (the nearest cell's class); None where the frame has nothing."""
     r0, c0 = int(np.floor(fr.min())), int(np.floor(fc.min()))
     rows, cols = np.arange(r0, int(np.floor(fr.max())) + 2), np.arange(c0, int(np.floor(fc.max())) + 2)
-    got = nx_sample(T, np.clip(rows, 0, None), np.clip(cols, 0, None))
+    got = nx_sample(T, rows, cols)          # NX cells past a grid's corner are negative: no block there
     if got is None:
         return None
     q, cls, cov = got
@@ -3185,10 +3265,11 @@ def nc_bilinear(a, y, x):
             + a[i + 1, j] * fy * (1 - fx) + a[i + 1, j + 1] * fy * fx)
 
 
-def nc_path(f, lat, lon, minutes=NC_LEAD):
-    """MRMS cell coordinates (row, col; cell edges at integers) the echo over lat/lon m
+def nc_path(f, lat, lon, minutes=NC_LEAD, d='conus'):
+    """Grid d's cell coordinates (row, col; cell edges at integers) the echo over lat/lon m
     minutes on is at now, m = 0..minutes: backward along the flow f a minute at a time."""
-    r, c = (MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES
+    g = MRMS_GRIDS[d]
+    r, c = (g.north - lat) / g.res, (lon - g.west) / g.res
     path = [(r, c)]
     for _ in range(minutes):
         vx, vy = nc_bilinear(f, r / MRMS_FLOW_RES - 0.5, c / MRMS_FLOW_RES - 0.5) / MRMS_FLOW_SCALE   # cells per 2 min
@@ -3197,35 +3278,37 @@ def nc_path(f, lat, lon, minutes=NC_LEAD):
     return path
 
 
-def nc_field(T, r0, r1, c0, c1):
-    """dBZ of scan T over MRMS cells [r0, r1) x [c0, c1): no echo -32, no coverage nan,
+def nc_field(T, r0, r1, c0, c1, dom='conus'):
+    """dBZ of scan T over grid dom's cells [r0, r1) x [c0, c1): no echo -32, no coverage nan,
     NEXRAD blended over MRMS by its coverage (as mrms_tile); and each cell's kind code
     (NEXRAD's class where it covers, else PrecipFlag's snow)."""
+    g = MRMS_GRIDS[dom]
     with _mrms_lock:
-        strips = _mrms.get(T)
-    snow_strips = mrms_snow_near(T)
+        strips = _mrms[dom].get(T)
+    snow_strips = mrms_snow_near(T, dom)
     if strips is None:
         raise NotPublished
     q = np.full((r1 - r0, c1 - c0), 255, np.uint8)
     kind = np.zeros(q.shape, np.uint8)
     rr, cc = np.arange(r0, r1), np.arange(c0, c1)
-    ri, ci = np.flatnonzero((rr >= 0) & (rr < MRMS_NY)), np.flatnonzero((cc >= 0) & (cc < MRMS_NX))
+    ri, ci = np.flatnonzero((rr >= 0) & (rr < g.ny)), np.flatnonzero((cc >= 0) & (cc < g.nx))
     if len(ri) and len(ci):
-        block, base = mrms_rows(strips, rr[ri[0]], rr[ri[-1]])
+        block, base = mrms_rows(strips, rr[ri[0]], rr[ri[-1]], g.nx)
         q[np.ix_(ri, ci)] = block[np.ix_(rr[ri] - base, cc[ci])]
         if snow_strips is not None:
-            block, base = mrms_rows(snow_strips, rr[ri[0]], rr[ri[-1]])
+            block, base = mrms_rows(snow_strips, rr[ri[0]], rr[ri[-1]], g.nx)
             kind[np.ix_(ri, ci)] = block[np.ix_(rr[ri] - base, cc[ci])]   # 1 = snow
     d = np.where(q == 0, -32, q * np.float32(0.5) - 32).astype(np.float32)
     covered = q != 255
-    got = len(ri) and len(ci) and nx_sample(T, np.arange(rr[ri[0]] * NX_SUB, (rr[ri[-1]] + 1) * NX_SUB),
-                                            np.arange(cc[ci[0]] * NX_SUB, (cc[ci[-1]] + 1) * NX_SUB))
+    r_off, c_off, sub = nx_origin(dom)
+    got = len(ri) and len(ci) and nx_sample(T, np.arange(r_off + rr[ri[0]] * sub, r_off + (rr[ri[-1]] + 1) * sub),
+                                            np.arange(c_off + cc[ci[0]] * sub, c_off + (cc[ci[-1]] + 1) * sub))
     if got:
-        nq, ncls, ncov = (a.reshape(len(ri), NX_SUB, len(ci), NX_SUB) for a in got)
+        nq, ncls, ncov = (a.reshape(len(ri), sub, len(ci), sub) for a in got)
         has = nq != 255
         n = has.sum((1, 3))
         nd = np.where(has, np.where(nq == 0, -32, nq * np.float32(0.5) - 32), 0).sum((1, 3)) / np.maximum(n, 1)
-        nden, cov = n / NX_SUB ** 2, ncov[:, 0, :, 0] / np.float32(255)
+        nden, cov = n / sub ** 2, ncov[:, 0, :, 0] / np.float32(255)
         sub = np.ix_(ri, ci)
         md, mc = d[sub], covered[sub]
         both, only = mc & (nden >= 0.5), ~mc & (nden >= 0.5)
@@ -3238,19 +3321,19 @@ def nc_field(T, r0, r1, c0, c1):
     return d, kind
 
 
-def nc_read(d, kind, box, path, grow=None):
+def nc_read(d, kind, box, path, grow=None, k=1):
     """Per minute along path: (median liquid mm/h, share wet, kind) over the neighborhood
     widening by grow cells a minute (the learned one by default), read as the center's kind;
-    NONE where none of it is covered."""
+    NONE where none of it is covered. k: the grid's cells per 0.01° cell (radii are in those)."""
     r0, c0 = box
-    R = int(math.ceil(nc_radius(len(path) - 1, grow)))
+    R = int(math.ceil(nc_radius(len(path) - 1, grow) * k))
     oy, ox = np.mgrid[-R:R + 1, -R:R + 1]
     dist = np.hypot(oy, ox)
     out = []
     for m, (r, c) in enumerate(path):
         i, j = int(math.floor(r)) - r0, int(math.floor(c)) - c0
-        k = dist <= nc_radius(m, grow)
-        v = d[i + oy[k], j + ox[k]]
+        near = dist <= nc_radius(m, grow) * k
+        v = d[i + oy[near], j + ox[near]]
         v = v[~np.isnan(v)]
         if not len(v):
             out.append(NONE)
@@ -3261,8 +3344,8 @@ def nc_read(d, kind, box, path, grow=None):
     return out
 
 
-def nc_box(path):
-    R = int(math.ceil(nc_radius(len(path) - 1, max(*NC_RGROWS, _nc_learn['rgrow'])))) + 1
+def nc_box(path, k=1):
+    R = int(math.ceil(nc_radius(len(path) - 1, max(*NC_RGROWS, _nc_learn['rgrow'])) * k)) + 1
     rs, cs = [int(math.floor(r)) for r, _ in path], [int(math.floor(c)) for _, c in path]
     return min(rs) - R, max(rs) + R + 1, min(cs) - R, max(cs) + R + 1
 
@@ -3477,12 +3560,14 @@ def nc_series(rows):
 def nowcast_at(t, rev, lat, lon):
     """The next NC_LEAD minutes at lat/lon from scan t (rev: its NEXRAD frame's, keys the cache).
     ponytail: a new HRRR run reaches cached answers only with the next scan (two minutes)."""
-    f = mrms_flow_array(mrms_mean_flow(t)).astype(np.float32)
-    path = nc_path(f, lat, lon, NC_LEAD)
-    r0, r1, c0, c1 = nc_box(path)
-    field = nc_field(t, r0, r1, c0, c1)
+    dom = mrms_domain_at(lat, lon) or 'conus'
+    k = MRMS_RES / MRMS_GRIDS[dom].res
+    f = mrms_flow_array(mrms_mean_flow(t, dom), dom).astype(np.float32)
+    path = nc_path(f, lat, lon, NC_LEAD, dom)
+    r0, r1, c0, c1 = nc_box(path, k)
+    field = nc_field(t, r0, r1, c0, c1, dom)
     served = _nc_learn['rgrow']
-    variants = {g: nc_read(*field, (r0, c0), path, g) for g in sorted({*NC_RGROWS, served})}
+    variants = {g: nc_read(*field, (r0, c0), path, g, k) for g in sorted({*NC_RGROWS, served})}
     radar = variants[served]
     run, steps = hrrr_point(lat, lon, t)
     model = hrrr_minutes(steps, t)
@@ -3499,7 +3584,7 @@ def nowcast_at(t, rev, lat, lon):
 
 def nowcast(lat, lon):
     nx_touch(lon - 1, lat - 1, lon + 1, lat + 1, time.time())   # the radars near the place come on
-    times = mrms_times()
+    times = mrms_times(mrms_domain_at(lat, lon) or 'conus')
     if not times:
         raise NotPublished
     t = times[-1]
@@ -3515,9 +3600,11 @@ def nc_train(t):
 
 def nc_observed(T, lat, lon):
     """(liquid mm/h, kind) at the place in scan T, as a lead-0 forecast reads it; rate None uncovered."""
-    path = [((MRMS_NORTH - lat) / MRMS_RES, (lon - MRMS_WEST) / MRMS_RES)]
-    r0, r1, c0, c1 = nc_box(path)
-    rate, _, kind = nc_read(*nc_field(T, r0, r1, c0, c1), (r0, c0), path)[0]
+    dom = mrms_domain_at(lat, lon) or 'conus'
+    g, k = MRMS_GRIDS[dom], MRMS_RES / MRMS_GRIDS[dom].res
+    path = [((g.north - lat) / g.res, (lon - g.west) / g.res)]
+    r0, r1, c0, c1 = nc_box(path, k)
+    rate, _, kind = nc_read(*nc_field(T, r0, r1, c0, c1, dom), (r0, c0), path, None, k)[0]
     return rate, kind
 
 
@@ -3644,8 +3731,10 @@ def nc_score():
         s = {'since': int(time.time()), 'places': {}}
     nc_decay(s, int(time.time()))
     names = {ll: name for name, ll in NC_PLACES.items()}
+    ring = {d: set(mrms_times(d)) for d in MRMS_GRIDS}
     for (t, lat, lon), fc in due:
-        obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_LEAD + 1) if t + m * 60 in times}
+        have = ring[mrms_domain_at(lat, lon) or 'conus']
+        obs = {m: nc_observed(t + m * 60, lat, lon) for m in range(0, NC_LEAD + 1) if t + m * 60 in have}
         for kind, series in fc.items():
             nc_tally(s.setdefault(kind, nc_totals()), series, obs)
             if (lat, lon) in names and '@' not in kind:   # per place: what was served and its parts
@@ -3782,8 +3871,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if url.path == '/mrms':
             frames = mrms_times()[-MRMS_FRAMES:]
-            src = frames and mrms_snow_src(frames[-1])
-            snow = src is not None and bool(src) and mrms_has_snow(src)
+            # the legend's Snow row: snow in any grid's newest type (Mauna Kea's summit too)
+            snow = bool(frames) and any((s := mrms_snow_src(frames[-1], d)) and mrms_has_snow(s, d) for d in MRMS_GRIDS)
             return self.send_json(200, {'frames': frames, 'snow': snow})
         if url.path == '/mrms/palette.png':
             return self.send_png(MRMS_PALETTE_PNG)
@@ -3791,23 +3880,24 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             q = parse_qs(url.query)
             box = mrms_crop_query(q)
-            cells = box and mrms_crop_box(*box)
+            dom = box and mrms_domain(*box[:4])
+            cells = dom and mrms_crop_box(*box, d=dom)
             if not cells:
                 return self.send_json(400, {'error': 'Invalid crop'})
             t = int(m.group(1))
             try:
-                body = mrms_crop(t, *cells) if m.group(2) == 'crop' \
-                    else mrms_flow_crop(t, *cells, q.get('mean', [''])[0] == '1')
+                body = mrms_crop(t, *cells, dom) if m.group(2) == 'crop' \
+                    else mrms_flow_crop(t, *cells, q.get('mean', [''])[0] == '1', dom)
             except NotPublished:
                 return self.send_json(404, {'error': 'Not in the radar ring'})
-            return self.send_png(body, {'X-Crop': mrms_crop_bounds(*cells)})
+            return self.send_png(body, {'X-Crop': mrms_crop_bounds(*cells, dom)})
         if url.path == '/nowcast':
             q = parse_qs(url.query)
             try:
                 lat, lon = float(q.get('lat', ['nan'])[0]), float(q.get('lon', ['nan'])[0])
             except ValueError:
                 lat = lon = math.nan
-            if not (MRMS_NORTH - MRMS_NY * MRMS_RES < lat < MRMS_NORTH and MRMS_WEST < lon < MRMS_WEST + MRMS_NX * MRMS_RES):
+            if mrms_domain_at(lat, lon) is None:
                 return self.send_json(400, {'error': 'lat/lon outside the radar mosaic'})
             try:
                 return self.send_json(200, nowcast(round(lat, 3), round(lon, 3)))
@@ -3821,7 +3911,8 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             q = parse_qs(url.query)
             box = mrms_crop_query(q)
-            cells = box and nx_crop_box(*box)
+            dom = box and mrms_domain(*box[:4])
+            cells = dom and nx_crop_box(*box, d=dom)
             rev = q.get('r', ['0'])[0]
             if not cells or not re.fullmatch(r'\d{1,12}', rev):
                 return self.send_json(400, {'error': 'Invalid crop'})
@@ -3879,7 +3970,8 @@ if __name__ == '__main__':
     print(f'Soundings: {TAR_URL}\nEnsemble:  {GRIB_URL}', flush=True)
     maybe_start_index_build()
     threading.Thread(target=preload_fields if FIELD_PRELOAD else purge_fields, daemon=True).start()
-    threading.Thread(target=mrms_poller, daemon=True).start()
+    for d in MRMS_GRIDS:
+        threading.Thread(target=mrms_poller, args=(d,), daemon=True).start()
     threading.Thread(target=nx_poller, daemon=True).start()
     threading.Thread(target=hrrr_poller, daemon=True).start()
     threading.Thread(target=hrrr_poller, args=('hi',), daemon=True).start()

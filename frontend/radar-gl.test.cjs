@@ -32,6 +32,24 @@ const assert = require('node:assert/strict');
     c = g.cropFor({ ...nyc, zoom: 9 }, { frames: 60, cell: g.NX_CELL, bytes: 4 });
     assert.ok(60 * 4 * ((c.e - c.w) / g.NX_CELL / c.step) * ((c.n - c.s) / g.NX_CELL / c.step) <= 96e6 * 1.0001 && c.step === 2, c.step);
 
+    // Hawaii: its own grid at its native 0.005° (extractor MRMS_GRIDS['hi'], same edges asserted in test_fields.py)
+    assert.deepEqual(g.GRIDS[1], { west: -164, south: 15, east: -151, north: 26, cell: 0.005 });
+    const oahu = { west: -158.4, south: 21.2, east: -157.6, north: 21.8, zoom: 10 };
+    assert.equal(g.gridFor(oahu), g.GRIDS[1]);
+    c = g.cropFor(oahu);
+    assert.deepEqual([c.w, c.s, c.e, c.n, c.step], [-159.4, 20.2, -156.6, 22.8, 1]);
+    c = g.cropFor({ ...oahu, zoom: 7 }, { frames: 60, budget: 1e12 });   // ~0.0027° per CSS px: 0.005° texels still fit
+    assert.equal(c.step, 1);
+    c = g.cropFor({ west: -162, south: 17, east: -153, north: 24, zoom: 6.5 }, { frames: 60, budget: 1e12 });
+    assert.deepEqual([c.w, c.s, c.e, c.n], [-164, 15, -151, 26], 'clamped to the Hawaii grid');
+    assert.equal(c.step, 2, 'its 2600 columns fit 2048 at step 2');
+    c = g.cropFor({ ...oahu, zoom: 11 }, { frames: 10, cell: g.NX_CELL, bytes: 4 });
+    assert.deepEqual([c.w, c.s, c.e, c.n, c.step], [-159.4, 20.2, -156.6, 22.8, 1]);
+    // A view over both picks the grid it overlaps most; open ocean picks none
+    assert.equal(g.gridFor({ west: -170, south: 10, east: -100, north: 50 }), g.GRIDS[0]);
+    assert.equal(g.gridFor({ west: -165, south: 14, east: -128, north: 27 }), g.GRIDS[1]);
+    assert.equal(g.cropFor({ west: -145, south: 30, east: -140, north: 33, zoom: 6 }), null);
+
     // Re-crop when the view leaves the crop or a finer step is wanted, not for small pans
     const cur = { bounds: [-75.52, 39.28, -72.48, 42.16], step: 2 };
     assert.equal(g.needsCrop(cur, { ...nyc }, { step: 2 }), false);
@@ -88,6 +106,7 @@ const assert = require('node:assert/strict');
     assert.deepEqual(g.flowDegrees(128, 128), [0, -0]);
     near(g.flowDegrees(160, 96)[0], 0.04);
     near(g.flowDegrees(160, 96)[1], 0.04);
+    near(g.flowDegrees(160, 96, 0.005)[0], 0.02);                // Hawaii flow units are its 0.005° cells
 
     // Nowcast never fades; the hatch marks it at one strength for every step, observed frames never
     assert.equal(g.nowcastFade, undefined);

@@ -35,17 +35,19 @@
  */
 
 // Extractor MRMS_FLOW_SCALE (flow units comment there): flow texel byte - 128 = v, and
-// v / FLOW_SCALE is 0.01° grid cells moved per 2 minutes, x east, y south;
-// blue is the scan's data age in AGE_UNIT seconds
+// v / FLOW_SCALE is grid cells moved per 2 minutes (the cell is X-Crop's sixth value:
+// 0.01° CONUS, 0.005° Hawaii), x east, y south; blue is the scan's data age in AGE_UNIT seconds
 export const FLOW_SCALE = 8;
 export const AGE_UNIT = 10;
-export const CELL_DEG = 0.01;
+export const CELL_DEG = 0.01;  // CONUS, and the fallback for a flow crop without its cell
 export const FLOW_S = 120;
 export const NOWCAST_S = 3600;
 export const STEP_S = 360;    // nowcast steps, and MRMS-only observed frames (radar.js)
 export const NX_CELL = 0.0025; // NEXRAD composite cells (extractor NX_RES)
 export const NX_MINZOOM = 6;   // coarser views: MRMS alone (as sharp as the screen there)
-const GRID = { west: -130, south: 20, east: -60, north: 55 };   // MRMS CONUS outer edges
+// MRMS grids' outer edges and cells (extractor MRMS_GRIDS): CONUS, Hawaii at its native resolution
+export const GRIDS = [{ west: -130, south: 20, east: -60, north: 55, cell: 0.01 },
+    { west: -164, south: 15, east: -151, north: 26, cell: 0.005 }];
 const TEX_MAX = 2048;
 const MARGIN_DEG = 1.0;       // crop margin past the view: a 60-minute backtrace at ~100 km/h
 const LOAD_PARALLEL = 4;
@@ -55,17 +57,32 @@ export const mercX = lon => (lon + 180) / 360;
 export const mercY = lat => (1 - Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) / Math.PI) / 2;
 export const latAt = y => Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI;
 
+// The grid a box {west, south, east, north} overlaps most (the extractor picks the same), or null
+export function gridFor(box) {
+    let best = null, most = 0;
+    for (const g of GRIDS) {
+        const a = Math.max(0, Math.min(box.east, g.east) - Math.max(box.west, g.west))
+            * Math.max(0, Math.min(box.north, g.north) - Math.max(box.south, g.south));
+        if (a > most) { best = g; most = a; }
+    }
+    return best;
+}
+
 /**
  * Crop to ask for over a view {west, south, east, north, zoom}: the view plus
- * a margin, clamped to the grid, at the coarsest of three steps: about one
- * texel per CSS pixel (texelPx > 1 coarser, for phones), frames x texels x
- * `bytes` within `budget`, and both sides within TEX_MAX. cell: grid degrees.
+ * a margin, clamped to the grid it overlaps most, at the coarsest of three steps:
+ * about one texel per CSS pixel (texelPx > 1 coarser, for phones), frames x texels x
+ * `bytes` within `budget`, and both sides within TEX_MAX. cell: texel degrees
+ * (default the grid's own).
  */
-export function cropFor(view, { frames = 60, budget = 96e6, texelPx = 1, cell = CELL_DEG, bytes = 1 } = {}) {
+export function cropFor(view, { frames = 60, budget = 96e6, texelPx = 1, cell, bytes = 1 } = {}) {
     const mx = Math.max((view.east - view.west) / 2, MARGIN_DEG), my = Math.max((view.north - view.south) / 2, MARGIN_DEG);
-    const w = Math.max(view.west - mx, GRID.west), e = Math.min(view.east + mx, GRID.east);
-    const s = Math.max(view.south - my, GRID.south), n = Math.min(view.north + my, GRID.north);
-    if (!(w < e && s < n)) return null;
+    const box = { west: view.west - mx, east: view.east + mx, south: view.south - my, north: view.north + my };
+    const grid = gridFor(box);
+    if (!grid) return null;
+    cell ??= grid.cell;
+    const w = Math.max(box.west, grid.west), e = Math.min(box.east, grid.east);
+    const s = Math.max(box.south, grid.south), n = Math.min(box.north, grid.north);
     const cols = (e - w) / cell, rows = (n - s) / cell;
     const cellsPerPx = 360 / (512 * 2 ** view.zoom) / cell;
     const step = Math.max(1, Math.floor(cellsPerPx * texelPx), Math.ceil(Math.sqrt(cols * rows * frames * bytes / budget)),
@@ -156,8 +173,8 @@ export function timeAt(times, idx) {
     return i + 1 < times.length ? times[i] + (idx - i) * (times[i + 1] - times[i]) : times[i];
 }
 
-// v (flow texel bytes) -> degrees per flow period, east and north
-export const flowDegrees = (r, g) => [(r - 128) / FLOW_SCALE * CELL_DEG, -(g - 128) / FLOW_SCALE * CELL_DEG];
+// v (flow texel bytes) -> degrees per flow period, east and north, on a grid of `cell` degrees
+export const flowDegrees = (r, g, cell = CELL_DEG) => [(r - 128) / FLOW_SCALE * cell, -(g - 128) / FLOW_SCALE * cell];
 
 // ---- The layer ----
 const VERT = `#version 300 es
@@ -179,6 +196,7 @@ uniform sampler2D u_r0, u_r1, u_f1, u_fm, u_pal;   // scans, scan 1's motion (it
 uniform sampler2D u_n0, u_n1;                     // NEXRAD composite of each scan's time (RGB: q, coverage, class)
 uniform vec4 u_b0, u_b1, u_bf1, u_bfm, u_bn0, u_bn1;   // texture bounds: west, south, east, north (degrees)
 uniform float u_w, u_k0, u_k1, u_gap, u_opacity, u_hatch, u_hatchPx, u_hasN0, u_hasN1;
+uniform float u_cell;            // the nowcast motion's grid cell (degrees): flow units are its cells
 uniform int u_steps;             // nowcast substeps (it follows the flow around curves)
 const float PI = 3.141592653589793;
 
@@ -186,7 +204,7 @@ vec2 uvIn(vec4 b, vec2 ll) { return vec2((ll.x - b.x) / (b.z - b.x), (b.w - ll.y
 
 // Motion at ll in degrees per 2 minutes, east and north
 vec2 flow(sampler2D f, vec4 b, vec2 ll) {
-    vec2 v = (texture(f, uvIn(b, ll)).rg * 255.0 - 128.0) * (${CELL_DEG} / ${FLOW_SCALE}.0);
+    vec2 v = (texture(f, uvIn(b, ll)).rg * 255.0 - 128.0) * (u_cell / ${FLOW_SCALE}.0);
     return vec2(v.x, -v.y);
 }
 
@@ -431,10 +449,10 @@ export class MrmsLayer {
         try {
             const res = await fetch(kind === 'nexrad' ? this.opts.nxUrl(time, query) : this.opts.url(time, kind, query));
             if (!res.ok) return null;
-            const [w, s, e, n] = (res.headers.get('X-Crop') || '').split(',').map(Number);
+            const [w, s, e, n, , cell] = (res.headers.get('X-Crop') || '').split(',').map(Number);
             if (kind !== 'palette' && !(w < e && s < n)) return null;
             const bitmap = await createImageBitmap(await res.blob(), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
-            return { bitmap, bounds: [w, s, e, n] };
+            return { bitmap, bounds: [w, s, e, n], cell: cell > 0 ? cell : CELL_DEG };
         } catch {
             return null;
         }
@@ -471,7 +489,7 @@ export class MrmsLayer {
         this.loc = {};
         for (const u of ['u_matrix', 'u_quad', 'u_r0', 'u_r1', 'u_f1', 'u_fm', 'u_pal', 'u_b0', 'u_b1', 'u_bf1', 'u_bfm',
             'u_n0', 'u_n1', 'u_bn0', 'u_bn1', 'u_hasN0', 'u_hasN1',
-            'u_w', 'u_k0', 'u_k1', 'u_gap', 'u_opacity', 'u_hatch', 'u_hatchPx', 'u_steps']) {
+            'u_w', 'u_k0', 'u_k1', 'u_gap', 'u_opacity', 'u_hatch', 'u_hatchPx', 'u_steps', 'u_cell']) {
             this.loc[u] = gl.getUniformLocation(prog, u);
         }
         this.vao = gl.createVertexArray();
@@ -502,13 +520,13 @@ export class MrmsLayer {
                 this.palette = this.texture(gl, u.bitmap, gl.RGBA8, gl.RGBA, gl.NEAREST);
             } else if (u.kind === 'nowcast') {
                 if (this.nowcast?.tex) gl.deleteTexture(this.nowcast.tex);
-                this.nowcast = { time: u.time, key: u.key, bounds: u.bounds, tex: this.texture(gl, u.bitmap, gl.RGB8, gl.RGB, gl.LINEAR) };
+                this.nowcast = { time: u.time, key: u.key, bounds: u.bounds, cell: u.cell, tex: this.texture(gl, u.bitmap, gl.RGB8, gl.RGB, gl.LINEAR) };
             } else {
                 const e = this.entries.get(u.time);
                 if (e) {
                     if (e[u.kind]?.tex) gl.deleteTexture(e[u.kind].tex);
                     const crop = u.kind === 'crop', nearest = u.kind !== 'flow';
-                    e[u.kind] = { key: u.key, bounds: u.bounds,
+                    e[u.kind] = { key: u.key, bounds: u.bounds, cell: u.cell,
                         tex: this.texture(gl, u.bitmap, crop ? gl.RG8 : gl.RGB8, crop ? gl.RG : gl.RGB, nearest ? gl.NEAREST : gl.LINEAR) };
                     if (u.kind === 'crop' && u.key === this.crop?.key) this.crop.bounds = u.bounds;
                     if (u.kind === 'nx' && this.nxCrop && u.key.startsWith(`${this.nxCrop.key}&`)) this.nxCrop.bounds = u.bounds;
@@ -554,6 +572,7 @@ export class MrmsLayer {
         gl.uniform4fv(this.loc.u_b1, b[1]);
         gl.uniform4fv(this.loc.u_bf1, f1?.bounds || b[1]);
         gl.uniform4fv(this.loc.u_bfm, fm?.bounds || b[0]);
+        gl.uniform1f(this.loc.u_cell, fm?.cell || CELL_DEG);
         gl.uniform4fv(this.loc.u_bn0, n0?.bounds || b[0]);
         gl.uniform4fv(this.loc.u_bn1, n1?.bounds || b[1]);
         gl.uniform1f(this.loc.u_hasN0, n0 ? 1 : 0);
