@@ -33,10 +33,35 @@ p = X.grid_params(g)
 LAMBERT_P = dict(p)                       # the nowcast test's HRRR stand-in grid
 lats = ec.codes_get_array(g, 'latitudes')
 lons = ec.codes_get_array(g, 'longitudes')
-fi, fj = X.lambert_ij(p, lats, lons)
+fi, fj = X.grid_ij(p, lats, lons)
 k = np.arange(450 * 265)
 err = max(np.abs(fi - k % 450).max(), np.abs(fj - k // 450).max())
 assert err < 0.01, f'grid math off by {err:.3f} cells'
+# Mercator, shaped like the RRFS Hawaii grid (first longitude in 0-360, places in -180-180)
+m = ec.codes_grib_new_from_samples('GRIB2')
+ec.codes_set(m, 'gridDefinitionTemplateNumber', 10)
+for k, v in (('Ni', 321), ('Nj', 225), ('LaDInDegrees', 20.0), ('shapeOfTheEarth', 6),
+             ('latitudeOfFirstGridPointInDegrees', 18.072699), ('longitudeOfFirstGridPointInDegrees', 198.474999),
+             ('latitudeOfLastGridPointInDegrees', 23.087799), ('longitudeOfLastGridPointInDegrees', 206.13099),
+             ('DiInMetres', 2500), ('DjInMetres', 2500), ('iScansNegatively', 0), ('jScansPositively', 1)):
+    ec.codes_set(m, k, v)
+ec.codes_set_values(m, np.full(321 * 225, 273.15))
+mp = X.grid_params(m)
+assert mp['gridType'] == 'mercator'
+mlats, mlons = ec.codes_get_array(m, 'latitudes'), ec.codes_get_array(m, 'longitudes')
+fi, fj = X.grid_ij(mp, mlats, np.where(mlons > 180, mlons - 360, mlons))
+k = np.arange(321 * 225)
+err = max(np.abs(fi - k % 321).max(), np.abs(fj - k // 321).max())
+assert err < 0.01, f'Mercator grid math off by {err:.3f} cells'
+assert X.earth_winds(mp, 1.0, 2.0, -157.9) == (1.0, 2.0), 'Mercator winds are already earth-relative'
+# A crop box for Honolulu's tile on the Hawaii grid, none on the CONUS grid (and the reverse for New York)
+assert X.crop_box(mp, (21, -158)) and not X.crop_box(p, (21, -158)), 'Honolulu belongs to the Hawaii grid'
+assert X.crop_box(p, (40, -74)) and not X.crop_box(mp, (40, -74)), 'New York belongs to the CONUS grid'
+assert [X.place_domain(*ll) for ll in ((40.71, -74.0), (21.31, -157.86), (19.72, -155.08), (61.2, -149.9))] \
+    == ['conus', 'hi', 'hi', None]
+assert 'ASNOW' not in X.CROPS['nbmhi'][0] and 'TMAX' in X.CROPS['nbmhi'][0], 'NBM Hawaii has no snow messages'
+assert X.ens_dom(21.31, -157.86) == 'hi' and X.ens_dom(40.71, -74.0) == 'conus'
+
 # NBM scans every other row east to west: grid_values must agree with
 # ecCodes' own nearest-point lookup (which honours the scan) on odd and even rows
 ec.codes_set(g, 'alternativeRowScanning', 1)
@@ -52,7 +77,7 @@ spec = {'band': 1, 'value': lambda c: c, 'stops': [(0, (0, 0, 0, 255)), (254, (0
 lat = np.linspace(48, 41, 64)[:, None]    # Dakotas to Iowa: inside the grid
 lon = np.linspace(-101, -90, 64)[None, :]
 px, _ = X.paint(spec, [col], p, lat, lon)
-want = np.floor(X.lambert_ij(p, lat, lon)[0])
+want = np.floor(X.grid_ij(p, lat, lon)[0])
 assert (px != 255).all(), 'area over the grid has holes'
 assert np.abs(px.astype(int) - np.minimum(want, 253)).max() <= 1, 'bilinear sample off'
 assert (X.paint(spec, [col], p, np.array([[50.0]]), np.array([[10.0]]))[0] == 255).all(), 'Europe should be empty'
@@ -117,8 +142,11 @@ assert X.crop_box(p, X.forecast_tile(10.5, 40.5)) is None, 'a tile off the grid 
 
 # Purge: stale cycles and old formats go, live ones stay, and a source whose
 # newest cycle is unknown (S3 not answering yet) keeps its cache
-def purge_with(cycles, rtma, nbm=('20260928', '00')):
-    X.field_cycle, X.rtma_frames, X.daily_cycle = (lambda m: cycles[m]), (lambda: rtma), (lambda: nbm)
+def purge_with(cycles, rtma, nbm=('20260928', '00'), hi=(None, None)):
+    X.field_cycle = lambda m, src='rrfs': cycles[m] if src == 'rrfs' else hi
+    X.daily_cycle = lambda src='nbm': nbm if src == 'nbm' else (None, None)
+    X.blend_cycle = lambda src='nbmh': (None, None)
+    X.rtma_frames, X.rtma_hi_frame = (lambda: rtma), (lambda: (None, None))
     for d in ('rrfs2026092806', 'rrfs2026092812', 'rtma202609281600', 'rtma202609281615', '2026092812',
               'nbm2026092712', 'nbm2026092800'):
         os.makedirs(os.path.join(X.FIELD_DIR, d), exist_ok=True)
@@ -142,6 +170,10 @@ cold = {'hourly': (None, None), 'extended': ('20260928', '12')}
 X._forecast_run['nbm'] = {'cur': None, 'prev': None}
 assert purge_with(cold, [], (None, None)) == ['nbm2026092712', 'nbm2026092800', 'rrfs2026092806',
                                               'rrfs2026092812', 'rtma202609281600', 'rtma202609281615']
+# Hawaii runs purge on their own source's state: kept while unknown, gone once a newer run is known
+os.makedirs(os.path.join(X.FIELD_DIR, 'rrfshi2026092700'))
+assert 'rrfshi2026092700' in purge_with(live, [('20260928', '1615')]), 'unknown Hawaii run kept'
+assert 'rrfshi2026092700' not in purge_with(live, [('20260928', '1615')], hi=('20260928', '12')), 'stale Hawaii run purged'
 
 # NBM .idx step text, as published: hours throughout, the probability descriptor after the step
 assert [X.nbm_step(m, 24) for m in X.DAILY_MSGS] == \
@@ -229,6 +261,21 @@ assert lb['2026-09-29']['lo'] == round(X.K_TO_F(283)) and lb['2026-10-08']['lo']
 assert (d['wind'], d['gust'], d['cloud'], d['qpf']) == (round(5 * 2.23694), round(10 * 2.23694), 36, 0.4), d
 # Snow at f042 (12z-18z on the 29th) is the 29th in Los Angeles as well
 assert lb['2026-09-29']['snow'] == 11.8
+# Hawaii (HST, UTC-10): TMIN 00z-12z is 2pm-2am, so the 5am low (15z) only shows in the
+# 3-hourly temperatures; day PoP is the 6 h windows whose middle is 6am-6pm HST
+hh = list(X.CROPS['nbmhi'][1])
+hv = {'TMAX': lambda fh: 302, 'TMIN': lambda fh: 293, 'TMP': lambda fh: 290 if fh % 24 == 15 else 300,
+      'POP06': lambda fh: fh, 'APCP': lambda fh: 0, 'TCDC': lambda fh: 50, 'WIND': lambda fh: 3, 'GUST': lambda fh: 6}
+hs = {m: np.array([hv[m](fh) if X.nbm_hi_has('00', m, fh) else np.nan for fh in hh]) for m in X.CROPS['nbmhi'][0]}
+assert not X.nbm_hi_has('00', 'APCP', 3) and X.nbm_hi_has('00', 'TMP', 3) and not X.nbm_hi_has('00', 'TMP', 195)
+hb = {r['date']: r for r in X.daily_rows(X.frame_time('nbmhi', '20260928', '00', 0), hh, hs, X.place_zone('Pacific/Honolulu'))}
+d = hb['2026-09-29']
+assert (d['lo'], d['hi']) == (round(X.K_TO_F(290)), round(X.K_TO_F(302))), d
+# Sep 28 HST: day windows end f024 (8am-2pm) and f030 (2pm-8pm); night ones f012 and f018
+assert (hb['2026-09-28']['pop_day'], hb['2026-09-28']['pop_night']) == (30, 18), hb['2026-09-28']
+assert hb['2026-09-28']['snow'] is None and hb['2026-09-28']['ptype'] is None
+# The run starts 2pm on the 27th HST: its 5pm sample alone makes no row for the 27th
+assert min(hb) == '2026-09-28', sorted(hb)[:2]
 # Zone names: anything unusable falls back to New York
 assert str(X.place_zone('America/Denver')) == 'America/Denver'
 assert all(X.place_zone(n) is X.DAILY_TZ for n in ('', None, 'Nowhere/Land', '../etc/passwd', 'UTC', 'America/' + 'x' * 60))

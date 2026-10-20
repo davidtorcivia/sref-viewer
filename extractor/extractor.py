@@ -10,7 +10,7 @@ two public products in the noaa-rrfs-ops-pds bucket:
      streamed, never stored: the wanted station files are picked out of
      the stream and decoded with NCEPLIBS-bufr's debufr into an hourly
      surface series.
-  2. REFS ensemble products (ensprod/refs.tCCz.{mean,sprd}.fHH.conus.grib2):
+  2. REFS ensemble products (ensprod/refs.tCCz.{mean,sprd}.fHH.{conus,hi}.grib2):
      the needed fields are fetched by byte range using the .idx sidecars,
      every 3 hours to 60h. Each field is decoded in memory with ecCodes at
      the grid point nearest every known station, and only those point
@@ -43,7 +43,7 @@ Response:
 
 Environment:
   RRFS_TAR_URL   tarball URL template  ({date}, {cycle})
-  REFS_GRIB_URL  ensprod URL template  ({date}, {cycle}, {prod}, {hh})
+  REFS_GRIB_URL  ensprod URL template  ({date}, {cycle}, {prod}, {hh}, {dom})
   REFS_HOT_SIDS  stations decoded together on any tarball pass (defaults)
   CACHE_DIR      decoded per-station and per-cycle JSON (14 days)
 """
@@ -70,7 +70,7 @@ import urllib.error
 import warnings
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -87,7 +87,9 @@ TAR_URL = os.environ.get(
     'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.bufrsnd.tar.gz')
 GRIB_URL = os.environ.get(
     'REFS_GRIB_URL',
-    'https://noaa-rrfs-ops-pds.s3.amazonaws.com/refs.{date}/{cycle}/ensprod/refs.t{cycle}z.{prod}.f{hh}.conus.grib2')
+    'https://noaa-rrfs-ops-pds.s3.amazonaws.com/refs.{date}/{cycle}/ensprod/refs.t{cycle}z.{prod}.f{hh}.{dom}.grib2')
+# REFS ensprod domains: Hawaii stations read the .hi files, every other station the CONUS ones
+ENS_DOMS = ('conus', 'hi')
 # Stations pulled out of the tarball together, so the default airports cost
 # one stream per cycle instead of one each
 HOT_SIDS = [s for s in os.environ.get('REFS_HOT_SIDS', '744860,725030,725020').split(',') if s]
@@ -259,9 +261,9 @@ def decode_bufr(raw, header_only=False):
 
 # ============ REFS ensemble (grib byte ranges, decoded in memory) ============
 
-def fetch_grib_fields(date, cycle, prod, h):
+def fetch_grib_fields(date, cycle, prod, h, dom='conus'):
     """Wanted fields of one ensprod file as {key: message bytes}. None if not published."""
-    url = GRIB_URL.format(date=date, cycle=cycle, prod=prod, hh=f'{h:02d}')
+    url = GRIB_URL.format(date=date, cycle=cycle, prod=prod, hh=f'{h:02d}', dom=dom)
     try:
         rows = [l.split(':') for l in http_get(url + '.idx').decode().splitlines()]
     except urllib.error.HTTPError as err:
@@ -294,6 +296,15 @@ def station_points():
 OUTSIDE = -1  # station outside the grid domain
 
 
+def ens_dom(lat, lon):
+    w, s, e, n = HI_BBOX
+    return 'hi' if s <= lat <= n and w <= lon <= e else 'conus'
+
+
+def grid_index_file(dom):
+    return GRID_INDEX_FILE if dom == 'conus' else GRID_INDEX_FILE.replace('.json', f'-{dom}.json')
+
+
 def grid_indices(g, points, known):
     """Nearest grid-point index for each station not already in `known`."""
     missing = {s: ll for s, ll in points.items() if s not in known}
@@ -313,9 +324,9 @@ def grid_indices(g, points, known):
     return out
 
 
-def load_grid_index(g):
+def load_grid_index(g, dom='conus'):
     """Cached station -> grid index map, discarded if the grid changed."""
-    cached = read_json(GRID_INDEX_FILE) or {}
+    cached = read_json(grid_index_file(dom)) or {}
     if cached.get('points') == ec.codes_get(g, 'numberOfPoints'):
         return cached.get('index', {})
     return {}
@@ -335,19 +346,19 @@ def update_ens_store(date, cycle, points):
     with file_lock(path):
         store = read_json(path) or {}
         allpoints = {**station_points(), **points}
-        outside = {s for s, i in ((read_json(GRID_INDEX_FILE) or {}).get('index', {})).items()
-                   if i == OUTSIDE}
-        need = [(h, p) for h in ENS_HOURS for p in ENS_PRODS
+        doms = {s: ens_dom(*ll) for s, ll in allpoints.items()}
+        indexes = {d: (read_json(grid_index_file(d)) or {}).get('index', {}) for d in ENS_DOMS}
+        outside = {s for s, d in doms.items() if indexes[d].get(s) == OUTSIDE}
+        need = [(h, p, d) for h in ENS_HOURS for p in ENS_PRODS for d in ENS_DOMS
                 if any(s not in store.get(f'{h:02d}:{p}', {}).get('tmp', {})
-                       for s in points if s not in outside)]
+                       for s in points if s not in outside and doms[s] == d)]
         if not need:
             return store
 
-        gidx = None
-        points_n = None
+        gidxs, points_ns = {}, {}   # per domain
 
-        def decode(h, prod, fields):
-            nonlocal gidx, points_n
+        def decode(h, prod, dom, fields):
+            mine = {s: ll for s, ll in allpoints.items() if doms[s] == dom}
             entry = {}
             for key, raw in fields.items():
                 g = ec.codes_new_from_message(raw)
@@ -356,18 +367,19 @@ def update_ens_store(date, cycle, points):
                                ec.codes_get(g, 'parameterNumber'))
                     if ENS_PARAMS.get(triplet) != key:
                         raise RuntimeError(f'{prod} f{h:02d} {key}: unexpected parameter {triplet}')
-                    if gidx is None:
-                        gidx = load_grid_index(g)
-                        points_n = ec.codes_get(g, 'numberOfPoints')
-                    if any(s not in gidx for s in allpoints):
+                    if dom not in gidxs:
+                        gidxs[dom] = load_grid_index(g, dom)
+                        points_ns[dom] = ec.codes_get(g, 'numberOfPoints')
+                    gidx = gidxs[dom]
+                    if any(s not in gidx for s in mine):
                         set_progress(date, cycle, ensemble='locating stations on the grid')
-                        gidx = grid_indices(g, allpoints, gidx)
-                        write_json(GRID_INDEX_FILE, {'generated': int(time.time()),
-                                                     'points': points_n, 'index': gidx})
+                        gidx = gidxs[dom] = grid_indices(g, mine, gidx)
+                        write_json(grid_index_file(dom), {'generated': int(time.time()),
+                                                          'points': points_ns[dom], 'index': gidx})
                     values = ec.codes_get_values(g)
                     # 4 decimals keeps the per-cycle store small (K, m/s, mm, m)
                     entry[key] = {s: round(float(values[gidx[s]]), 4)
-                                  for s in allpoints if gidx[s] != OUTSIDE}
+                                  for s in mine if gidx[s] != OUTSIDE}
                 finally:
                     ec.codes_release(g)
             return entry
@@ -378,17 +390,20 @@ def update_ens_store(date, cycle, points):
         done = 0
         set_progress(date, cycle, ensemble=f'fetching 0/{len(need)}')
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(fetch_grib_fields, date, cycle, p, h): (h, p) for h, p in need}
+            futures = {pool.submit(fetch_grib_fields, date, cycle, p, h, d): (h, p, d) for h, p, d in need}
             for fut in as_completed(futures):
-                h, prod = futures[fut]
+                h, prod, dom = futures[fut]
                 done += 1
                 set_progress(date, cycle, ensemble=f'fetching {done}/{len(need)}')
                 if fut.exception():
-                    print(f'[ENS] {date}{cycle} {prod} f{h:02d}: {fut.exception()}', flush=True)
+                    print(f'[ENS] {date}{cycle} {prod} f{h:02d} {dom}: {fut.exception()}', flush=True)
                     continue
                 fields = fut.result()
                 if fields is not None:
-                    store[f'{h:02d}:{prod}'] = decode(h, prod, fields)
+                    # Domains share an entry: each fills in its own stations
+                    entry = store.setdefault(f'{h:02d}:{prod}', {})
+                    for key, vals in decode(h, prod, dom, fields).items():
+                        entry.setdefault(key, {}).update(vals)
         set_progress(date, cycle, ensemble='done')
         write_json(path, store)
         return store
@@ -628,6 +643,17 @@ RTMA_URL = os.environ.get(
 NBM_URL = os.environ.get(
     'NBM_URL',
     'https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.{date}/{cycle}/core/blend.t{cycle}z.core.f{fh}.co.grib2')
+# Hawaii: the same RRFS and NBM runs on their own 2.5 km Mercator grids, and the
+# hourly RTMA (no rapid update there). Only the overview's point forecast uses them.
+FIELD_URL_HI = os.environ.get(
+    'RRFS_FIELD_URL_HI',
+    'https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{cycle}/rrfs.t{cycle}z.2dfld.2p5km.f{fh}.hi.grib2')
+NBM_URL_HI = os.environ.get(
+    'NBM_URL_HI',
+    'https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.{date}/{cycle}/core/blend.t{cycle}z.core.f{fh}.hi.grib2')
+RTMA_URL_HI = os.environ.get(
+    'RTMA_URL_HI', 'https://noaa-rtma-pds.s3.amazonaws.com/hirtma.{date}/hirtma.t{cycle}z.2dvaranl_ndfd.grb2')
+HI_BBOX = (-161.6, 18.0, -153.8, 23.2)     # west, south, east, north: covers the RRFS Hawaii grid
 # 2dfld exists for 3-hourly cycles only: 00/06/12/18Z reach 84h, 03/09/15/21Z 18h.
 # RRFS mode -> forecast hour whose publication makes a cycle usable ('now' is RTMA)
 FIELD_MODES = {'hourly': 36, 'extended': 84}
@@ -662,6 +688,8 @@ def nbm_step(msg, fh):
         return f'{fh - 12}-{fh} hour {msg[1:].lower()} fcst'
     if msg == 'POP12':
         return f'{fh - 12}-{fh} hour acc fcst:prob >0.254'
+    if msg == 'POP06':
+        return f'{fh - 6}-{fh} hour acc fcst:prob >0.254'
     if msg in ('APCP', 'ASNOW', 'FICEAC'):
         return f'{fh - 6}-{fh} hour acc fcst'
     return f'{fh} hour fcst'
@@ -690,6 +718,11 @@ SOURCES = {
                         'WIND': '10 m above ground', 'GUST': '10 m above ground'},
              'step': lambda m, fh: f'{fh} hour fcst'},
 }
+# Hawaii sources: no underscore in the name, since purge_fields reads a cache dir's source as its leading letters
+SOURCES.update({'rrfshi': {**SOURCES['rrfs'], 'url': FIELD_URL_HI},
+                'nbmhi': {**SOURCES['nbm'], 'url': NBM_URL_HI, 'names': {'POP12': 'APCP', 'POP06': 'APCP'},
+                          'levels': {**SOURCES['nbm']['levels'], 'TMP': '2 m above ground', 'POP06': 'surface'}},
+                'nbmhhi': {**SOURCES['nbmh'], 'url': NBM_URL_HI}, 'rtmahi': {**SOURCES['rtma'], 'url': RTMA_URL_HI}})
 K_TO_F = lambda k: (k - 273.15) * 9 / 5 + 32
 
 # TWC radar colors per 5 dBZ from 0 dBZ; radar.css draws the legend bars from the same hexes
@@ -805,20 +838,31 @@ def fetch_idx_fields(url, wanted, step):
     return out
 
 
-GRID_KEYS = ('Nx', 'Ny', 'LoVInDegrees', 'LaDInDegrees', 'latitudeOfFirstGridPointInDegrees',
-             'longitudeOfFirstGridPointInDegrees', 'DxInMetres', 'DyInMetres', 'radius')
+_GRID_COMMON = ('Nx', 'Ny', 'LaDInDegrees', 'latitudeOfFirstGridPointInDegrees',
+                'longitudeOfFirstGridPointInDegrees', 'DxInMetres', 'DyInMetres', 'radius')
+GRID_KEYS = {'lambert': _GRID_COMMON + ('LoVInDegrees',), 'mercator': _GRID_COMMON}
 
 
 def grid_params(g):
-    """Projection keys of a tangent Lambert conformal grid on a sphere (what RRFS CONUS uses)."""
-    if ec.codes_get(g, 'gridType') != 'lambert' or ec.codes_get(g, 'Latin1InDegrees') != ec.codes_get(g, 'Latin2InDegrees') \
-            or ec.codes_get(g, 'iScansNegatively') or not ec.codes_get(g, 'jScansPositively'):
+    """Projection keys of a tangent Lambert conformal grid (RRFS and NBM CONUS) or a
+    Mercator grid (their Hawaii grids) on a sphere."""
+    kind = ec.codes_get(g, 'gridType')
+    if kind not in GRID_KEYS or ec.codes_get(g, 'iScansNegatively') or not ec.codes_get(g, 'jScansPositively') \
+            or kind == 'lambert' and ec.codes_get(g, 'Latin1InDegrees') != ec.codes_get(g, 'Latin2InDegrees'):
         raise RuntimeError('Unsupported grid for map rendering')
-    return {k: ec.codes_get(g, k) for k in GRID_KEYS}
+    return {'gridType': kind, **{k: ec.codes_get(g, k) for k in GRID_KEYS[kind]}}
 
 
-def lambert_ij(p, lat, lon):
-    """Fractional grid column/row of each lat/lon."""
+def grid_ij(p, lat, lon):
+    """Fractional grid column/row of each lat/lon. Grids cached before Mercator
+    support carry no gridType: they are all Lambert."""
+    if p.get('gridType', 'lambert') == 'mercator':
+        k = p['radius'] * math.cos(math.radians(p['LaDInDegrees']))
+        y = lambda lat: k * np.log(np.tan(np.pi / 4 + np.radians(lat) / 2))
+        # the first point's longitude is 0-360 (198.5 for Hawaii), the caller's -180-180
+        dlon = (np.asarray(lon) - p['longitudeOfFirstGridPointInDegrees'] + 180) % 360 - 180
+        return (k * np.radians(dlon) / p['DxInMetres'],
+                (y(lat) - y(p['latitudeOfFirstGridPointInDegrees'])) / p['DyInMetres'])
     phi0, lam0, r = math.radians(p['LaDInDegrees']), math.radians(p['LoVInDegrees']), p['radius']
     n = math.sin(phi0)
     F = math.cos(phi0) * math.tan(math.pi / 4 + phi0 / 2) ** n / n
@@ -834,14 +878,17 @@ def lambert_ij(p, lat, lon):
 
 
 def earth_winds(p, u, v, lon):
-    """Grid-relative Lambert winds (uvRelativeToGrid=1 in RRFS) turned earth-relative."""
+    """Grid-relative Lambert winds (uvRelativeToGrid=1 in RRFS) turned earth-relative.
+    A Mercator grid's axes already point east and north."""
+    if p.get('gridType', 'lambert') == 'mercator':
+        return u, v
     t = math.sin(math.radians(p['LaDInDegrees'])) * np.radians((lon - p['LoVInDegrees'] + 180) % 360 - 180)
     return u * np.cos(t) + v * np.sin(t), -u * np.sin(t) + v * np.cos(t)
 
 
 def sample(arrays, p, lat, lon):
     """Bilinear samples of each (ny, nx) array at lat/lon, and the on-grid mask."""
-    fi, fj = lambert_ij(p, lat, lon)
+    fi, fj = grid_ij(p, lat, lon)
     ny, nx = arrays[0].shape
     inside = (fi >= 0) & (fi <= nx - 1) & (fj >= 0) & (fj <= ny - 1)
     i0 = np.clip(np.floor(fi).astype(np.int64), 0, nx - 2)
@@ -921,16 +968,16 @@ def newest_published(key, candidates, ttl):
         _newest_lock.release()
 
 
-def field_cycle(mode):
-    """Newest RRFS cycle with the mode's marker hour published."""
+def field_cycle(mode, src='rrfs'):
+    """Newest RRFS cycle (of src's domain) with the mode's marker hour published."""
     now = time.time()
     cands = []
     for back in range(1, 13):
         t = time.gmtime(now - back * 3600)
         if t.tm_hour % 3 == 0:
             date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-            cands.append((date, cycle, FIELD_URL.format(date=date, cycle=cycle, fh=f'{FIELD_MODES[mode]:03d}') + '.idx'))
-    return newest_published(mode, cands, FIELD_CYCLE_TTL_S)
+            cands.append((date, cycle, SOURCES[src]['url'].format(date=date, cycle=cycle, fh=f'{FIELD_MODES[mode]:03d}') + '.idx'))
+    return newest_published(mode if src == 'rrfs' else src + mode, cands, FIELD_CYCLE_TTL_S)
 
 
 def rtma_frames():
@@ -947,6 +994,17 @@ def rtma_frames():
     t0 = calendar.timegm(time.strptime(date + cycle, '%Y%m%d%H%M'))
     return [(time.strftime('%Y%m%d', time.gmtime(t)), time.strftime('%H%M', time.gmtime(t)))
             for t in range(t0 - (RTMA_FRAMES - 1) * 900, t0 + 1, 900)]
+
+
+def rtma_hi_frame():
+    """(date, 'HH') of the newest hourly Hawaii RTMA analysis, (None, None) if none is up."""
+    now = int(time.time()) // 3600 * 3600
+    cands = []
+    for back in range(0, 4):   # published within ~1.5 hours of valid time
+        t = time.gmtime(now - back * 3600)
+        date, cycle = time.strftime('%Y%m%d', t), time.strftime('%H', t)
+        cands.append((date, cycle, RTMA_URL_HI.format(date=date, cycle=cycle) + '.idx'))
+    return newest_published('rtmahi', cands, RTMA_TTL_S)
 
 
 def frame_time(src, date, cycle, fh):
@@ -988,17 +1046,16 @@ def purge_fields():
     messages (older cache formats, abandoned writes) inside the live ones."""
     # One read of the cycle caches for both sets, so a refresh landing in
     # between cannot mark a new cycle known without keeping it
-    cycles, rtma = [field_cycle(m) for m in FIELD_MODES], rtma_frames()
+    cycles, rtma, rtmahi = [field_cycle(m) for m in FIELD_MODES], rtma_frames(), rtma_hi_frame()
     live = {('rrfs', d, c) for d, c in cycles if d} | {('rtma', d, c) for d, c in rtma}
     # The last run's forecast crops serve until the new run's are cut
-    nbm, nbm_prev = forecast_runs('nbm')
-    nbmh, nbmh_prev = forecast_runs('nbmh')
-    live |= {(src, *run) for src, run in (('rrfs', forecast_runs('rrfs')[1]), ('nbm', nbm), ('nbm', nbm_prev),
-                                          ('nbmh', nbmh), ('nbmh', nbmh_prev))
-             if run and run[0]}
+    runs = {src: forecast_runs(src) for src in CROPS}
+    live |= {(src, *run) for src, (cur, prev) in runs.items() for run in (cur, prev) if run and run[0]}
+    if rtmahi[0]:
+        live.add(('rtmahi', *rtmahi))
     keep = {os.path.basename(frame_dir(*f)) for f in live}
     known = ({'rtma'} if rtma else set()) | ({'rrfs'} if all(d for d, _ in cycles) else set()) \
-        | ({'nbm'} if nbm[0] else set()) | ({'nbmh'} if nbmh[0] else set())
+        | ({'rtmahi'} if rtmahi[0] else set()) | {src for src, (cur, _) in runs.items() if src != 'rrfs' and cur[0]}
     for old in os.listdir(FIELD_DIR) if os.path.isdir(FIELD_DIR) else []:
         src = re.match('[a-z]*', old).group()   # dirs are <src><date><cycle>; anything else is an older cache format
         if old not in keep and (src not in SOURCES or src in known):
@@ -1241,7 +1298,6 @@ FORECAST_BATCH = 16                         # tiles cut per pass: bounds memory 
 NOW_FIELDS = ('tmp', 'dpt', 'wind', 'gust', 'cloud')
 _crop_pool = ThreadPoolExecutor(max_workers=4)   # decodes run ~2.4x faster on 4 threads
 _crop_building = set()                           # (src, date, cycle, tile) being cut
-_forecast_run = {src: {'cur': None, 'prev': None} for src in ('rrfs', 'nbm', 'nbmh')}
 _forecast_run_lock = threading.Lock()
 _crop_lock = threading.Lock()
 _tiles_lock = threading.Lock()
@@ -1273,35 +1329,61 @@ CROPS = {'rrfs': (FORECAST_MSGS, range(FIELD_MODES[FORECAST_MODE] + 1), lambda c
          'nbmh': (BLEND_MSGS, range(1, BLEND_LAST + 1), lambda c, m, fh: True)}
 
 
-def daily_cycle():
-    """Newest NBM 00z/12z run with its last hour published."""
+def nbm_hi_has(cycle, msg, fh):
+    """Hawaii daily crop: 2 m temperature every 3 hours (6 past 192), the rest every 6."""
+    if fh % 6:
+        return msg == 'TMP' and fh <= 192
+    return msg in ('TMP', 'POP06') or nbm_has(cycle, msg, fh)
+
+
+# NBM's Hawaii grid carries no snow or ice accumulation. Its 12 h max/min and PoP
+# windows end at 00z and 12z, 2pm and 2am there: lows and daytime PoP come from
+# 3-hourly temperatures and 6 h PoPs instead (see daily_rows)
+CROPS.update({'rrfshi': CROPS['rrfs'], 'nbmhhi': CROPS['nbmh'],
+              'nbmhi': (('TCDC', 'WIND', 'GUST', 'APCP', 'TMAX', 'TMIN', 'TMP', 'POP06'),
+                        range(3, DAILY_LAST + 1, 3), nbm_hi_has)})
+# domain -> (bounding box, crop source per role); a place takes the first domain whose box holds it
+DOMAINS = {'conus': (FIELD_BBOX, {'rrfs': 'rrfs', 'nbm': 'nbm', 'nbmh': 'nbmh'}),
+           'hi': (HI_BBOX, {'rrfs': 'rrfshi', 'nbm': 'nbmhi', 'nbmh': 'nbmhhi'})}
+CROP_ROLE = {src: role for _, srcs in DOMAINS.values() for role, src in srcs.items()}
+_forecast_run = {src: {'cur': None, 'prev': None} for src in CROPS}
+
+
+def place_domain(lat, lon):
+    """Name of the first domain whose box holds the point, None outside all of them."""
+    return next((d for d, ((w, s, e, n), _) in DOMAINS.items() if s <= lat <= n and w <= lon <= e), None)
+
+
+def daily_cycle(src='nbm'):
+    """Newest NBM 00z/12z run (of src's domain) with its last hour published."""
     now = time.time()
     cands = []
     for back in range(0, 48):
         t = time.gmtime(now - back * 3600)
         if t.tm_hour % 12 == 0:
             date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-            cands.append((date, cycle, NBM_URL.format(date=date, cycle=cycle, fh=f'{DAILY_LAST:03d}') + '.idx'))
-    return newest_published('nbm', cands, FIELD_CYCLE_TTL_S)
+            cands.append((date, cycle, SOURCES[src]['url'].format(date=date, cycle=cycle, fh=f'{DAILY_LAST:03d}') + '.idx'))
+    return newest_published(src, cands, FIELD_CYCLE_TTL_S)
 
 
-def blend_cycle():
-    """Newest NBM 00/06/12/18z run with its last blended hour published."""
+def blend_cycle(src='nbmh'):
+    """Newest NBM 00/06/12/18z run (of src's domain) with its last blended hour published."""
     now = time.time()
     cands = []
     for back in range(1, 25):
         t = time.gmtime(now - back * 3600)
         if t.tm_hour % 6 == 0:
             date, cycle = time.strftime('%Y%m%d', t), f'{t.tm_hour:02d}'
-            cands.append((date, cycle, NBM_URL.format(date=date, cycle=cycle, fh=f'{BLEND_LAST:03d}') + '.idx'))
-    return newest_published('nbmh', cands, FIELD_CYCLE_TTL_S)
+            cands.append((date, cycle, SOURCES[src]['url'].format(date=date, cycle=cycle, fh=f'{BLEND_LAST:03d}') + '.idx'))
+    return newest_published(src, cands, FIELD_CYCLE_TTL_S)
 
 
 def forecast_runs(src):
     """(current, previous or None) runs of a crop source. When the run
     changes, the previous one stays until preload has cut the new run's
     crops, so saved places keep a forecast through the switch."""
-    cur = field_cycle(FORECAST_MODE) if src == 'rrfs' else daily_cycle() if src == 'nbm' else blend_cycle()
+    role = CROP_ROLE[src]
+    cur = field_cycle(FORECAST_MODE, src) if role == 'rrfs' else daily_cycle(src) if role == 'nbm' else blend_cycle(src)
     with _forecast_run_lock:
         run = _forecast_run[src]
         if cur[0] and cur != run['cur']:
@@ -1331,7 +1413,7 @@ def crop_box(p, tile):
     t = np.linspace(0, 1, 9)
     lat = np.concatenate([tile[0] + t, tile[0] + t, np.full(9, tile[0]), np.full(9, tile[0] + 1)])
     lon = np.concatenate([np.full(9, tile[1]), np.full(9, tile[1] + 1), tile[1] + t, tile[1] + t])
-    fi, fj = lambert_ij(p, lat, lon)
+    fi, fj = grid_ij(p, lat, lon)
     i0, i1 = max(0, int(np.floor(fi.min())) - 1), min(p['Nx'], int(np.ceil(fi.max())) + 2)
     j0, j1 = max(0, int(np.floor(fj.min())) - 1), min(p['Ny'], int(np.ceil(fj.max())) + 2)
     return (j0, j1, i0, i1) if i1 - i0 > 1 and j1 - j0 > 1 else None
@@ -1417,7 +1499,7 @@ def load_crop(path):
 def crop_series(crop, lat, lon):
     """Bilinear value of every message at every hour at one point: (msgs, hours)."""
     data, i0, j0, p = crop
-    fi, fj = lambert_ij(p, lat, lon)
+    fi, fj = grid_ij(p, lat, lon)
     fi, fj = fi - i0, fj - j0
     ny, nx = data.shape[2:]
     if not (0 <= fi <= nx - 1 and 0 <= fj <= ny - 1):
@@ -1428,9 +1510,9 @@ def crop_series(crop, lat, lon):
     return (d[..., 0, 0] * (1 - wi) + d[..., 0, 1] * wi) * (1 - wj) + (d[..., 1, 0] * (1 - wi) + d[..., 1, 1] * wi) * wj
 
 
-def hourly_series(date, cycle, lat, lon):
+def hourly_series(date, cycle, lat, lon, src='rrfs'):
     """Columnar hourly forecast for the overview, or None outside the grid."""
-    crop = load_crop(crop_path('rrfs', date, cycle, forecast_tile(lat, lon)))
+    crop = load_crop(crop_path(src, date, cycle, forecast_tile(lat, lon)))
     s = crop_series(crop, lat, lon)
     if s is None:
         return None
@@ -1481,11 +1563,26 @@ def daily_rows(start, hours, v, tz=DAILY_TZ):
       wind/gust max of the 6-hourly 10 m speeds, mph; cloud their mean cover, %
       ptype     on days with 0.01 in or more: 'rain', 'snow' or 'ice' (freezing
                 rain), whichever has the largest liquid share, snow at 10:1
+    Where 2 m temperature (TMP) and 6 h PoP (POP06) samples are given (Hawaii,
+    whose 12 h windows end at 2pm and 2am), lo also takes the samples before
+    local noon and hi those from 10am to 3pm, and the PoPs are 6 h windows
+    whose middle is 6am-6pm local (day) or not (night, filed under the next morning).
     Days run from the first with a hi or lo to the last with a hi."""
     days = {}
     for msg, vals in v.items():
         for fh, x in zip(hours, vals):
             if np.isnan(x):
+                continue
+            if msg in ('TMP', 'POP06'):
+                at = datetime.fromtimestamp(start + (fh - (3 if msg == 'POP06' else 0)) * 3600, tz)
+                if msg == 'TMP':
+                    # not past 3pm: a 00z run's lone 5pm sample would make a partial first day
+                    keys = ['TMIN'] * (at.hour < 12) + ['TMAX'] * (10 <= at.hour <= 15)
+                else:
+                    keys = ['pop_day' if 6 <= at.hour < 18 else 'pop_night']
+                    at += timedelta(hours=0 if keys[0] == 'pop_day' else 6)
+                for key in keys:
+                    days.setdefault(at.strftime('%Y-%m-%d'), {}).setdefault(key, []).append(float(x))
                 continue
             key = msg if msg != 'POP12' else 'pop_day' if time.gmtime(start + fh * 3600).tm_hour == 0 else 'pop_night'
             back = 0 if key in ('TMIN', 'pop_night') else DAILY_SPAN.get(msg, 0) / 2
@@ -1513,25 +1610,26 @@ def daily_rows(start, hours, v, tz=DAILY_TZ):
     return rows[first:last + 1]
 
 
-def daily_series(date, cycle, lat, lon, tz=DAILY_TZ):
+def daily_series(date, cycle, lat, lon, tz=DAILY_TZ, src='nbm'):
     """NBM daily rows at a point on tz's calendar, or None outside the grid."""
-    s = crop_series(load_crop(crop_path('nbm', date, cycle, forecast_tile(lat, lon))), lat, lon)
-    return None if s is None else daily_rows(frame_time('nbm', date, cycle, 0), CROPS['nbm'][1], dict(zip(DAILY_MSGS, s)), tz)
+    s = crop_series(load_crop(crop_path(src, date, cycle, forecast_tile(lat, lon))), lat, lon)
+    msgs, hours, _ = CROPS[src]
+    return None if s is None else daily_rows(frame_time(src, date, cycle, 0), hours, dict(zip(msgs, s)), tz)
 
 
-def blend_hourly(hourly, date, cycle, lat, lon):
+def blend_hourly(hourly, date, cycle, lat, lon, src='nbmh'):
     """The hourly series with NBM's temperature, dew point, sky and wind
     over the hours its run covers; RRFS where NBM has no value."""
-    s = crop_series(load_crop(crop_path('nbmh', date, cycle, forecast_tile(lat, lon))), lat, lon)
+    s = crop_series(load_crop(crop_path(src, date, cycle, forecast_tile(lat, lon))), lat, lon)
     if s is None:
         return hourly
     v = dict(zip(BLEND_MSGS, s))
-    t0 = frame_time('nbmh', date, cycle, 0)
+    t0 = frame_time(src, date, cycle, 0)
     put = {'tmp': K_TO_F(v['TMP']), 'dpt': K_TO_F(v['DPT']), 'cloud': v['TCDC'],
            'wind': v['WIND'] * 2.23694, 'gust': v['GUST'] * 2.23694}
     out = {k: list(x) if isinstance(x, list) else x for k, x in hourly.items()}
     last = None
-    for n, fh in enumerate(CROPS['nbmh'][1]):
+    for n, fh in enumerate(CROPS[src][1]):
         i = (t0 + fh * 3600 - hourly['start']) // 3600
         if not 0 <= i < len(hourly['tmp']):
             continue
@@ -1630,22 +1728,33 @@ def now_frame():
 
 def forecast(lat, lon, tz=DAILY_TZ):
     """Overview payload: observed now (RTMA), hourly RRFS series, daily NBM
-    rows from today on the place's calendar (zone tz), nearest plume station."""
-    frame = now_frame()
+    rows from today on the place's calendar (zone tz), nearest plume station.
+    Each from the grids of the place's domain (lower 48 or Hawaii)."""
+    dom = place_domain(lat, lon)
+    src = DOMAINS[dom][1]
+    if dom == 'conus':
+        frame = now_frame()
+    else:
+        hi = rtma_hi_frame()
+        frame = hi[0] and ('rtmahi', *hi, 0)
     now = None
     if frame:
-        vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
+        try:
+            vals = point_values(frame, lat, lon, None, always=NOW_FIELDS)
+        except Exception as err:  # noqa: BLE001 - an analysis S3 could not serve leaves the forecast without a now
+            print(f'[FORECAST] now {frame}: {err}', flush=True)
+            vals = None
         now = {**vals, 'time': frame_time(*frame)} if vals else None
     tile = forecast_tile(lat, lon)
-    (hrun, building), (drun, daily_building) = serving_run('rrfs', tile), serving_run('nbm', tile)
-    brun = serving_run('nbmh', tile)[0] if hrun else None
+    (hrun, building), (drun, daily_building) = serving_run(src['rrfs'], tile), serving_run(src['nbm'], tile)
+    brun = serving_run(src['nbmh'], tile)[0] if hrun else None
     # Tiles the model grids do not reach get observations only, and are not kept
     if hrun or building or drun or daily_building:
         note_tile(tile)
-    hourly = hrun and hourly_series(*hrun, lat, lon)
+    hourly = hrun and hourly_series(*hrun, lat, lon, src['rrfs'])
     if hourly and brun:
-        hourly = blend_hourly(hourly, *brun, lat, lon)
-    daily = drun and daily_series(*drun, lat, lon, tz)
+        hourly = blend_hourly(hourly, *brun, lat, lon, src['nbmh'])
+    daily = drun and daily_series(*drun, lat, lon, tz, src['nbm'])
     if daily:
         today = datetime.now(tz).strftime('%Y-%m-%d')
         daily = [d for d in daily if d['date'] >= today]
@@ -3193,7 +3302,7 @@ def hrrr_poller():
 def hrrr_read(q, kind, p, lat, lon, radius_km):
     """(median liquid mm/h, share wet, kind at the center) of a step (q, kind: (ny, nx))
     in radius_km of lat/lon; NONE off the grid."""
-    fi, fj = lambert_ij(p, np.array([lat]), np.array([lon]))
+    fi, fj = grid_ij(p, np.array([lat]), np.array([lon]))
     i, j = int(round(float(fi[0]))), int(round(float(fj[0])))
     R = max(1.0, radius_km * 1000 / p['DxInMetres'])
     n = int(math.ceil(R))
@@ -3513,7 +3622,7 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon = float(q.get('lat', ['nan'])[0]), float(q.get('lon', ['nan'])[0])
             except ValueError:
                 lat = lon = math.nan
-            if not (FIELD_BBOX[1] <= lat <= FIELD_BBOX[3] and FIELD_BBOX[0] <= lon <= FIELD_BBOX[2]):
+            if place_domain(lat, lon) is None:
                 return self.send_json(400, {'error': 'lat/lon outside the forecast area'})
             try:
                 return self.send_json(200, forecast(round(lat, 4), round(lon, 4), place_zone(q.get('tz', [''])[0])))
